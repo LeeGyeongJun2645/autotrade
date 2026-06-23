@@ -1,0 +1,16 @@
+# 모든 텍스트 파일 → LF로 통일 (서버 배포 시 Linux와 호환)
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.jsx text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+
+# 바이너리 파일 — 변환 없음
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary
