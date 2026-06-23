@@ -44,3 +44,4 @@ htmlcov/
 node_modules/
 frontend/dist/
 frontend/.env
+.env.example.env
