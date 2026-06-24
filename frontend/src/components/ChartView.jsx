@@ -4,11 +4,19 @@ import { api } from '../api.js'
 
 const UPBIT_TICKERS = ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL', 'KRW-DOGE']
 const INTERVALS = [
-  { value: 'minutes/60', label: '1시간' },
-  { value: 'days',       label: '일봉' },
-  { value: 'weeks',      label: '주봉' },
-  { value: 'months',     label: '월봉' },
+  { value: 'minutes/5',   label: '5분' },
+  { value: 'minutes/15',  label: '15분' },
+  { value: 'minutes/30',  label: '30분' },
+  { value: 'minutes/60',  label: '1시간' },
+  { value: 'minutes/240', label: '4시간' },
+  { value: 'days',        label: '일봉' },
+  { value: 'weeks',       label: '주봉' },
+  { value: 'months',      label: '월봉' },
 ]
+
+// 분봉/시간봉은 Unix timestamp, 일봉 이상은 날짜 문자열
+const toChartTime = (dateStr, isIntraday) =>
+  isIntraday ? Math.floor(new Date(dateStr).getTime() / 1000) : dateStr.slice(0, 10)
 const LEVEL_STYLES = {
   BUY:  { dot: 'bg-green-400',  text: 'text-green-400' },
   SELL: { dot: 'bg-red-400',    text: 'text-red-400' },
@@ -72,9 +80,10 @@ function CandleChart({ ticker, interval, positions }) {
     containerRef.current.innerHTML = ''
 
     try {
+      const isIntraday = interval.startsWith('minutes')
       const data = await api.get(`/chart/upbit/${ticker}?interval=${encodeURIComponent(interval)}&count=150`)
       const candles = [...data].reverse().map((d) => ({
-        time: d.date.slice(0, 10),
+        time: toChartTime(d.date, isIntraday),
         open: d.open,
         high: d.high,
         low: d.low,
@@ -183,30 +192,30 @@ export default function ChartView({ sse }) {
 
   return (
     <div className="space-y-4">
-      {/* 종목 + 인터벌 선택 */}
-      <div className="flex gap-2 flex-wrap">
-        <div className="flex gap-1 bg-gray-800 rounded-lg p-1 border border-gray-700">
-          {UPBIT_TICKERS.map((t) => (
-            <button
-              key={t}
-              onClick={() => setTicker(t)}
-              className={`px-3 py-1.5 rounded-md text-xs font-mono font-medium transition-colors ${ticker === t ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
-            >
-              {t.replace('KRW-', '')}
-            </button>
-          ))}
-        </div>
-        <div className="flex gap-1 bg-gray-800 rounded-lg p-1 border border-gray-700">
-          {INTERVALS.map((iv) => (
-            <button
-              key={iv.value}
-              onClick={() => setInterval(iv.value)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${interval === iv.value ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'}`}
-            >
-              {iv.label}
-            </button>
-          ))}
-        </div>
+      {/* 종목 선택 */}
+      <div className="flex gap-1 bg-gray-800 rounded-lg p-1 border border-gray-700 w-fit">
+        {UPBIT_TICKERS.map((t) => (
+          <button
+            key={t}
+            onClick={() => setTicker(t)}
+            className={`px-3 py-1.5 rounded-md text-xs font-mono font-medium transition-colors ${ticker === t ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
+          >
+            {t.replace('KRW-', '')}
+          </button>
+        ))}
+      </div>
+
+      {/* 인터벌 선택 */}
+      <div className="flex gap-1 bg-gray-800 rounded-lg p-1 border border-gray-700 w-fit">
+        {INTERVALS.map((iv) => (
+          <button
+            key={iv.value}
+            onClick={() => setInterval(iv.value)}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${interval === iv.value ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'}`}
+          >
+            {iv.label}
+          </button>
+        ))}
       </div>
 
       <CandleChart ticker={ticker} interval={interval} positions={positions} />
