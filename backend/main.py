@@ -16,6 +16,9 @@
     POST /scheduler/start        스케줄러 시작
     POST /scheduler/stop         스케줄러 중지
     GET  /stream                 SSE — 5초마다 포지션 스냅샷 스트리밍
+    GET  /ml/signal/{ticker}     XGBoost ML 신호 조회
+    POST /ml/train               ML 모델 학습 트리거
+    GET  /ml/status              ML 모델 학습 상태
 """
 
 import asyncio
@@ -338,6 +341,54 @@ async def get_trade_history(limit: int = 50, offset: int = 0):
     return await get_trades(min(limit, 200), offset)
 
 
+# ── ML 신호 ────────────────────────────────────────────────────
+
+class TrainRequest(BaseModel):
+    tickers: list[str] | None = None
+
+
+@app.get("/ml/signal/{ticker}", tags=["ML"])
+async def get_ml_signal(ticker: str):
+    """XGBoost 기반 ML 매수/매도 신호 조회.
+
+    모델이 없으면 404. 먼저 POST /ml/train 호출 필요.
+    """
+    from dataclasses import asdict as _asdict
+
+    from backend.ml.model import XGBSignalModel
+
+    try:
+        ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=200)
+        model = XGBSignalModel(ticker)
+        result = await model.predict(ohlcv, settings.cryptopanic_token)
+        return _asdict(result)
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@app.post("/ml/train", tags=["ML"])
+async def trigger_ml_train(body: TrainRequest):
+    """XGBoost 모델 학습 트리거.
+
+    tickers 생략 시 기본 5개 코인(BTC/ETH/XRP/SOL/DOGE) 학습.
+    학습 완료까지 수십 초 소요 가능.
+    """
+    from backend.ml.trainer import train_all
+
+    results = await train_all(body.tickers)
+    return {"trained": results}
+
+
+@app.get("/ml/status", tags=["ML"])
+async def get_ml_status():
+    """ML 모델 학습 상태 (마지막 학습 시각, 정확도 등) 조회."""
+    from backend.ml.trainer import get_status
+
+    return get_status()
+
+
 # ── SSE 실시간 스트리밍 ──────────────────────────────────────────
 
 @app.get("/stream", tags=["Stream"])
@@ -364,6 +415,11 @@ async def stream(request: Request):
             yield {
                 "event": "simlog",
                 "data": json.dumps(sim_log.get_logs(50), ensure_ascii=False),
+            }
+
+            yield {
+                "event": "mlsignal",
+                "data": json.dumps(scheduler.get_ml_signals(), ensure_ascii=False),
             }
 
             await asyncio.sleep(5)

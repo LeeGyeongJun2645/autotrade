@@ -44,6 +44,7 @@ class TradingScheduler:
         self._kis_symbols: list[str] = []
         self._upbit_tickers: list[str] = []
         self._lock = asyncio.Lock()
+        self._ml_signals: dict[str, dict] = {}  # {symbol: {"signal": ..., "buy_prob": ..., "news_score": ...}}
 
     # ── 종목 관리 ─────────────────────────────────────────────────
 
@@ -66,6 +67,10 @@ class TradingScheduler:
     def get_positions(self) -> dict[str, Position]:
         """현재 보유 포지션 스냅샷 반환."""
         return dict(self._positions)
+
+    def get_ml_signals(self) -> dict[str, dict]:
+        """최근 ML 신호 스냅샷 반환."""
+        return dict(self._ml_signals)
 
     # ── 스케줄러 생명주기 ──────────────────────────────────────────
 
@@ -111,6 +116,33 @@ class TradingScheduler:
             self._daily_report,
             CronTrigger(hour=8, minute=0, timezone=KST),
             id="daily_report",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # ML 모델 자동 재학습: 매주 월요일 07:00 KST
+        self._scheduler.add_job(
+            self._weekly_ml_train,
+            CronTrigger(day_of_week="mon", hour=7, minute=0, timezone=KST),
+            id="weekly_ml_train",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # ML 신호 체크 (코인): 매 정각 24/7
+        self._scheduler.add_job(
+            self._ml_upbit_tick,
+            CronTrigger(minute=0, timezone=KST),
+            id="ml_upbit_tick",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # ML 신호 체크 (주식): 평일 장중 30분마다
+        self._scheduler.add_job(
+            self._ml_kis_tick,
+            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/30", timezone=KST),
+            id="ml_kis_tick",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -439,6 +471,96 @@ class TradingScheduler:
             await send_daily_report()
         except Exception:
             logger.exception("[리포트] 일일 리포트 실행 중 예외")
+
+    async def _weekly_ml_train(self) -> None:
+        """매주 월요일 07:00 — 업비트 ML 모델 자동 재학습."""
+        try:
+            from backend.ml.trainer import train_all
+            targets = self._upbit_tickers if self._upbit_tickers else None
+            results = await train_all(targets)
+            logger.info("[ML] 주간 재학습 완료: %d개 모델", len(results))
+            sim_log.push("ML", f"주간 재학습 완료: {len(results)}개 모델", "INFO")
+        except Exception:
+            logger.exception("[ML] 주간 재학습 중 예외")
+
+    async def _ml_upbit_tick(self) -> None:
+        """매 정각 — 감시 중인 업비트 티커 ML 신호 체크 및 텔레그램 알림."""
+        from backend.api import upbit
+        from backend.ml.model import XGBSignalModel
+
+        tickers = self._upbit_tickers or ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"]
+        for ticker in tickers:
+            try:
+                ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=200)
+                model = XGBSignalModel(ticker)
+                result = await model.predict(ohlcv, settings.cryptopanic_token)
+
+                prev = self._ml_signals.get(ticker, {})
+                prev_signal = prev.get("signal")
+                self._ml_signals[ticker] = {
+                    "signal":     result.signal,
+                    "buy_prob":   result.buy_prob,
+                    "news_score": result.news_score,
+                    "checked_at": datetime.now(KST).strftime("%H:%M"),
+                }
+
+                signal_changed = prev_signal and prev_signal != result.signal
+                is_notable = result.signal in ("buy", "strong_buy", "strong_sell")
+
+                level = "BUY" if "buy" in result.signal else ("SELL" if "sell" in result.signal else "INFO")
+                sim_log.push(
+                    ticker,
+                    f"[ML] {result.signal} | 확률 {result.buy_prob:.1%} | 뉴스 {result.news_score:+.3f}",
+                    level,
+                )
+
+                if signal_changed or is_notable:
+                    await telegram.notify_ml_signal(
+                        ticker, result.signal, result.buy_prob,
+                        result.news_score, prev_signal if signal_changed else None,
+                    )
+
+            except RuntimeError:
+                # 모델 미학습 상태 — 조용히 skip
+                pass
+            except Exception:
+                logger.exception("[ML][%s] 업비트 신호 체크 실패", ticker)
+
+    async def _ml_kis_tick(self) -> None:
+        """평일 장중 30분마다 — 감시 중인 KIS 종목 ML 신호 체크."""
+        from backend.ml.model import XGBSignalModel
+        from backend.ml.news import get_sentiment_score
+
+        # KIS는 일봉 데이터 기반, ML 예측은 동일 모델 구조 사용
+        # 주식용 모델이 없으면 뉴스 감성만 체크
+        for symbol in list(self._kis_symbols):
+            try:
+                news_score = await get_sentiment_score(symbol)
+                prev = self._ml_signals.get(symbol, {})
+                prev_score = prev.get("news_score", 0.0)
+
+                self._ml_signals[symbol] = {
+                    "signal":     "hold",
+                    "buy_prob":   0.5,
+                    "news_score": news_score,
+                    "checked_at": datetime.now(KST).strftime("%H:%M"),
+                }
+
+                # 뉴스 감성이 크게 변했을 때 알림 (±0.3 이상 변화)
+                score_shift = abs(news_score - prev_score)
+                if score_shift >= 0.3:
+                    direction = "긍정적" if news_score > prev_score else "부정적"
+                    sim_log.push(
+                        symbol,
+                        f"[뉴스] 감성 변화 {prev_score:+.3f} → {news_score:+.3f} ({direction})",
+                        "WARN",
+                    )
+                    await telegram.notify_ml_signal(
+                        symbol, "hold", 0.5, news_score,
+                    )
+
+            except Exception:
+                logger.exception("[ML][%s] KIS 신호 체크 실패", symbol)
 
 
 # 싱글톤 인스턴스 — FastAPI main.py 에서 import 해서 사용

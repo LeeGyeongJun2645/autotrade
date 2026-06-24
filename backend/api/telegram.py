@@ -131,6 +131,34 @@ async def notify_error(context: str, error: Exception) -> None:
     )
 
 
+async def notify_ml_signal(
+    symbol: str,
+    signal: str,
+    buy_prob: float,
+    news_score: float,
+    prev_signal: str | None = None,
+) -> None:
+    """ML 신호 변화 알림."""
+    _LABEL = {
+        "strong_buy":  "강력매수 🟢🟢",
+        "buy":         "매수 🟢",
+        "hold":        "관망 ⚪",
+        "sell":        "매도 🔴",
+        "strong_sell": "강력매도 🔴🔴",
+    }
+    cur = _LABEL.get(signal, signal)
+    prev_str = f"{_LABEL.get(prev_signal, prev_signal)} → " if prev_signal else ""
+    news_arrow = "📈" if news_score > 0.05 else ("📉" if news_score < -0.05 else "➖")
+
+    await _send(
+        f"🤖 <b>ML 신호</b>\n"
+        f"종목: <code>{symbol}</code>\n"
+        f"신호: {prev_str}<b>{cur}</b>\n"
+        f"매수확률: {buy_prob:.1%}\n"
+        f"뉴스감성: {news_arrow} {news_score:+.3f}"
+    )
+
+
 async def notify_message(text: str) -> None:
     """커스텀 메시지 발송 (디버그·수동 알림용)."""
     await _send(text)

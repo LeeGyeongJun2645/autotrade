@@ -29,8 +29,33 @@ function ProfitBadge({ rate }) {
   )
 }
 
+const SIGNAL_BADGE = {
+  strong_buy:  { label: '강력매수', cls: 'bg-green-800 text-green-300 border-green-600' },
+  buy:         { label: '매수',     cls: 'bg-green-900/60 text-green-400 border-green-700' },
+  hold:        { label: '관망',     cls: 'bg-gray-700 text-gray-400 border-gray-600' },
+  sell:        { label: '매도',     cls: 'bg-red-900/60 text-red-400 border-red-700' },
+  strong_sell: { label: '강력매도', cls: 'bg-red-800 text-red-300 border-red-600' },
+}
+
+function MLSignalRow({ symbol, data }) {
+  const b = SIGNAL_BADGE[data.signal] ?? SIGNAL_BADGE.hold
+  return (
+    <tr className="border-b border-gray-700/50 hover:bg-gray-700/20">
+      <td className="px-4 py-2 font-mono text-sm text-white">{symbol}</td>
+      <td className="px-4 py-2">
+        <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${b.cls}`}>{b.label}</span>
+      </td>
+      <td className="px-4 py-2 font-mono text-sm">{(data.buy_prob * 100).toFixed(1)}%</td>
+      <td className={`px-4 py-2 font-mono text-sm ${data.news_score > 0.05 ? 'text-green-400' : data.news_score < -0.05 ? 'text-red-400' : 'text-gray-400'}`}>
+        {data.news_score > 0 ? '+' : ''}{data.news_score.toFixed(3)}
+      </td>
+      <td className="px-4 py-2 text-xs text-gray-500">{data.checked_at ?? '-'}</td>
+    </tr>
+  )
+}
+
 export default function Dashboard({ sse }) {
-  const { positions, connected, error } = sse
+  const { positions, mlSignals, connected, error } = sse
   const [kisBalance, setKisBalance] = useState(null)
   const [upbitBalance, setUpbitBalance] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -101,6 +126,32 @@ export default function Dashboard({ sse }) {
           )}
         </BalanceCard>
       </div>
+
+      {/* ML 신호 현황 */}
+      {Object.keys(mlSignals).length > 0 && (
+        <div className="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-700 flex items-center gap-2">
+            <span className="text-sm font-semibold">ML 신호 현황</span>
+            <span className="text-xs text-gray-500">매 정각 자동 갱신</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-gray-400 text-xs border-b border-gray-700">
+                  {['종목', '신호', '매수확률', '뉴스감성', '갱신'].map((h) => (
+                    <th key={h} className="text-left px-4 py-2 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(mlSignals).map(([symbol, data]) => (
+                  <MLSignalRow key={symbol} symbol={symbol} data={data} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* 현재 포지션 */}
       <div className="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">

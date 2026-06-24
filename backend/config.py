@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
 
+    # ── ML / 뉴스 감성 (미설정 시 뉴스 기능 비활성화) ────────────────
+    cryptopanic_token: Optional[str] = None
+
     # ── 데이터베이스 ─────────────────────────────────────────────
     database_url: str = "sqlite+aiosqlite:///./autotrade.db"
 

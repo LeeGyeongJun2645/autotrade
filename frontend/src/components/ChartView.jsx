@@ -2,6 +2,14 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { createChart, CandlestickSeries } from 'lightweight-charts'
 import { api } from '../api.js'
 
+const SIGNAL_STYLE = {
+  strong_buy:  { label: '강력매수', color: 'text-green-400',  bg: 'bg-green-900/40 border-green-700' },
+  buy:         { label: '매수',     color: 'text-green-300',  bg: 'bg-green-900/20 border-green-800' },
+  hold:        { label: '관망',     color: 'text-gray-400',   bg: 'bg-gray-700/40 border-gray-600'   },
+  sell:        { label: '매도',     color: 'text-red-300',    bg: 'bg-red-900/20 border-red-800'     },
+  strong_sell: { label: '강력매도', color: 'text-red-400',    bg: 'bg-red-900/40 border-red-700'     },
+}
+
 const UPBIT_TICKERS = ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL', 'KRW-DOGE']
 const INTERVALS = [
   { value: 'minutes/1',   label: '1분' },
@@ -60,8 +68,87 @@ function SimLogPanel({ logs, connected }) {
   )
 }
 
+// ── ML 신호 카드 ────────────────────────────────────────────────
+function MLSignalCard({ ticker, onLoad }) {
+  const [signal, setSignal] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [training, setTraining] = useState(false)
+
+  const fetchSignal = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await api.get(`/ml/signal/${encodeURIComponent(ticker)}`)
+      setSignal(data)
+      onLoad?.(data)
+    } catch {
+      setSignal(null)
+      onLoad?.(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [ticker, onLoad])
+
+  useEffect(() => { fetchSignal() }, [fetchSignal])
+
+  const handleTrain = async () => {
+    setTraining(true)
+    try {
+      await api.post('/ml/train', { tickers: [ticker] })
+      await fetchSignal()  // 학습 완료 후 즉시 예측
+    } finally {
+      setTraining(false)
+    }
+  }
+
+  const s = signal ? (SIGNAL_STYLE[signal.signal] ?? SIGNAL_STYLE.hold) : null
+
+  return (
+    <div className={`rounded-xl border p-4 flex items-center justify-between ${s ? s.bg : 'bg-gray-800 border-gray-700'}`}>
+      <div className="flex items-center gap-4">
+        <div>
+          <p className="text-xs text-gray-400 mb-1">ML 신호 · {ticker}</p>
+          {loading ? (
+            <p className="text-sm text-gray-500">분석 중...</p>
+          ) : signal ? (
+            <div className="flex items-center gap-3">
+              <span className={`font-bold text-lg ${s.color}`}>{s.label}</span>
+              <span className="text-xs text-gray-400">
+                매수 확률 <span className="font-mono text-white">{(signal.buy_prob * 100).toFixed(1)}%</span>
+              </span>
+              {signal.news_score !== 0 && (
+                <span className="text-xs text-gray-400">
+                  뉴스 <span className={`font-mono ${signal.news_score > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {signal.news_score > 0 ? '+' : ''}{signal.news_score.toFixed(2)}
+                  </span>
+                </span>
+              )}
+              <span className={`text-xs px-1.5 py-0.5 rounded border border-gray-600 text-gray-400`}>
+                신뢰도: {signal.confidence}
+              </span>
+            </div>
+          ) : (
+            <p className="text-sm text-yellow-400">모델 없음 — 학습 버튼 클릭</p>
+          )}
+        </div>
+      </div>
+      <div className="flex gap-2">
+        {signal && (
+          <button onClick={fetchSignal} disabled={loading}
+            className="text-xs px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors disabled:opacity-50">
+            새로고침
+          </button>
+        )}
+        <button onClick={handleTrain} disabled={training}
+          className="text-xs px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white transition-colors disabled:opacity-50">
+          {training ? '학습 중...' : '모델 학습'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── 캔들 차트 ────────────────────────────────────────────────────
-function CandleChart({ ticker, interval, positions }) {
+function CandleChart({ ticker, interval, positions, mlSignal }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const [loading, setLoading] = useState(false)
@@ -109,16 +196,42 @@ function CandleChart({ ticker, interval, positions }) {
 
       series.setData(candles)
 
-      // 포지션 매수 마커
+      // 마커 조립
+      const markers = []
       const pos = posRef.current[ticker]
       if (pos?.opened_at) {
-        series.setMarkers([{
-          time: pos.opened_at.slice(0, 10),
+        markers.push({
+          time: isIntraday
+            ? Math.floor(new Date(pos.opened_at).getTime() / 1000)
+            : pos.opened_at.slice(0, 10),
           position: 'belowBar',
           color: '#22c55e',
           shape: 'arrowUp',
           text: `매수 ${Number(pos.entry_price).toLocaleString('ko-KR')}`,
-        }])
+        })
+      }
+      if (mlSignal && candles.length > 0) {
+        const lastTime = candles.at(-1).time
+        if (mlSignal.signal === 'strong_buy' || mlSignal.signal === 'buy') {
+          markers.push({
+            time: lastTime,
+            position: 'belowBar',
+            color: mlSignal.signal === 'strong_buy' ? '#16a34a' : '#4ade80',
+            shape: 'circle',
+            text: `ML ${Math.round(mlSignal.buy_prob * 100)}%`,
+          })
+        } else if (mlSignal.signal === 'strong_sell' || mlSignal.signal === 'sell') {
+          markers.push({
+            time: lastTime,
+            position: 'aboveBar',
+            color: mlSignal.signal === 'strong_sell' ? '#dc2626' : '#f87171',
+            shape: 'circle',
+            text: `ML ${Math.round((1 - mlSignal.buy_prob) * 100)}%`,
+          })
+        }
+      }
+      if (markers.length > 0) {
+        series.setMarkers(markers)
       }
 
       chart.timeScale().fitContent()
@@ -143,7 +256,7 @@ function CandleChart({ ticker, interval, positions }) {
     } finally {
       setLoading(false)
     }
-  }, [ticker, interval]) // positions 제외 → 포지션 변경 시 차트 재생성 안 함
+  }, [ticker, interval, mlSignal]) // mlSignal 로드 완료 시 마커 반영
 
   useEffect(() => {
     buildChart()
@@ -189,7 +302,14 @@ function CandleChart({ ticker, interval, positions }) {
 export default function ChartView({ sse }) {
   const [ticker, setTicker] = useState('KRW-BTC')
   const [interval, setInterval] = useState('days')
+  const [mlSignal, setMlSignal] = useState(null)
   const { simLogs, connected, positions } = sse
+
+  // 티커 변경 시 ML 신호 초기화
+  const handleTickerChange = (t) => {
+    setTicker(t)
+    setMlSignal(null)
+  }
 
   return (
     <div className="space-y-4">
@@ -198,13 +318,16 @@ export default function ChartView({ sse }) {
         {UPBIT_TICKERS.map((t) => (
           <button
             key={t}
-            onClick={() => setTicker(t)}
+            onClick={() => handleTickerChange(t)}
             className={`px-3 py-1.5 rounded-md text-xs font-mono font-medium transition-colors ${ticker === t ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
           >
             {t.replace('KRW-', '')}
           </button>
         ))}
       </div>
+
+      {/* ML 신호 카드 */}
+      <MLSignalCard ticker={ticker} onLoad={setMlSignal} />
 
       {/* 인터벌 선택 */}
       <div className="flex gap-1 bg-gray-800 rounded-lg p-1 border border-gray-700 w-fit">
@@ -219,7 +342,7 @@ export default function ChartView({ sse }) {
         ))}
       </div>
 
-      <CandleChart ticker={ticker} interval={interval} positions={positions} />
+      <CandleChart ticker={ticker} interval={interval} positions={positions} mlSignal={mlSignal} />
       <SimLogPanel logs={simLogs} connected={connected} />
     </div>
   )
