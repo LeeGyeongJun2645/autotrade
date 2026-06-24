@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from './api.js'
+import { useSSE } from './hooks/useSSE.js'
 import Dashboard from './components/Dashboard.jsx'
 import StrategyControl from './components/StrategyControl.jsx'
 import TradeHistory from './components/TradeHistory.jsx'
@@ -15,6 +16,7 @@ const TABS = [
 export default function App() {
   const [tab, setTab] = useState('dashboard')
   const [mode, setMode] = useState(null)
+  const sse = useSSE()  // SSE 연결을 App 레벨에서 1개만 유지
 
   useEffect(() => {
     api.get('/health')
@@ -24,7 +26,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100">
-      {/* 헤더 */}
       <header className="bg-gray-800 border-b border-gray-700 sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -35,8 +36,6 @@ export default function App() {
               </span>
             )}
           </div>
-
-          {/* 탭 네비게이션 */}
           <nav className="flex gap-1">
             {TABS.map((t) => (
               <button
@@ -51,10 +50,9 @@ export default function App() {
         </div>
       </header>
 
-      {/* 메인 콘텐츠 */}
       <main className="max-w-6xl mx-auto px-6 py-6">
-        {tab === 'dashboard' && <Dashboard />}
-        {tab === 'chart' && <ChartView />}
+        {tab === 'dashboard' && <Dashboard sse={sse} />}
+        {tab === 'chart' && <ChartView sse={sse} />}
         {tab === 'strategy' && <StrategyControl />}
         {tab === 'backtest' && <TradeHistory />}
       </main>

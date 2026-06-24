@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api.js'
-import { useSSE } from '../hooks/useSSE.js'
 
 function BalanceCard({ title, children }) {
   return (
@@ -30,8 +29,8 @@ function ProfitBadge({ rate }) {
   )
 }
 
-export default function Dashboard() {
-  const { positions, connected, error } = useSSE()
+export default function Dashboard({ sse }) {
+  const { positions, connected, error } = sse
   const [kisBalance, setKisBalance] = useState(null)
   const [upbitBalance, setUpbitBalance] = useState(null)
   const [loading, setLoading] = useState(true)
