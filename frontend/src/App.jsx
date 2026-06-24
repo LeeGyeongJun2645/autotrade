@@ -3,9 +3,11 @@ import { api } from './api.js'
 import Dashboard from './components/Dashboard.jsx'
 import StrategyControl from './components/StrategyControl.jsx'
 import TradeHistory from './components/TradeHistory.jsx'
+import ChartView from './components/ChartView.jsx'
 
 const TABS = [
   { id: 'dashboard', label: '대시보드' },
+  { id: 'chart', label: '차트·시뮬' },
   { id: 'strategy', label: '전략 관리' },
   { id: 'backtest', label: '백테스트' },
 ]
@@ -52,6 +54,7 @@ export default function App() {
       {/* 메인 콘텐츠 */}
       <main className="max-w-6xl mx-auto px-6 py-6">
         {tab === 'dashboard' && <Dashboard />}
+        {tab === 'chart' && <ChartView />}
         {tab === 'strategy' && <StrategyControl />}
         {tab === 'backtest' && <TradeHistory />}
       </main>

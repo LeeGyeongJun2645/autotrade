@@ -37,6 +37,7 @@ from backend.backtest.engine import SUPPORTED_STRATEGIES, run_backtest
 from backend.config import settings
 from backend.core.daily_report import send_daily_report
 from backend.core.scheduler import scheduler
+from backend.core import sim_log
 from backend.db.database import init_db
 from backend.models.trade import get_trades
 
@@ -298,6 +299,32 @@ async def trigger_daily_report():
     return {"status": "sent"}
 
 
+# ── 차트 데이터 ──────────────────────────────────────────────────
+
+@app.get("/chart/upbit/{ticker}", tags=["Chart"])
+async def get_upbit_chart(ticker: str, interval: str = "days", count: int = 100):
+    """업비트 OHLCV 차트 데이터 조회."""
+    try:
+        return await upbit.get_ohlcv(ticker, interval=interval, count=min(count, 200))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@app.get("/chart/kis/{symbol}", tags=["Chart"])
+async def get_kis_chart(symbol: str, count: int = 100):
+    """KIS 일봉 OHLCV 차트 데이터 조회."""
+    try:
+        return await kis.get_daily_ohlcv(symbol, count=min(count, 200))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@app.get("/simlog", tags=["Chart"])
+async def get_simlog(n: int = 100):
+    """시뮬레이션 로그 최신 n개 조회."""
+    return sim_log.get_logs(n)
+
+
 # ── 거래 기록 ────────────────────────────────────────────────────
 
 @app.get("/trades", tags=["Trades"])
@@ -326,11 +353,17 @@ async def stream(request: Request):
                 break
 
             positions = scheduler.get_positions()
-            payload = {symbol: asdict(pos) for symbol, pos in positions.items()}
-
             yield {
                 "event": "positions",
-                "data": json.dumps(payload, ensure_ascii=False),
+                "data": json.dumps(
+                    {s: asdict(p) for s, p in positions.items()},
+                    ensure_ascii=False,
+                ),
+            }
+
+            yield {
+                "event": "simlog",
+                "data": json.dumps(sim_log.get_logs(50), ensure_ascii=False),
             }
 
             await asyncio.sleep(5)

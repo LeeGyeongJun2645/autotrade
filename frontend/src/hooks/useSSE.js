@@ -3,6 +3,7 @@ import { api } from '../api.js'
 
 export function useSSE() {
   const [positions, setPositions] = useState({})
+  const [simLogs, setSimLogs] = useState([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState(null)
 
@@ -15,11 +16,11 @@ export function useSSE() {
     }
 
     es.addEventListener('positions', (e) => {
-      try {
-        setPositions(JSON.parse(e.data))
-      } catch {
-        // malformed JSON 무시
-      }
+      try { setPositions(JSON.parse(e.data)) } catch {}
+    })
+
+    es.addEventListener('simlog', (e) => {
+      try { setSimLogs(JSON.parse(e.data)) } catch {}
     })
 
     es.onerror = () => {
@@ -30,5 +31,5 @@ export function useSSE() {
     return () => es.close()
   }, [])
 
-  return { positions, connected, error }
+  return { positions, simLogs, connected, error }
 }

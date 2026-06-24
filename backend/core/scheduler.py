@@ -19,6 +19,7 @@ from backend.api import kis, telegram, upbit
 from backend.config import settings
 from backend.core.daily_report import send_daily_report
 from backend.core.risk_manager import Position, RiskManager
+from backend.core import sim_log
 from backend.models.trade import delete_position, insert_trade, load_all_positions, upsert_position
 from backend.strategies import StrategyResult
 from backend.strategies import moving_average as ma_strategy
@@ -168,7 +169,10 @@ class TradingScheduler:
         ohlcv = await kis.get_daily_ohlcv(symbol, count=70)
         result, strategy_name = self._run_kis_strategies(ohlcv, current_price)
         if result.is_buy:
+            sim_log.push(symbol, f"{strategy_name} 매수신호 — {result.reason} @ {current_price:,.0f}원", "BUY")
             await self._execute_kis_buy(symbol, current_price, result, strategy_name)
+        else:
+            sim_log.push(symbol, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
 
     def _run_kis_strategies(
         self,
@@ -239,6 +243,7 @@ class TradingScheduler:
                 self._positions[symbol] = position
             await upsert_position(symbol, "KIS", position)
             await insert_trade(symbol, "KIS", "BUY", float(qty), current_price, strategy_name, signal.reason)
+            sim_log.push(symbol, f"매수 체결 {qty}주 @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
 
             logger.info(
                 "[KIS 매수] %s %d주 @ %,.0f원 | 전략: %s | %s",
@@ -265,6 +270,7 @@ class TradingScheduler:
                 symbol, qty, current_price, profit_rate * 100, reason,
             )
             await insert_trade(symbol, "KIS", "SELL", float(qty), current_price, position.strategy, reason, profit_rate)
+            sim_log.push(symbol, f"매도 체결 {qty}주 @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(symbol, float(qty), current_price, profit_rate, reason)
 
             async with self._lock:
@@ -334,7 +340,10 @@ class TradingScheduler:
         ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=70)
         result, strategy_name = self._run_upbit_strategies(ohlcv, current_price)
         if result.is_buy:
+            sim_log.push(ticker, f"{strategy_name} 매수신호 — {result.reason} @ {current_price:,.0f}원", "BUY")
             await self._execute_upbit_buy(ticker, current_price, result, strategy_name)
+        else:
+            sim_log.push(ticker, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
 
     def _run_upbit_strategies(
         self,
@@ -388,6 +397,7 @@ class TradingScheduler:
                 self._positions[ticker] = position
             await upsert_position(ticker, "UPBIT", position)
             await insert_trade(ticker, "UPBIT", "BUY", qty, current_price, strategy_name, signal.reason)
+            sim_log.push(ticker, f"매수 체결 {qty:.6f} @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
 
             logger.info(
                 "[Upbit 매수] %s %.8f @ %.0f원 | 전략: %s | %s",
@@ -413,6 +423,7 @@ class TradingScheduler:
                 ticker, position.qty, current_price, profit_rate * 100, reason,
             )
             await insert_trade(ticker, "UPBIT", "SELL", position.qty, current_price, position.strategy, reason, profit_rate)
+            sim_log.push(ticker, f"매도 체결 {position.qty:.6f} @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(ticker, position.qty, current_price, profit_rate, reason, is_crypto=True)
 
             async with self._lock:
