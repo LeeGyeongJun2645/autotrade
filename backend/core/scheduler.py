@@ -17,6 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from backend.api import kis, telegram, upbit
 from backend.config import settings
+from backend.core.daily_report import send_daily_report
 from backend.core.risk_manager import Position, RiskManager
 from backend.models.trade import delete_position, insert_trade, load_all_positions, upsert_position
 from backend.strategies import StrategyResult
@@ -100,6 +101,15 @@ class TradingScheduler:
             self._upbit_tick,
             CronTrigger(minute="*/5", timezone=KST),
             id="upbit_tick",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 일일 백테스트 리포트: 매일 08:00 KST
+        self._scheduler.add_job(
+            self._daily_report,
+            CronTrigger(hour=8, minute=0, timezone=KST),
+            id="daily_report",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -410,6 +420,14 @@ class TradingScheduler:
             await delete_position(ticker)
         except Exception:
             logger.exception("[Upbit][%s] 매도 실행 중 예외", ticker)
+
+
+    async def _daily_report(self) -> None:
+        """매일 08:00 — 주요 종목 백테스트 리포트 텔레그램 발송."""
+        try:
+            await send_daily_report()
+        except Exception:
+            logger.exception("[리포트] 일일 리포트 실행 중 예외")
 
 
 # 싱글톤 인스턴스 — FastAPI main.py 에서 import 해서 사용

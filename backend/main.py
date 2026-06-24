@@ -35,6 +35,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend.api import kis, telegram, upbit
 from backend.backtest.engine import SUPPORTED_STRATEGIES, run_backtest
 from backend.config import settings
+from backend.core.daily_report import send_daily_report
 from backend.core.scheduler import scheduler
 from backend.db.database import init_db
 from backend.models.trade import get_trades
@@ -286,6 +287,15 @@ async def backtest(body: BacktestRequest):
         raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+# ── 리포트 ──────────────────────────────────────────────────────
+
+@app.post("/report/daily", tags=["Report"])
+async def trigger_daily_report():
+    """일일 백테스트 리포트 즉시 발송 (테스트·수동 트리거용)."""
+    await send_daily_report()
+    return {"status": "sent"}
 
 
 # ── 거래 기록 ────────────────────────────────────────────────────
