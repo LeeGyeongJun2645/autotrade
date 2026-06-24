@@ -4,6 +4,7 @@ import { api } from '../api.js'
 
 const UPBIT_TICKERS = ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL', 'KRW-DOGE']
 const INTERVALS = [
+  { value: 'minutes/1',   label: '1분' },
   { value: 'minutes/5',   label: '5분' },
   { value: 'minutes/15',  label: '15분' },
   { value: 'minutes/30',  label: '30분' },
