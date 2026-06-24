@@ -20,6 +20,7 @@ env/
 # 데이터베이스
 *.db
 *.sqlite3
+data/
 
 # 로그
 *.log
