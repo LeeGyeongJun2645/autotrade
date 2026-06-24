@@ -18,6 +18,7 @@ from apscheduler.triggers.cron import CronTrigger
 from backend.api import kis, telegram, upbit
 from backend.config import settings
 from backend.core.risk_manager import Position, RiskManager
+from backend.models.trade import delete_position, insert_trade, load_all_positions, upsert_position
 from backend.strategies import StrategyResult
 from backend.strategies import moving_average as ma_strategy
 from backend.strategies import rsi as rsi_strategy
@@ -65,6 +66,14 @@ class TradingScheduler:
         return dict(self._positions)
 
     # ── 스케줄러 생명주기 ──────────────────────────────────────────
+
+    async def restore_positions(self) -> None:
+        """DB에서 포지션 복구. lifespan 시작 시 init_db() 이후 호출."""
+        saved = await load_all_positions()
+        async with self._lock:
+            for symbol, (_, pos) in saved.items():
+                if symbol not in self._positions:
+                    self._positions[symbol] = pos
 
     def start(self) -> None:
         """스케줄러 시작. FastAPI lifespan 에서 호출."""
@@ -218,6 +227,8 @@ class TradingScheduler:
             )
             async with self._lock:
                 self._positions[symbol] = position
+            await upsert_position(symbol, "KIS", position)
+            await insert_trade(symbol, "KIS", "BUY", float(qty), current_price, strategy_name, signal.reason)
 
             logger.info(
                 "[KIS 매수] %s %d주 @ %,.0f원 | 전략: %s | %s",
@@ -243,10 +254,12 @@ class TradingScheduler:
                 "[KIS 매도] %s %d주 @ %,.0f원 | 수익률 %.2f%% | 사유: %s",
                 symbol, qty, current_price, profit_rate * 100, reason,
             )
+            await insert_trade(symbol, "KIS", "SELL", float(qty), current_price, position.strategy, reason, profit_rate)
             await telegram.notify_sell(symbol, float(qty), current_price, profit_rate, reason)
 
             async with self._lock:
                 self._positions.pop(symbol, None)
+            await delete_position(symbol)
         except Exception:
             logger.exception("[KIS][%s] 매도 실행 중 예외", symbol)
 
@@ -363,6 +376,8 @@ class TradingScheduler:
             )
             async with self._lock:
                 self._positions[ticker] = position
+            await upsert_position(ticker, "UPBIT", position)
+            await insert_trade(ticker, "UPBIT", "BUY", qty, current_price, strategy_name, signal.reason)
 
             logger.info(
                 "[Upbit 매수] %s %.8f @ %.0f원 | 전략: %s | %s",
@@ -387,10 +402,12 @@ class TradingScheduler:
                 "[Upbit 매도] %s %.8f @ %.0f원 | 수익률 %.2f%% | 사유: %s",
                 ticker, position.qty, current_price, profit_rate * 100, reason,
             )
+            await insert_trade(ticker, "UPBIT", "SELL", position.qty, current_price, position.strategy, reason, profit_rate)
             await telegram.notify_sell(ticker, position.qty, current_price, profit_rate, reason, is_crypto=True)
 
             async with self._lock:
                 self._positions.pop(ticker, None)
+            await delete_position(ticker)
         except Exception:
             logger.exception("[Upbit][%s] 매도 실행 중 예외", ticker)
 

@@ -34,6 +34,8 @@ from backend.api import kis, telegram, upbit
 from backend.backtest.engine import SUPPORTED_STRATEGIES, run_backtest
 from backend.config import settings
 from backend.core.scheduler import scheduler
+from backend.db.database import init_db
+from backend.models.trade import get_trades
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
+    await init_db()
+    await scheduler.restore_positions()
     scheduler.start()
     logger.info("AutoTrade 서버 시작 (모드: %s)", settings.trade_mode)
     await telegram.notify_server_start(settings.trade_mode)
@@ -263,6 +267,19 @@ async def backtest(body: BacktestRequest):
         raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+# ── 거래 기록 ────────────────────────────────────────────────────
+
+@app.get("/trades", tags=["Trades"])
+async def get_trade_history(limit: int = 50, offset: int = 0):
+    """거래 실행 이력 조회 (최신순).
+
+    Args:
+        limit:  최대 반환 건수 (기본 50, 최대 200)
+        offset: 페이지 오프셋
+    """
+    return await get_trades(min(limit, 200), offset)
 
 
 # ── SSE 실시간 스트리밍 ──────────────────────────────────────────
