@@ -56,6 +56,7 @@ class _BaseStrategy(bt.Strategy):
     params = (
         ("stop_loss_rate", -0.02),
         ("max_position_ratio", 0.20),
+        ("is_crypto", False),
     )
 
     def __init__(self) -> None:
@@ -70,12 +71,16 @@ class _BaseStrategy(bt.Strategy):
         elif order.status in (order.Cancelled, order.Rejected, order.Margin):
             self._order = None
 
-    def _calc_size(self, price: float) -> int:
-        """가용 현금과 max_position_ratio 기반 주문 수량 계산."""
+    def _calc_size(self, price: float) -> float:
+        """가용 현금과 max_position_ratio 기반 주문 수량 계산.
+
+        코인은 소수점 수량 허용, 주식은 정수(주) 단위.
+        """
         if price <= 0:
             return 0
         cash = self.broker.getcash()
-        return max(math.floor(cash * self.params.max_position_ratio / price), 0)
+        raw = cash * self.params.max_position_ratio / price
+        return raw if self.params.is_crypto else float(max(math.floor(raw), 0))
 
     def _is_stop_loss(self) -> bool:
         """현재 종가가 손절가 이하인지 확인."""
@@ -237,6 +242,7 @@ def run_backtest(
     strategy_name: str,
     initial_cash: float = 10_000_000,
     commission: float = 0.00015,
+    is_crypto: bool = False,
 ) -> BacktestResult:
     """백테스트 실행 (동기 함수 — FastAPI에서는 asyncio.to_thread로 호출).
 
@@ -266,6 +272,7 @@ def run_backtest(
         _STRATEGY_MAP[strategy_name],
         stop_loss_rate=settings.stop_loss_rate,
         max_position_ratio=settings.max_position_ratio,
+        is_crypto=is_crypto,
         **_strategy_params(strategy_name),
     )
     cerebro.broker.setcash(initial_cash)

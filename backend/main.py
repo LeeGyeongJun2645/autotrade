@@ -261,6 +261,7 @@ async def backtest(body: BacktestRequest):
             ohlcv,
             body.strategy,
             body.initial_cash,
+            is_crypto=bool(body.ticker),
         )
         return asdict(result)
     except ValueError as e:
