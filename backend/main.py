@@ -21,8 +21,10 @@
 import asyncio
 import json
 import logging
+import logging.handlers
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
@@ -37,11 +39,27 @@ from backend.core.scheduler import scheduler
 from backend.db.database import init_db
 from backend.models.trade import get_trades
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+_LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
+_fmt = logging.Formatter(
+    "%(asctime)s %(levelname)-8s %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+_file_handler = logging.handlers.TimedRotatingFileHandler(
+    _LOG_DIR / "autotrade.log",
+    when="midnight",      # 매일 자정에 새 파일
+    backupCount=30,       # 30일치 보관
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_fmt)
+_file_handler.suffix = "%Y-%m-%d"
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_fmt)
+
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
 logger = logging.getLogger(__name__)
 
 
