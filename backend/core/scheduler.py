@@ -668,40 +668,42 @@ class TradingScheduler:
         async with aiosqlite.connect(DB_PATH) as db:
             for agent in AGENTS.values():
                 try:
-                    # ── 코인 가상 매매 (24/7) ─────────────────────────
-                    for ticker in coin_tickers:
-                        ohlcv = await _coin_ohlcv(ticker, agent.interval_str)
-                        if not ohlcv:
-                            continue
-
-                        if agent._model is None and not agent.load_model():
-                            trained = await asyncio.to_thread(agent.train, ohlcv)
-                            if not trained:
+                    if agent.market == "coin":
+                        # ── 코인 전담 (AI01~AI10): 24/7 ──────────────
+                        for ticker in coin_tickers:
+                            ohlcv = await _coin_ohlcv(ticker, agent.interval_str)
+                            if not ohlcv:
                                 continue
+                            if agent._model is None and not agent.load_model():
+                                trained = await asyncio.to_thread(agent.train, ohlcv)
+                                if not trained:
+                                    continue
+                            signal, prob = agent.predict(ohlcv)
+                            try:
+                                price_data = await _upbit.get_price(ticker)
+                                price = float(price_data["current_price"])
+                            except Exception:
+                                continue
+                            await self._agent_execute(db, agent, ticker, signal, prob, price)
 
-                        signal, prob = agent.predict(ohlcv)
-                        try:
-                            price_data = await _upbit.get_price(ticker)
-                            price = float(price_data["current_price"])
-                        except Exception:
-                            continue
-
-                        await self._agent_execute(db, agent, ticker, signal, prob, price)
-
-                    # ── 주식 가상 매매 (장중만) ───────────────────────
-                    if is_market_open:
+                    else:
+                        # ── 주식 전담 (AI11~AI20): 장중만 ────────────
+                        if not is_market_open:
+                            continue  # 장 마감 후 신규 매수 없음
                         for symbol in stock_symbols:
                             ohlcv = await _stock_ohlcv(symbol, agent.interval_min)
                             if not ohlcv:
                                 continue
-
+                            if agent._model is None and not agent.load_model():
+                                trained = await asyncio.to_thread(agent.train, ohlcv)
+                                if not trained:
+                                    continue
                             signal, prob = agent.predict(ohlcv)
                             try:
                                 price_data = await _kis.get_price(symbol)
                                 price = float(price_data["current_price"])
                             except Exception:
                                 continue
-
                             await self._agent_execute(db, agent, symbol, signal, prob, price)
 
                     # agent_stats upsert

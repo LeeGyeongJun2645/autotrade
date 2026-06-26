@@ -50,29 +50,32 @@ FEATURE_SETS: dict[str, list[str]] = {
 }
 
 # ── 20개 에이전트 설정 ───────────────────────────────────────────
-# (agent_id, interval_min, label_threshold, buy_threshold, feature_set)
+# (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market)
+# market: "coin" → 업비트 24/7 | "stock" → KIS 장중만
 
-AGENT_CONFIGS: list[tuple[str, int, float, float, str]] = [
-    ("AI01",  1, 0.001, 0.55, "all"),
-    ("AI02",  1, 0.002, 0.60, "momentum"),
-    ("AI03",  1, 0.003, 0.65, "volume"),
-    ("AI04",  1, 0.005, 0.55, "trend"),
-    ("AI05",  5, 0.001, 0.60, "all"),
-    ("AI06",  5, 0.002, 0.55, "momentum"),
-    ("AI07",  5, 0.003, 0.65, "volume"),
-    ("AI08",  5, 0.005, 0.60, "trend"),
-    ("AI09",  5, 0.001, 0.65, "all"),
-    ("AI10",  5, 0.002, 0.55, "all"),
-    ("AI11", 15, 0.001, 0.55, "all"),
-    ("AI12", 15, 0.002, 0.60, "momentum"),
-    ("AI13", 15, 0.003, 0.55, "volume"),
-    ("AI14", 15, 0.005, 0.65, "trend"),
-    ("AI15", 15, 0.001, 0.60, "momentum"),
-    ("AI16", 15, 0.002, 0.55, "volume"),
-    ("AI17",  1, 0.001, 0.65, "trend"),
-    ("AI18",  5, 0.003, 0.60, "all"),
-    ("AI19", 15, 0.003, 0.55, "all"),
-    ("AI20",  5, 0.005, 0.65, "all"),
+AGENT_CONFIGS: list[tuple[str, int, float, float, str, str]] = [
+    # ── 코인 전담 AI01~AI10 (업비트 거래대금 상위 50개, 24/7) ──
+    ("AI01",  1, 0.001, 0.55, "all",      "coin"),
+    ("AI02",  1, 0.002, 0.60, "momentum", "coin"),
+    ("AI03",  1, 0.003, 0.65, "volume",   "coin"),
+    ("AI04",  1, 0.005, 0.55, "trend",    "coin"),
+    ("AI05",  5, 0.001, 0.60, "all",      "coin"),
+    ("AI06",  5, 0.002, 0.55, "momentum", "coin"),
+    ("AI07",  5, 0.003, 0.65, "volume",   "coin"),
+    ("AI08",  5, 0.005, 0.60, "trend",    "coin"),
+    ("AI09",  5, 0.001, 0.65, "all",      "coin"),
+    ("AI10", 15, 0.002, 0.55, "all",      "coin"),
+    # ── 주식 전담 AI11~AI20 (KIS 거래량 상위 50개, 장중만) ──────
+    ("AI11",  1, 0.001, 0.55, "all",      "stock"),
+    ("AI12",  1, 0.002, 0.60, "momentum", "stock"),
+    ("AI13",  5, 0.001, 0.55, "all",      "stock"),
+    ("AI14",  5, 0.002, 0.60, "volume",   "stock"),
+    ("AI15",  5, 0.003, 0.65, "trend",    "stock"),
+    ("AI16",  5, 0.005, 0.55, "all",      "stock"),
+    ("AI17", 15, 0.001, 0.60, "all",      "stock"),
+    ("AI18", 15, 0.002, 0.55, "momentum", "stock"),
+    ("AI19", 15, 0.003, 0.65, "volume",   "stock"),
+    ("AI20", 15, 0.005, 0.55, "all",      "stock"),
 ]
 
 # 에이전트가 감시하는 기본 코인 티커
@@ -110,12 +113,14 @@ class SimAgent:
         label_threshold: float,
         buy_threshold: float,
         feature_set: str,
+        market: str = "coin",  # "coin" | "stock"
     ) -> None:
         self.agent_id = agent_id
         self.interval_min = interval_min
         self.label_threshold = label_threshold
         self.buy_threshold = buy_threshold
         self.feature_set = feature_set
+        self.market = market  # 코인 전담 or 주식 전담
         self.feature_names = FEATURE_SETS[feature_set]
 
         self._balance = INITIAL_CAPITAL
@@ -320,6 +325,7 @@ class SimAgent:
     def to_dict(self) -> dict:
         return {
             "agent_id":        self.agent_id,
+            "market":          self.market,
             "interval_min":    self.interval_min,
             "label_threshold": self.label_threshold,
             "buy_threshold":   self.buy_threshold,

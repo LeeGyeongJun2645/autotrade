@@ -2,6 +2,10 @@ import { useState } from 'react'
 import { api } from '../api.js'
 
 const INTERVAL_LABEL = { 1: '1분봉', 5: '5분봉', 15: '15분봉' }
+const MARKET_BADGE = {
+  coin:  { label: '코인 24/7', cls: 'bg-yellow-900/60 text-yellow-300' },
+  stock: { label: '주식 장중', cls: 'bg-blue-900/60 text-blue-300' },
+}
 const FEAT_COLOR = {
   all:      'bg-indigo-900/60 text-indigo-300',
   momentum: 'bg-green-900/60 text-green-300',
@@ -65,6 +69,9 @@ function AgentCard({ agent, onClick, selected }) {
           {agent.is_champion && (
             <span className="text-xs bg-yellow-700/60 text-yellow-300 px-1.5 py-0.5 rounded font-semibold">챔피언</span>
           )}
+          <span className={`text-xs px-1.5 py-0.5 rounded ${MARKET_BADGE[agent.market]?.cls ?? ''}`}>
+            {MARKET_BADGE[agent.market]?.label ?? agent.market}
+          </span>
         </div>
         <span className={`text-xs px-2 py-0.5 rounded ${FEAT_COLOR[agent.feature_set] ?? ''}`}>
           {agent.feature_set}
