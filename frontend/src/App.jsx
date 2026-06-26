@@ -5,10 +5,12 @@ import Dashboard from './components/Dashboard.jsx'
 import StrategyControl from './components/StrategyControl.jsx'
 import TradeHistory from './components/TradeHistory.jsx'
 import ChartView from './components/ChartView.jsx'
+import AgentDashboard from './components/AgentDashboard.jsx'
 
 const TABS = [
   { id: 'dashboard', label: '대시보드' },
   { id: 'chart', label: '차트·시뮬' },
+  { id: 'agents', label: 'AI 경쟁' },
   { id: 'strategy', label: '전략 관리' },
   { id: 'backtest', label: '백테스트' },
 ]
@@ -53,6 +55,7 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-6 py-6">
         {tab === 'dashboard' && <Dashboard sse={sse} />}
         {tab === 'chart' && <ChartView sse={sse} />}
+        {tab === 'agents' && <AgentDashboard agents={sse.agents} />}
         {tab === 'strategy' && <StrategyControl />}
         {tab === 'backtest' && <TradeHistory />}
       </main>

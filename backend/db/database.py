@@ -47,11 +47,58 @@ CREATE TABLE IF NOT EXISTS positions (
 """
 
 
+_CREATE_AGENT_TRADES = """
+CREATE TABLE IF NOT EXISTS agent_trades (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id    TEXT    NOT NULL,
+    ticker      TEXT    NOT NULL,
+    action      TEXT    NOT NULL,
+    price       REAL    NOT NULL,
+    qty         REAL    NOT NULL,
+    entry_price REAL,
+    profit_rate REAL,
+    balance     REAL    NOT NULL,
+    traded_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
+)
+"""
+
+_CREATE_AGENT_POSITIONS = """
+CREATE TABLE IF NOT EXISTS agent_positions (
+    agent_id    TEXT    NOT NULL,
+    ticker      TEXT    NOT NULL,
+    entry_price REAL    NOT NULL,
+    qty         REAL    NOT NULL,
+    entered_at  TEXT    NOT NULL,
+    PRIMARY KEY (agent_id, ticker)
+)
+"""
+
+_CREATE_AGENT_STATS = """
+CREATE TABLE IF NOT EXISTS agent_stats (
+    agent_id        TEXT    PRIMARY KEY,
+    interval_min    INTEGER NOT NULL,
+    label_threshold REAL    NOT NULL,
+    buy_threshold   REAL    NOT NULL,
+    feature_set     TEXT    NOT NULL,
+    total_trades    INTEGER DEFAULT 0,
+    win_trades      INTEGER DEFAULT 0,
+    win_rate        REAL    DEFAULT 0.0,
+    total_return    REAL    DEFAULT 0.0,
+    current_balance REAL    DEFAULT 1000000.0,
+    is_champion     INTEGER DEFAULT 0,
+    updated_at      TEXT
+)
+"""
+
+
 async def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(_CREATE_TRADES)
         await db.execute(_CREATE_POSITIONS)
+        await db.execute(_CREATE_AGENT_TRADES)
+        await db.execute(_CREATE_AGENT_POSITIONS)
+        await db.execute(_CREATE_AGENT_STATS)
         await db.commit()
     logger.info("DB 초기화 완료: %s", DB_PATH)
 

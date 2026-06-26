@@ -389,6 +389,29 @@ async def get_ml_status():
     return get_status()
 
 
+# ── AI 에이전트 경쟁 ─────────────────────────────────────────────
+
+@app.get("/agents", tags=["Agents"])
+async def get_agents():
+    """20개 AI 에이전트 현재 상태 조회 (승률, 수익률, 포지션 등)."""
+    return scheduler.get_agents_snapshot()
+
+
+@app.get("/agents/{agent_id}/trades", tags=["Agents"])
+async def get_agent_trades(agent_id: str, limit: int = 50):
+    """특정 에이전트 가상 거래 기록 조회."""
+    from backend.db.database import DB_PATH
+    import aiosqlite
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM agent_trades WHERE agent_id=? ORDER BY id DESC LIMIT ?",
+            (agent_id.upper(), min(limit, 200)),
+        )
+        rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── SSE 실시간 스트리밍 ──────────────────────────────────────────
 
 @app.get("/stream", tags=["Stream"])
@@ -420,6 +443,11 @@ async def stream(request: Request):
             yield {
                 "event": "mlsignal",
                 "data": json.dumps(scheduler.get_ml_signals(), ensure_ascii=False),
+            }
+
+            yield {
+                "event": "agents",
+                "data": json.dumps(scheduler.get_agents_snapshot(), ensure_ascii=False),
             }
 
             await asyncio.sleep(5)

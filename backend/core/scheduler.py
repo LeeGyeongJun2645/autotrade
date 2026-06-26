@@ -147,6 +147,24 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # AI 에이전트 경쟁 시뮬레이션: 5분마다
+        self._scheduler.add_job(
+            self._agent_tick,
+            CronTrigger(minute="*/5", timezone=KST),
+            id="agent_tick",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 챔피언 선정: 매일 00:00
+        self._scheduler.add_job(
+            self._agent_champion_update,
+            CronTrigger(hour=0, minute=0, timezone=KST),
+            id="agent_champion",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         self._scheduler.start()
         logger.info(
             "스케줄러 시작 | KIS: %s | Upbit: %s",
@@ -591,6 +609,105 @@ class TradingScheduler:
 
             except Exception:
                 logger.exception("[ML][%s] KIS 신호 체크 실패", symbol)
+
+
+    async def _agent_tick(self) -> None:
+        """5분마다 — 20개 에이전트 가상 매매 실행."""
+        from backend.api import upbit as _upbit
+        from backend.ml.agents import AGENTS, DEFAULT_TICKERS
+        from backend.db.database import DB_PATH
+        import aiosqlite
+
+        # 티커별 OHLCV 캐시 (같은 틱 안에서 재사용)
+        ohlcv_cache: dict[str, dict] = {}
+
+        async def _get_ohlcv(ticker: str, interval: str) -> list[dict]:
+            key = f"{ticker}:{interval}"
+            if key not in ohlcv_cache:
+                try:
+                    ohlcv_cache[key] = await _upbit.get_ohlcv(ticker, interval=interval, count=200)
+                except Exception:
+                    ohlcv_cache[key] = []
+            return ohlcv_cache[key]
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            for agent in AGENTS.values():
+                try:
+                    ohlcv = await _get_ohlcv("KRW-BTC", agent.interval_str)
+                    if not ohlcv:
+                        continue
+
+                    # 모델 없으면 학습
+                    if agent._model is None and not agent.load_model():
+                        trained = await asyncio.to_thread(agent.train, ohlcv)
+                        if not trained:
+                            continue
+
+                    for ticker in DEFAULT_TICKERS:
+                        ohlcv_t = await _get_ohlcv(ticker, agent.interval_str)
+                        if not ohlcv_t:
+                            continue
+
+                        signal, prob = agent.predict(ohlcv_t)
+                        price_data = await _upbit.get_price(ticker)
+                        price = float(price_data["current_price"])
+
+                        if signal == "buy":
+                            trade = agent.virtual_buy(ticker, price)
+                            if trade:
+                                await db.execute(
+                                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
+                                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
+                                )
+                                sim_log.push(trade.agent_id, f"[가상매수] {ticker} @ {price:,.0f}원 (확률 {prob:.1%})", "BUY")
+
+                        elif signal == "sell" and ticker in agent._positions:
+                            trade = agent.virtual_sell(ticker, price)
+                            if trade:
+                                pct = (trade.profit_rate or 0) * 100
+                                await db.execute(
+                                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
+                                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
+                                )
+                                level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
+                                sim_log.push(trade.agent_id, f"[가상매도] {ticker} @ {price:,.0f}원 | {pct:+.2f}%", level)
+
+                    # agent_stats upsert
+                    await db.execute(
+                        """INSERT INTO agent_stats (agent_id, interval_min, label_threshold, buy_threshold, feature_set, total_trades, win_trades, win_rate, total_return, current_balance, is_champion, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(agent_id) DO UPDATE SET
+                             total_trades=excluded.total_trades, win_trades=excluded.win_trades,
+                             win_rate=excluded.win_rate, total_return=excluded.total_return,
+                             current_balance=excluded.current_balance, is_champion=excluded.is_champion,
+                             updated_at=excluded.updated_at""",
+                        (
+                            agent.agent_id, agent.interval_min, agent.label_threshold,
+                            agent.buy_threshold, agent.feature_set,
+                            agent.total_trades, agent.win_trades,
+                            round(agent.win_rate, 4), round(agent.total_return, 4),
+                            round(agent._balance, 2), int(agent.is_champion),
+                            datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S"),
+                        ),
+                    )
+                except Exception:
+                    logger.exception("[Agent][%s] 틱 처리 실패", agent.agent_id)
+
+            await db.commit()
+
+    async def _agent_champion_update(self) -> None:
+        """매일 자정 — 챔피언 에이전트 선정 + 텔레그램 알림."""
+        from backend.ml.agents import update_champion
+        champ_id = update_champion()
+        if champ_id:
+            logger.info("[Agent] 챔피언 선정: %s", champ_id)
+            sim_log.push("AGENT", f"챔피언 선정: {champ_id}", "INFO")
+            await telegram.notify_message(f"🏆 <b>AI 챔피언 선정</b>\n에이전트: <code>{champ_id}</code>")
+
+    def get_agents_snapshot(self) -> list[dict]:
+        """현재 20개 에이전트 상태 스냅샷 반환."""
+        from backend.ml.agents import AGENTS
+        return [a.to_dict() for a in AGENTS.values()]
 
 
 # 싱글톤 인스턴스 — FastAPI main.py 에서 import 해서 사용

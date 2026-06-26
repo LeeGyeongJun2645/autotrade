@@ -5,6 +5,7 @@ export function useSSE() {
   const [positions, setPositions] = useState({})
   const [simLogs, setSimLogs] = useState([])
   const [mlSignals, setMlSignals] = useState({})
+  const [agents, setAgents] = useState([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState(null)
 
@@ -28,6 +29,10 @@ export function useSSE() {
       try { setMlSignals(JSON.parse(e.data)) } catch {}
     })
 
+    es.addEventListener('agents', (e) => {
+      try { setAgents(JSON.parse(e.data)) } catch {}
+    })
+
     es.onerror = () => {
       setConnected(false)
       setError('서버 연결 끊김 — 자동 재연결 중...')
@@ -36,5 +41,5 @@ export function useSSE() {
     return () => es.close()
   }, [])
 
-  return { positions, simLogs, mlSignals, connected, error }
+  return { positions, simLogs, mlSignals, agents, connected, error }
 }
