@@ -37,8 +37,18 @@ const SIGNAL_BADGE = {
   strong_sell: { label: '강력매도', cls: 'bg-red-800 text-red-300 border-red-600' },
 }
 
+const FG_LABEL = (v) => {
+  if (v === undefined || v === null) return null
+  if (v <= -0.5) return { text: '극도공포', cls: 'text-blue-400' }
+  if (v <= -0.1) return { text: '공포', cls: 'text-blue-300' }
+  if (v < 0.1)   return { text: '중립', cls: 'text-gray-400' }
+  if (v < 0.5)   return { text: '탐욕', cls: 'text-orange-300' }
+  return { text: '극도탐욕', cls: 'text-orange-400' }
+}
+
 function MLSignalRow({ symbol, data }) {
   const b = SIGNAL_BADGE[data.signal] ?? SIGNAL_BADGE.hold
+  const fg = FG_LABEL(data.fear_greed)
   return (
     <tr className="border-b border-gray-700/50 hover:bg-gray-700/20">
       <td className="px-4 py-2 font-mono text-sm text-white">{symbol}</td>
@@ -48,6 +58,9 @@ function MLSignalRow({ symbol, data }) {
       <td className="px-4 py-2 font-mono text-sm">{(data.buy_prob * 100).toFixed(1)}%</td>
       <td className={`px-4 py-2 font-mono text-sm ${data.news_score > 0.05 ? 'text-green-400' : data.news_score < -0.05 ? 'text-red-400' : 'text-gray-400'}`}>
         {data.news_score > 0 ? '+' : ''}{data.news_score.toFixed(3)}
+      </td>
+      <td className={`px-4 py-2 text-xs ${fg ? fg.cls : 'text-gray-600'}`}>
+        {fg ? fg.text : '—'}
       </td>
       <td className="px-4 py-2 text-xs text-gray-500">{data.checked_at ?? '-'}</td>
     </tr>
@@ -138,7 +151,7 @@ export default function Dashboard({ sse }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-gray-400 text-xs border-b border-gray-700">
-                  {['종목', '신호', '매수확률', '뉴스감성', '갱신'].map((h) => (
+                  {['종목', '신호', '매수확률', '뉴스감성', '공포탐욕', '갱신'].map((h) => (
                     <th key={h} className="text-left px-4 py-2 font-medium">{h}</th>
                   ))}
                 </tr>

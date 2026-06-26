@@ -198,11 +198,15 @@ class TradingScheduler:
             return
 
         # ── 포지션 없음: 매수 신호 탐색 ──
-        ohlcv = await kis.get_daily_ohlcv(symbol, count=70)
+        ohlcv = await kis.get_daily_ohlcv(symbol, count=200)
         result, strategy_name = self._run_kis_strategies(ohlcv, current_price)
         if result.is_buy:
-            sim_log.push(symbol, f"{strategy_name} 매수신호 — {result.reason} @ {current_price:,.0f}원", "BUY")
-            await self._execute_kis_buy(symbol, current_price, result, strategy_name)
+            ml_ok = await self._check_ml_gate(symbol, ohlcv)
+            if ml_ok:
+                sim_log.push(symbol, f"{strategy_name}+ML 이중확인 — {result.reason} @ {current_price:,.0f}원", "BUY")
+                await self._execute_kis_buy(symbol, current_price, result, strategy_name)
+            else:
+                sim_log.push(symbol, f"{strategy_name} 신호 있으나 ML 이중확인 차단 @ {current_price:,.0f}원", "INFO")
         else:
             sim_log.push(symbol, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
 
@@ -227,6 +231,28 @@ class TradingScheduler:
             overbought=settings.rsi_overbought,
         )
         return result, "rsi"
+
+    async def _check_ml_gate(self, symbol: str, ohlcv: list) -> bool:
+        """ML 이중 확인 게이트. buy/strong_buy일 때만 True 반환.
+
+        모델 미학습이면 True(게이트 통과)로 처리해 기존 전략대로 동작.
+        """
+        try:
+            from backend.ml.model import XGBSignalModel
+            model = XGBSignalModel(symbol)
+            result = await model.predict(ohlcv, settings.cryptopanic_token)
+            approved = result.signal in ("buy", "strong_buy")
+            logger.info(
+                "[ML Gate][%s] %s (확률 %.1f%%) → %s",
+                symbol, result.signal, result.buy_prob * 100,
+                "통과" if approved else "차단",
+            )
+            return approved
+        except RuntimeError:
+            return True  # 모델 없음 → 통과
+        except Exception:
+            logger.warning("[ML Gate][%s] 체크 실패, 통과 처리", symbol)
+            return True
 
     def _check_strategy_sell(
         self,
@@ -369,11 +395,15 @@ class TradingScheduler:
             return
 
         # ── 포지션 없음: 매수 신호 탐색 ──
-        ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=70)
+        ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=200)
         result, strategy_name = self._run_upbit_strategies(ohlcv, current_price)
         if result.is_buy:
-            sim_log.push(ticker, f"{strategy_name} 매수신호 — {result.reason} @ {current_price:,.0f}원", "BUY")
-            await self._execute_upbit_buy(ticker, current_price, result, strategy_name)
+            ml_ok = await self._check_ml_gate(ticker, ohlcv)
+            if ml_ok:
+                sim_log.push(ticker, f"{strategy_name}+ML 이중확인 — {result.reason} @ {current_price:,.0f}원", "BUY")
+                await self._execute_upbit_buy(ticker, current_price, result, strategy_name)
+            else:
+                sim_log.push(ticker, f"{strategy_name} 신호 있으나 ML 이중확인 차단 @ {current_price:,.0f}원", "INFO")
         else:
             sim_log.push(ticker, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
 

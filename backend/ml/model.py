@@ -1,7 +1,7 @@
 """XGBoost 기반 방향성 예측 모델.
 
 레이블: 다음 봉 종가 / 현재 봉 종가 >= 1.005 (+0.5% 이상 상승) → 1
-특징: features.py의 16개 기술지표 + 뉴스 감성 점수
+특징: features.py의 30개 기술지표 + 뉴스 감성 + 공포탐욕 지수
 저장: data/models/xgb_{ticker}.pkl
 
 신호 해석:
@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, roc_auc_score
@@ -36,6 +37,9 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 LABEL_THRESHOLD = 0.005  # +0.5% 이상 상승 → 양성 레이블
 
+_FEAR_GREED_CACHE: tuple[float, float] | None = None  # (value_-1to1, timestamp)
+_FEAR_GREED_TTL = 3600.0  # 1시간 캐시
+
 
 @dataclass
 class PredictResult:
@@ -43,6 +47,7 @@ class PredictResult:
     buy_prob: float
     signal: str        # strong_buy | buy | hold | sell | strong_sell
     news_score: float
+    fear_greed: float  # -1(극도공포) ~ +1(극도탐욕), 코인 전용 (주식은 0.0)
     confidence: str    # high | medium | low
     trained_at: str | None
 
@@ -69,6 +74,29 @@ def _prob_to_signal(prob: float) -> tuple[str, str]:
     return "hold", "low"
 
 
+async def _get_fear_greed() -> float:
+    """Crypto Fear & Greed Index 조회. -1(극도공포)~+1(극도탐욕) 반환."""
+    global _FEAR_GREED_CACHE
+
+    import time
+    now = time.time()
+    if _FEAR_GREED_CACHE and now - _FEAR_GREED_CACHE[1] < _FEAR_GREED_TTL:
+        return _FEAR_GREED_CACHE[0]
+
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get("https://api.alternative.me/fng/?limit=1")
+            data = resp.json()["data"][0]
+            raw = float(data["value"])  # 0~100
+            normalized = (raw - 50) / 50  # -1~+1
+            _FEAR_GREED_CACHE = (normalized, now)
+            logger.debug("[ML] 공포탐욕 지수: %.0f → %.3f", raw, normalized)
+            return normalized
+    except Exception as e:
+        logger.warning("[ML] 공포탐욕 지수 조회 실패: %s", e)
+        return 0.0
+
+
 class XGBSignalModel:
     """티커별 XGBoost 신호 모델."""
 
@@ -87,7 +115,15 @@ class XGBSignalModel:
         try:
             with open(self._model_path, "rb") as f:
                 data = pickle.load(f)
-            self._model = data["model"]
+            model = data["model"]
+            # 피처 수 불일치 → 재학습 필요
+            if hasattr(model, "n_features_in_") and model.n_features_in_ != len(FEATURE_NAMES):
+                logger.warning(
+                    "[ML] %s 피처 수 불일치 (%d → %d), 재학습 필요",
+                    self.ticker, model.n_features_in_, len(FEATURE_NAMES),
+                )
+                return False
+            self._model = model
             self._scaler = data["scaler"]
             self._trained_at = data.get("trained_at")
             logger.info("[ML] %s 모델 로드 성공 (학습일: %s)", self.ticker, self._trained_at)
@@ -114,7 +150,6 @@ class XGBSignalModel:
                 f"{self.ticker}: 학습 데이터 부족 ({len(feat_df)}봉, 최소 60봉 필요)"
             )
 
-        # 원본 close 시리즈 (feat_df 인덱스에 align)
         df_raw = pd.DataFrame(list(reversed(ohlcv_list)))
         df_raw["date"] = pd.to_datetime(df_raw["date"].astype(str).str[:10])
         df_raw = df_raw.set_index("date").sort_index()
@@ -212,15 +247,27 @@ class XGBSignalModel:
         X_last = feat_df.iloc[[-1]][FEATURE_NAMES].values
         X_scaled = self._scaler.transform(X_last)  # type: ignore[union-attr]
         buy_prob = float(self._model.predict_proba(X_scaled)[0, 1])  # type: ignore[union-attr]
+
+        # 공포&탐욕 지수 (코인 전용)
+        fear_greed = 0.0
+        if self.ticker.startswith("KRW-"):
+            fear_greed = await _get_fear_greed()
+            # 역발상: 극도 공포(-1)→buy_prob 소폭 상향, 극도 탐욕(+1)→소폭 하향
+            # 최대 ±4% 조정 (신호 결정에 영향주되 지배하지 않도록)
+            fg_adj = fear_greed * 0.04
+            buy_prob = max(0.01, min(0.99, buy_prob - fg_adj))
+
         signal, confidence = _prob_to_signal(buy_prob)
 
+        # 뉴스 감성 조회
         news_score = await get_sentiment_score(self.ticker, token)
 
-        # 뉴스 감성으로 hold 신호 보정
+        # hold 신호를 뉴스+공포탐욕으로 보정
         if signal == "hold":
-            if news_score > 0.3:
+            combined = news_score * 0.6 + (-fear_greed) * 0.4  # 공포탐욕 역방향 반영
+            if combined > 0.25:
                 signal, confidence = "buy", "low"
-            elif news_score < -0.3:
+            elif combined < -0.25:
                 signal, confidence = "sell", "low"
 
         return PredictResult(
@@ -228,6 +275,7 @@ class XGBSignalModel:
             buy_prob=round(buy_prob, 4),
             signal=signal,
             news_score=round(news_score, 4),
+            fear_greed=round(fear_greed, 3),
             confidence=confidence,
             trained_at=self._trained_at,
         )
