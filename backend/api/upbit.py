@@ -63,6 +63,45 @@ def _raise_for_upbit_error(data: Any) -> None:
         raise RuntimeError(f"업비트 API 오류: {err.get('message')} (name={err.get('name')})")
 
 
+# ── 거래대금 상위 티커 조회 (공개) ──────────────────────────────────
+
+_TOP_TICKERS_CACHE: tuple[list[str], float] | None = None
+_TOP_TICKERS_TTL = 300.0  # 5분 캐시
+
+
+async def get_top_tickers(n: int = 50) -> list[str]:
+    """KRW 마켓 중 24시간 거래대금 상위 N개 티커 반환.
+
+    업비트 전체 266개 KRW 마켓을 조회해 거래대금 순으로 정렬.
+    5분 캐시로 API 호출 최소화.
+    """
+    global _TOP_TICKERS_CACHE
+    import time
+    now = time.time()
+    if _TOP_TICKERS_CACHE and now - _TOP_TICKERS_CACHE[1] < _TOP_TICKERS_TTL:
+        return _TOP_TICKERS_CACHE[0][:n]
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        # 1) 전체 마켓 목록
+        resp = await client.get(f"{_BASE}/market/all", params={"isDetails": "false"})
+        resp.raise_for_status()
+        krw_markets = [m["market"] for m in resp.json() if m["market"].startswith("KRW-")]
+
+        # 2) 100개씩 나눠서 현재가(거래대금 포함) 조회
+        all_tickers: list[dict] = []
+        for i in range(0, len(krw_markets), 100):
+            batch = krw_markets[i:i + 100]
+            r = await client.get(f"{_BASE}/ticker", params={"markets": ",".join(batch)})
+            r.raise_for_status()
+            all_tickers.extend(r.json())
+
+    sorted_markets = sorted(all_tickers, key=lambda x: float(x.get("acc_trade_price_24h", 0)), reverse=True)
+    top = [d["market"] for d in sorted_markets]
+    _TOP_TICKERS_CACHE = (top, now)
+    logger.debug("[Upbit] 거래대금 상위 %d개: %s", n, top[:n])
+    return top[:n]
+
+
 # ── 현재가 조회 (공개) ───────────────────────────────────────────
 
 async def get_price(ticker: str) -> dict[str, Any]:

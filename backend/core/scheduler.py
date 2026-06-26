@@ -612,16 +612,42 @@ class TradingScheduler:
 
 
     async def _agent_tick(self) -> None:
-        """5분마다 — 20개 에이전트 가상 매매 실행."""
+        """5분마다 — 20개 에이전트 가상 매매 실행.
+
+        코인: 24/7 — 업비트 거래대금 상위 50개
+        주식: 평일 장중(09:00~15:30)에 추가 — KIS 거래량 상위 50개
+        """
         from backend.api import upbit as _upbit
-        from backend.ml.agents import AGENTS, DEFAULT_TICKERS
+        from backend.api import kis as _kis
+        from backend.ml.agents import AGENTS
         from backend.db.database import DB_PATH
         import aiosqlite
 
-        # 티커별 OHLCV 캐시 (같은 틱 안에서 재사용)
-        ohlcv_cache: dict[str, dict] = {}
+        now = datetime.now(KST)
+        is_market_open = (
+            now.weekday() < 5
+            and (now.hour > 9 or (now.hour == 9 and now.minute >= 0))
+            and (now.hour < 15 or (now.hour == 15 and now.minute < 30))
+        )
 
-        async def _get_ohlcv(ticker: str, interval: str) -> list[dict]:
+        # 코인 티커 (24/7)
+        try:
+            coin_tickers = await _upbit.get_top_tickers(50)
+        except Exception:
+            coin_tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"]
+
+        # 주식 종목 (장중에만 추가)
+        stock_symbols: list[str] = []
+        if is_market_open:
+            try:
+                stock_symbols = await _kis.get_volume_rank(50)
+            except Exception:
+                stock_symbols = list(self._kis_symbols)
+
+        # OHLCV 캐시 (같은 틱 안에서 재사용)
+        ohlcv_cache: dict[str, list] = {}
+
+        async def _coin_ohlcv(ticker: str, interval: str) -> list:
             key = f"{ticker}:{interval}"
             if key not in ohlcv_cache:
                 try:
@@ -630,51 +656,59 @@ class TradingScheduler:
                     ohlcv_cache[key] = []
             return ohlcv_cache[key]
 
+        async def _stock_ohlcv(symbol: str, interval_min: int) -> list:
+            key = f"KIS:{symbol}:{interval_min}"
+            if key not in ohlcv_cache:
+                try:
+                    ohlcv_cache[key] = await _kis.get_minute_ohlcv(symbol, interval_min, count=200)
+                except Exception:
+                    ohlcv_cache[key] = []
+            return ohlcv_cache[key]
+
         async with aiosqlite.connect(DB_PATH) as db:
             for agent in AGENTS.values():
                 try:
-                    ohlcv = await _get_ohlcv("KRW-BTC", agent.interval_str)
-                    if not ohlcv:
-                        continue
-
-                    # 모델 없으면 학습
-                    if agent._model is None and not agent.load_model():
-                        trained = await asyncio.to_thread(agent.train, ohlcv)
-                        if not trained:
+                    # ── 코인 가상 매매 (24/7) ─────────────────────────
+                    for ticker in coin_tickers:
+                        ohlcv = await _coin_ohlcv(ticker, agent.interval_str)
+                        if not ohlcv:
                             continue
 
-                    for ticker in DEFAULT_TICKERS:
-                        ohlcv_t = await _get_ohlcv(ticker, agent.interval_str)
-                        if not ohlcv_t:
+                        if agent._model is None and not agent.load_model():
+                            trained = await asyncio.to_thread(agent.train, ohlcv)
+                            if not trained:
+                                continue
+
+                        signal, prob = agent.predict(ohlcv)
+                        try:
+                            price_data = await _upbit.get_price(ticker)
+                            price = float(price_data["current_price"])
+                        except Exception:
                             continue
 
-                        signal, prob = agent.predict(ohlcv_t)
-                        price_data = await _upbit.get_price(ticker)
-                        price = float(price_data["current_price"])
+                        await self._agent_execute(db, agent, ticker, signal, prob, price)
 
-                        if signal == "buy":
-                            trade = agent.virtual_buy(ticker, price)
-                            if trade:
-                                await db.execute(
-                                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
-                                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
-                                )
-                                sim_log.push(trade.agent_id, f"[가상매수] {ticker} @ {price:,.0f}원 (확률 {prob:.1%})", "BUY")
+                    # ── 주식 가상 매매 (장중만) ───────────────────────
+                    if is_market_open:
+                        for symbol in stock_symbols:
+                            ohlcv = await _stock_ohlcv(symbol, agent.interval_min)
+                            if not ohlcv:
+                                continue
 
-                        elif signal == "sell" and ticker in agent._positions:
-                            trade = agent.virtual_sell(ticker, price)
-                            if trade:
-                                pct = (trade.profit_rate or 0) * 100
-                                await db.execute(
-                                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
-                                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
-                                )
-                                level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
-                                sim_log.push(trade.agent_id, f"[가상매도] {ticker} @ {price:,.0f}원 | {pct:+.2f}%", level)
+                            signal, prob = agent.predict(ohlcv)
+                            try:
+                                price_data = await _kis.get_price(symbol)
+                                price = float(price_data["current_price"])
+                            except Exception:
+                                continue
+
+                            await self._agent_execute(db, agent, symbol, signal, prob, price)
 
                     # agent_stats upsert
                     await db.execute(
-                        """INSERT INTO agent_stats (agent_id, interval_min, label_threshold, buy_threshold, feature_set, total_trades, win_trades, win_rate, total_return, current_balance, is_champion, updated_at)
+                        """INSERT INTO agent_stats
+                           (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
+                            total_trades, win_trades, win_rate, total_return, current_balance, is_champion, updated_at)
                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
                              total_trades=excluded.total_trades, win_trades=excluded.win_trades,
@@ -687,13 +721,37 @@ class TradingScheduler:
                             agent.total_trades, agent.win_trades,
                             round(agent.win_rate, 4), round(agent.total_return, 4),
                             round(agent._balance, 2), int(agent.is_champion),
-                            datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S"),
+                            now.strftime("%Y-%m-%dT%H:%M:%S"),
                         ),
                     )
                 except Exception:
                     logger.exception("[Agent][%s] 틱 처리 실패", agent.agent_id)
 
             await db.commit()
+
+    async def _agent_execute(self, db, agent, symbol: str, signal: str, prob: float, price: float) -> None:
+        """에이전트 단일 종목 가상 매수/매도 실행 + DB 기록."""
+        from backend.ml.agents import AgentTrade
+
+        if signal == "buy":
+            trade = agent.virtual_buy(symbol, price)
+            if trade:
+                await db.execute(
+                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
+                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
+                )
+                sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%})", "BUY")
+
+        elif signal == "sell" and symbol in agent._positions:
+            trade = agent.virtual_sell(symbol, price)
+            if trade:
+                pct = (trade.profit_rate or 0) * 100
+                await db.execute(
+                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
+                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
+                )
+                level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
+                sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
 
     async def _agent_champion_update(self) -> None:
         """매일 자정 — 챔피언 에이전트 선정 + 텔레그램 알림."""

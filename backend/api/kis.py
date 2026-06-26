@@ -196,6 +196,121 @@ async def get_daily_ohlcv(symbol: str, count: int = 30) -> list[dict[str, Any]]:
     ]
 
 
+# ── 거래량 순위 조회 ─────────────────────────────────────────────
+
+_VOLUME_RANK_CACHE: tuple[list[str], float] | None = None
+_VOLUME_RANK_TTL = 300.0  # 5분 캐시
+
+
+async def get_volume_rank(n: int = 50) -> list[str]:
+    """코스피+코스닥 거래량 순위 상위 N개 종목코드 반환.
+
+    장 중에만 의미있는 데이터를 반환. 장 마감 후에는 캐시된 값 사용.
+    """
+    global _VOLUME_RANK_CACHE
+    import time
+    now = time.time()
+    if _VOLUME_RANK_CACHE and now - _VOLUME_RANK_CACHE[1] < _VOLUME_RANK_TTL:
+        return _VOLUME_RANK_CACHE[0][:n]
+
+    try:
+        data = await _kis_request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/volume-rank",
+            tr_id="FHPST01710000",
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_COND_SCR_DIV_CODE": "20171",
+                "FID_INPUT_ISCD": "0000",
+                "FID_DIV_CLS_CODE": "0",
+                "FID_BLNG_CLS_CODE": "0",
+                "FID_TRGT_CLS_CODE": "111111111",
+                "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+                "FID_INPUT_PRICE_1": "",
+                "FID_INPUT_PRICE_2": "",
+                "FID_VOL_CNT": "",
+                "FID_INPUT_DATE_1": "",
+            },
+        )
+        symbols = [row["mksc_shrn_iscd"] for row in data.get("output", []) if row.get("mksc_shrn_iscd")]
+        _VOLUME_RANK_CACHE = (symbols, now)
+        logger.debug("[KIS] 거래량 상위 %d개: %s", n, symbols[:n])
+        return symbols[:n]
+    except Exception as e:
+        logger.warning("[KIS] 거래량 순위 조회 실패: %s", e)
+        if _VOLUME_RANK_CACHE:
+            return _VOLUME_RANK_CACHE[0][:n]
+        return []
+
+
+# ── 분봉 OHLCV 조회 ─────────────────────────────────────────────
+
+async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200) -> list[dict]:
+    """국내 주식 분봉 데이터 조회.
+
+    KIS API는 1회 최대 30봉 반환 → count만큼 반복 호출.
+
+    Args:
+        symbol:       종목코드 6자리
+        interval_min: 분봉 단위 (1·5·15·30·60)
+        count:        가져올 봉 수 (최대 200)
+
+    Returns:
+        [{"date": str, "open": int, "high": int, "low": int, "close": int, "volume": int}, ...]
+        최신 봉이 앞에 옴 (내림차순)
+    """
+    count = min(count, 200)
+    result: list[dict] = []
+    time_str = ""  # 빈 문자열 = 최신부터
+
+    while len(result) < count:
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": time_str,
+            "FID_PW_DATA_INCU_YN": "Y",
+        }
+        try:
+            data = await _kis_request(
+                "GET",
+                f"/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+                tr_id="FHKST03010200",
+                params=params,
+            )
+        except Exception as e:
+            logger.warning("[KIS] %s 분봉 조회 실패: %s", symbol, e)
+            break
+
+        rows = data.get("output2", [])
+        if not rows:
+            break
+
+        for r in rows:
+            try:
+                result.append({
+                    "date": f"{r['stck_bsop_date']}T{r['stck_cntg_hour']}",
+                    "open":   int(r["stck_oprc"]),
+                    "high":   int(r["stck_hgpr"]),
+                    "low":    int(r["stck_lwpr"]),
+                    "close":  int(r["stck_prpr"]),
+                    "volume": int(r["cntg_vol"]),
+                })
+            except Exception:
+                continue
+
+        if len(rows) < 30:
+            break  # 더 이상 데이터 없음
+
+        # 다음 페이지: 마지막 봉 시각으로 이동
+        last = rows[-1]
+        time_str = last.get("stck_cntg_hour", "")
+        if not time_str:
+            break
+
+    return result[:count]
+
+
 # ── 잔고 조회 ────────────────────────────────────────────────────
 
 async def get_balance() -> dict[str, Any]:
