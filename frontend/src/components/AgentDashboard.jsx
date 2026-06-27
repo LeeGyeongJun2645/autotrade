@@ -623,7 +623,7 @@ export default function AgentDashboard({ agents }) {
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-white text-lg">AI 에이전트 경쟁 현황</h2>
           <span className="text-xs text-gray-500">
-            5분마다 자동 갱신 · 앙상블 게이트 · 코인 22:00 / 주식 06:00 챔피언 선출
+            5분마다 자동 갱신 · 앙상블 게이트 · 매일 03:00 전 에이전트 재학습
           </span>
         </div>
         <div className="grid grid-cols-4 gap-4">

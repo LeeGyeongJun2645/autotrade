@@ -52,32 +52,32 @@ FEATURE_SETS: dict[str, list[str]] = {
 }
 
 # ── 20개 에이전트 설정 (전체 5분봉, 중복 전략 없음) ─────────────
-# (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market)
-# 승률 1위 → 자정에 해당 마켓 게이트로 흡수됨
+# (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market, lookahead)
+# lookahead: 3=단기(15분), 5=중기(25분), 8=장기(40분) — 앙상블 분산 극대화
 
-AGENT_CONFIGS: list[tuple[str, int, float, float, str, str]] = [
-    # ── 코인 AI01~AI10 (5분봉, 레이블기준×피처세트 다양화) ────────
-    ("AI01",  5, 0.001, 0.55, "all",      "coin"),
-    ("AI02",  5, 0.001, 0.62, "momentum", "coin"),
-    ("AI03",  5, 0.002, 0.55, "trend",    "coin"),
-    ("AI04",  5, 0.002, 0.60, "volume",   "coin"),
-    ("AI05",  5, 0.003, 0.58, "all",      "coin"),
-    ("AI06",  5, 0.003, 0.65, "momentum", "coin"),
-    ("AI07",  5, 0.004, 0.60, "trend",    "coin"),
-    ("AI08",  5, 0.002, 0.60, "volume",   "coin"),
-    ("AI09",  5, 0.005, 0.62, "all",      "coin"),
-    ("AI10",  5, 0.002, 0.62, "momentum", "coin"),
-    # ── 주식 AI11~AI20 (5분봉, 레이블기준×피처세트 다양화) ────────
-    ("AI11",  5, 0.001, 0.55, "all",      "stock"),
-    ("AI12",  5, 0.001, 0.62, "trend",    "stock"),
-    ("AI13",  5, 0.002, 0.55, "momentum", "stock"),
-    ("AI14",  5, 0.002, 0.60, "volume",   "stock"),
-    ("AI15",  5, 0.003, 0.58, "all",      "stock"),
-    ("AI16",  5, 0.003, 0.65, "trend",    "stock"),
-    ("AI17",  5, 0.004, 0.60, "momentum", "stock"),
-    ("AI18",  5, 0.004, 0.68, "volume",   "stock"),
-    ("AI19",  5, 0.005, 0.62, "all",      "stock"),
-    ("AI20",  5, 0.005, 0.70, "trend",    "stock"),
+AGENT_CONFIGS: list[tuple] = [
+    # ── 코인 AI01~AI10 ── lookahead 3/5/8 순환으로 시간 지평 다양화
+    ("AI01",  5, 0.001, 0.55, "all",      "coin",  3),  # 단기 공격형
+    ("AI02",  5, 0.001, 0.62, "momentum", "coin",  5),
+    ("AI03",  5, 0.002, 0.55, "trend",    "coin",  8),  # 장기 추세형
+    ("AI04",  5, 0.002, 0.60, "volume",   "coin",  3),
+    ("AI05",  5, 0.003, 0.58, "all",      "coin",  5),
+    ("AI06",  5, 0.003, 0.65, "momentum", "coin",  8),
+    ("AI07",  5, 0.004, 0.60, "trend",    "coin",  3),
+    ("AI08",  5, 0.002, 0.60, "volume",   "coin",  5),
+    ("AI09",  5, 0.005, 0.62, "all",      "coin",  8),
+    ("AI10",  5, 0.002, 0.62, "momentum", "coin",  3),
+    # ── 주식 AI11~AI20 ── 동일 구조
+    ("AI11",  5, 0.001, 0.55, "all",      "stock", 3),
+    ("AI12",  5, 0.001, 0.62, "trend",    "stock", 5),
+    ("AI13",  5, 0.002, 0.55, "momentum", "stock", 8),
+    ("AI14",  5, 0.002, 0.60, "volume",   "stock", 3),
+    ("AI15",  5, 0.003, 0.58, "all",      "stock", 5),
+    ("AI16",  5, 0.003, 0.65, "trend",    "stock", 8),
+    ("AI17",  5, 0.004, 0.60, "momentum", "stock", 3),
+    ("AI18",  5, 0.004, 0.68, "volume",   "stock", 5),
+    ("AI19",  5, 0.005, 0.62, "all",      "stock", 8),
+    ("AI20",  5, 0.005, 0.70, "trend",    "stock", 3),
 ]
 
 
@@ -114,13 +114,15 @@ class SimAgent:
         buy_threshold: float,
         feature_set: str,
         market: str = "coin",  # "coin" | "stock"
+        lookahead: int = 5,    # 레이블링 시 몇 봉 앞 수익 기준 (3=15분/5=25분/8=40분)
     ) -> None:
         self.agent_id = agent_id
         self.interval_min = interval_min
         self.label_threshold = label_threshold
         self.buy_threshold = buy_threshold
         self.feature_set = feature_set
-        self.market = market  # 코인 전담 or 주식 전담
+        self.market = market
+        self.lookahead = lookahead
         self.feature_names = FEATURE_SETS[feature_set]
 
         self._balance = INITIAL_CAPITAL
@@ -157,13 +159,26 @@ class SimAgent:
 
     @property
     def position_value(self) -> float:
-        """현재 포지션 총 평가액."""
-        return sum(self._last_position_values.values())
+        """현재 포지션 총 평가액. 가격 데이터 없으면 매수가 기준 반환 (0원 버그 방지)."""
+        total = 0.0
+        for ticker, pos in self._positions.items():
+            total += self._last_position_values.get(ticker, pos.entry_price * pos.qty)
+        return total
 
     @property
     def total_return(self) -> float:
         """현재 잔액 + 포지션 평가액 기준 총 수익률."""
         return (self._balance + self.position_value - INITIAL_CAPITAL) / INITIAL_CAPITAL
+
+    @property
+    def _kelly_ratio(self) -> float:
+        """Half-Kelly 포지션 사이징. 승률 낮을 때 자동으로 베팅 크기 줄임."""
+        if self.total_trades < 10:
+            return POSITION_RATIO
+        p = max(0.3, min(0.8, self.win_rate))
+        b = 1.5   # 평균 이익 / 평균 손실 추정 (보수적)
+        kelly = (p * b - (1 - p)) / b
+        return max(0.1, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 10~50% 범위
 
     @property
     def interval_str(self) -> str:
@@ -219,8 +234,8 @@ class SimAgent:
             close = close.iloc[-n:].reset_index(drop=True)
 
             # ── 노이즈 제거 레이블링 ─────────────────────────────────
-            LOOKAHEAD   = 5       # 5봉(25분) 앞 수익 — 단기 무작위 노이즈 희석
-            NOISE_FLOOR = 0.001   # ±0.1% 이내는 잡음 → 학습 제외
+            LOOKAHEAD   = self.lookahead  # 에이전트별 시간 지평 (3/5/8봉)
+            NOISE_FLOOR = 0.001           # ±0.1% 이내는 잡음 → 학습 제외
 
             next_close = close.shift(-LOOKAHEAD)
             ret   = next_close / close - 1
@@ -389,7 +404,7 @@ class SimAgent:
             return None
         if len(self._positions) >= MAX_OPEN_POSITIONS:
             return None  # 동시 포지션 최대 3개 초과 차단
-        amount = self._balance * POSITION_RATIO
+        amount = self._balance * self._kelly_ratio  # Half-Kelly 자동 사이징
         if amount < 5_000:
             return None
         actual_price = price * 1.0005  # 슬리피지 0.05% 반영 (실제 체결가 불리 보정)
@@ -443,12 +458,15 @@ class SimAgent:
         self.win_trades    = stats.get("win_trades", 0)
         self.is_champion   = bool(stats.get("is_champion", 0))
         for p in positions:
-            self._positions[p["ticker"]] = AgentPosition(
+            pos = AgentPosition(
                 ticker=p["ticker"],
                 entry_price=p["entry_price"],
                 qty=p["qty"],
                 entered_at=p["entered_at"],
             )
+            self._positions[p["ticker"]] = pos
+            # 재시작 시 매수가 기준으로 초기화 → 다음 틱에 실시간 가격으로 갱신
+            self._last_position_values[p["ticker"]] = pos.entry_price * pos.qty
         self.recent_trades = trades[:30]
 
     # ── 직렬화 ─────────────────────────────────────────────────

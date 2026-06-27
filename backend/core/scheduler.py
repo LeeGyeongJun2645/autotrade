@@ -76,12 +76,43 @@ class TradingScheduler:
     # ── 스케줄러 생명주기 ──────────────────────────────────────────
 
     async def restore_positions(self) -> None:
-        """DB에서 포지션 복구. lifespan 시작 시 init_db() 이후 호출."""
+        """DB에서 포지션 복구 후 거래소 실잔고 비교로 좀비 포지션 제거."""
         saved = await load_all_positions()
         async with self._lock:
             for symbol, (_, pos) in saved.items():
                 if symbol not in self._positions:
                     self._positions[symbol] = pos
+
+        # ── 좀비 포지션 검증 (서버 재시작 사이 청산된 포지션 제거) ──
+        await self._validate_positions()
+
+    async def _validate_positions(self) -> None:
+        """거래소 실잔고와 DB 포지션 비교 — 불일치 포지션(좀비) 자동 제거."""
+        zombies: list[str] = []
+        try:
+            if settings.upbit_access_key:
+                bal = await upbit.get_balance()
+                holdings = {
+                    h["currency"]: float(h.get("balance", 0))
+                    for h in bal.get("holdings", [])
+                }
+                async with self._lock:
+                    for symbol, pos in list(self._positions.items()):
+                        if not symbol.startswith("KRW-"):
+                            continue
+                        currency = symbol.replace("KRW-", "")
+                        actual_qty = holdings.get(currency, 0.0)
+                        if actual_qty < pos.qty * 0.9:  # 10% 이상 차이 → 좀비
+                            zombies.append(symbol)
+        except Exception:
+            logger.warning("[좀비검증] 업비트 잔고 조회 실패, 건너뜀")
+
+        for symbol in zombies:
+            logger.warning("[좀비포지션] %s DB에 있으나 실잔고 없음 → 제거", symbol)
+            async with self._lock:
+                self._positions.pop(symbol, None)
+            await delete_position(symbol)
+            sim_log.push(symbol, f"좀비 포지션 제거 (서버 재시작 사이 청산된 것으로 추정)", "SELL")
 
     def start(self) -> None:
         """스케줄러 시작. FastAPI lifespan 에서 호출."""
@@ -707,13 +738,26 @@ class TradingScheduler:
         # ── 보유 포지션 익절/손절 우선 체크 ─────────────────────────
         if symbol in agent._positions:
             pos = agent._positions[symbol]
-            unreal = (price - pos.entry_price) / pos.entry_price
 
-            # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤 (자금 효율)
+            # 보유 시간 계산
             try:
                 held_min = (datetime.now() - datetime.fromisoformat(pos.entered_at)).total_seconds() / 60
             except Exception:
                 held_min = 0
+
+            # 가격 데이터 없이 24시간 이상 묶인 포지션 → 마지막 알려진 가격으로 강제 청산
+            if price <= 0:
+                if held_min >= 1440:  # 24시간
+                    last_price = agent._last_position_values.get(symbol, 0) / pos.qty if pos.qty > 0 else 0
+                    if last_price > 0:
+                        signal = "sell"
+                        price = last_price
+                        sim_log.push(agent.agent_id, f"[타임아웃강제청산] {symbol} 24h 가격데이터 없음 @ {price:,.0f}원", "SELL")
+                return  # 가격 없으면 나머지 로직 스킵
+
+            unreal = (price - pos.entry_price) / pos.entry_price
+
+            # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤 (자금 효율)
             if held_min < 30:
                 take_profit = 0.05    # 30분 미만 → +5% 익절
             elif held_min < 60:
@@ -723,7 +767,7 @@ class TradingScheduler:
 
             if unreal >= take_profit:
                 signal = "sell"
-                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분 보유) @ {price:,.0f}원", "BUY")
+                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) @ {price:,.0f}원", "BUY")
             elif unreal <= STOP_LOSS:
                 signal = "sell"
                 sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
