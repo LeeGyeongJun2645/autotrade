@@ -807,7 +807,11 @@ class TradingScheduler:
                         signal = "sell"
                         price = last_price
                         sim_log.push(agent.agent_id, f"[타임아웃강제청산] {symbol} 24h 가격데이터 없음 @ {price:,.0f}원", "SELL")
-                return  # 가격 없으면 나머지 로직 스킵
+                        # 아래 sell 로직으로 계속 진행 (return 없음)
+                    else:
+                        return  # 마지막 가격도 없으면 스킵
+                else:
+                    return  # 24시간 미만이면 스킵
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
@@ -833,6 +837,11 @@ class TradingScheduler:
                     "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
                     (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
                 )
+                # 포지션 영속성: 재시작 후 복구 가능하도록 저장
+                await db.execute(
+                    "INSERT OR REPLACE INTO agent_positions (agent_id, ticker, entry_price, qty, entered_at) VALUES (?,?,?,?,?)",
+                    (trade.agent_id, trade.ticker, trade.price, trade.qty, trade.traded_at),
+                )
                 sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%})", "BUY")
 
         elif signal == "sell" and symbol in agent._positions:
@@ -842,6 +851,11 @@ class TradingScheduler:
                 await db.execute(
                     "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
                     (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
+                )
+                # 포지션 영속성: 청산 시 제거
+                await db.execute(
+                    "DELETE FROM agent_positions WHERE agent_id=? AND ticker=?",
+                    (trade.agent_id, trade.ticker),
                 )
                 level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
                 sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
