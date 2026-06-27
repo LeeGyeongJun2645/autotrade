@@ -449,7 +449,11 @@ class SimAgent:
         if not ohlcv_list:
             return "hold", 0.5
 
-        _, prob = self.predict(ohlcv_list)
+        _, prob = self.predict(
+            ohlcv_list,
+            oi_hist=self._cached_oi_hist or None,
+            taker_hist=self._cached_taker_hist or None,
+        )
 
         if self.market == "coin" and ticker:
             # 공포탐욕 지수 (탐욕→과열 하향, 공포→저평가 상향)

@@ -71,6 +71,7 @@ class TradingScheduler:
         self._use_atr_risk: bool = False  # 에이전트 검증 완료 시 True → 실매매도 ATR 동적 손익 적용
         self._btc_oi_hist:    list[dict] = []  # BTC 선물 OI 히스토리 캐시 (코인 에이전트 전체 공유)
         self._btc_taker_hist: list[dict] = []  # BTC 선물 Taker 비율 히스토리 캐시
+        self._btc_ohlcv_cache: list[dict] = []  # BTC 5분봉 OHLCV 캐시 (ML 게이트 BTC 상관관계용)
 
     # ── 종목 관리 ─────────────────────────────────────────────────
 
@@ -348,10 +349,12 @@ class TradingScheduler:
             return True
 
         try:
-            oi_hist    = self._btc_oi_hist    if market == "coin" else None
-            taker_hist = self._btc_taker_hist if market == "coin" else None
+            btc_ohlcv  = self._btc_ohlcv_cache if market == "coin" else None
+            oi_hist    = self._btc_oi_hist      if market == "coin" else None
+            taker_hist = self._btc_taker_hist   if market == "coin" else None
             signal, prob = await predict_ensemble(
                 ohlcv_5min, ticker=symbol, market=market,
+                btc_ohlcv=btc_ohlcv,
                 oi_hist=oi_hist, taker_hist=taker_hist,
             )
             approved = signal == "buy"
@@ -777,6 +780,11 @@ class TradingScheduler:
 
             sp_results = await asyncio.gather(*[_fetch_stock_price(s) for s in stock_symbols])
             stock_prices = {s: p for s, p in sp_results if p > 0}
+
+        # BTC OHLCV 캐시 갱신 (ML 게이트 btc_corr_20 피처용)
+        _fresh_btc = ohlcv_cache.get("KRW-BTC:minutes/5", [])
+        if _fresh_btc:
+            self._btc_ohlcv_cache = _fresh_btc
 
         async with aiosqlite.connect(DB_PATH) as db:
             for agent in AGENTS.values():
