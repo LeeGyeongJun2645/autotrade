@@ -276,6 +276,12 @@ class TradingScheduler:
         strategy_name: str,
     ) -> None:
         try:
+            # TOCTOU 방지: 주문 전 포지션 재확인 (락 안에서)
+            async with self._lock:
+                if symbol in self._positions:
+                    logger.warning("[KIS][%s] 중복매수 차단 (포지션 이미 존재)", symbol)
+                    return
+
             balance = await kis.get_balance()
             cash = float(balance["cash"])
             qty = int(RiskManager.calculate_qty(cash, current_price))
@@ -433,6 +439,12 @@ class TradingScheduler:
         strategy_name: str,
     ) -> None:
         try:
+            # TOCTOU 방지: 주문 전 포지션 재확인 (락 안에서)
+            async with self._lock:
+                if ticker in self._positions:
+                    logger.warning("[Upbit][%s] 중복매수 차단 (포지션 이미 존재)", ticker)
+                    return
+
             balance = await upbit.get_balance()
             krw = float(balance["krw"])
             amount_krw = krw * settings.max_position_ratio
@@ -690,16 +702,28 @@ class TradingScheduler:
 
     async def _agent_execute(self, db, agent, symbol: str, signal: str, prob: float, price: float) -> None:
         """에이전트 단일 종목 가상 매수/매도 실행 + DB 기록."""
-        TAKE_PROFIT = 0.05   # +5% 익절 — ML 신호 없어도 수익 실현
-        STOP_LOSS   = -0.03  # -3% 손절 — ML 신호 없어도 손실 차단
+        STOP_LOSS = -0.03  # -3% 손절 — 항상 적용
 
         # ── 보유 포지션 익절/손절 우선 체크 ─────────────────────────
         if symbol in agent._positions:
             pos = agent._positions[symbol]
             unreal = (price - pos.entry_price) / pos.entry_price
-            if unreal >= TAKE_PROFIT:
+
+            # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤 (자금 효율)
+            try:
+                held_min = (datetime.now() - datetime.fromisoformat(pos.entered_at)).total_seconds() / 60
+            except Exception:
+                held_min = 0
+            if held_min < 30:
+                take_profit = 0.05    # 30분 미만 → +5% 익절
+            elif held_min < 60:
+                take_profit = 0.03    # 30~60분 → +3% 익절
+            else:
+                take_profit = 0.015   # 60분 이상 → +1.5% 익절 (자금 묶임 방지)
+
+            if unreal >= take_profit:
                 signal = "sell"
-                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% @ {price:,.0f}원", "BUY")
+                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분 보유) @ {price:,.0f}원", "BUY")
             elif unreal <= STOP_LOSS:
                 signal = "sell"
                 sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% @ {price:,.0f}원", "SELL")

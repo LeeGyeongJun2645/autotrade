@@ -16,12 +16,16 @@ import httpx
 import jwt
 
 from backend.config import settings
+from backend.core.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
 _BASE = "https://api.upbit.com/v1"
 _TIMEOUT = 10
 _MIN_ORDER_KRW = 5_000  # 업비트 최소 주문 금액 (원)
+
+# 업비트 주문 API: 초당 8회 제한 (공식 10회보다 여유 있게)
+_order_limiter = RateLimiter(max_calls=8, period=1.0)
 
 
 def _require_upbit_keys() -> tuple[str, str]:
@@ -350,6 +354,7 @@ async def place_buy_order(ticker: str, amount_krw: float) -> dict[str, Any]:
     if amount_krw < _MIN_ORDER_KRW:
         raise ValueError(f"업비트 최소 주문 금액은 {_MIN_ORDER_KRW:,}원입니다. 요청: {amount_krw:.0f}원")
 
+    await _order_limiter.acquire()
     body = {
         "market": ticker,
         "side": "bid",
@@ -391,6 +396,7 @@ async def place_sell_order(ticker: str, volume: float) -> dict[str, Any]:
     if volume <= 0:
         raise ValueError(f"매도 수량은 0보다 커야 합니다. 요청: {volume}")
 
+    await _order_limiter.acquire()
     body = {
         "market": ticker,
         "side": "ask",

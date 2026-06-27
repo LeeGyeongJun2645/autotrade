@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-INITIAL_CAPITAL = 10_000_000.0  # 에이전트당 초기 가상 자금 (1000만원)
-POSITION_RATIO  = 0.5            # 잔액의 50%씩 사용
+INITIAL_CAPITAL    = 10_000_000.0  # 에이전트당 초기 가상 자금 (1000만원)
+POSITION_RATIO     = 0.5            # 잔액의 50%씩 사용
+MAX_OPEN_POSITIONS = 3              # 에이전트당 동시 최대 포지션 수
 
 # ── 피처 세트 정의 ────────────────────────────────────────────────
 
@@ -184,6 +185,7 @@ class SimAgent:
             self._trained_at = data.get("trained_at")
             return True
         except Exception:
+            self._model_path.unlink(missing_ok=True)  # 손상 파일 삭제 → 다음 틱 재학습
             return False
 
     def save_model(self) -> None:
@@ -254,16 +256,22 @@ class SimAgent:
             scaler = StandardScaler()
             X_s = scaler.fit_transform(X)
 
+            # 클래스 불균형 자동 보정 — buy 레이블이 적은 하락장에서도 공정한 학습
+            n_neg = int((y == 0).sum())
+            n_pos = int((y == 1).sum())
+            scale_pos = n_neg / n_pos if n_pos > 0 else 1.0
+
             clf = XGBClassifier(
                 n_estimators=200,
                 max_depth=3,
                 learning_rate=0.05,
                 subsample=0.8,
                 colsample_bytree=0.8,
-                min_child_weight=5,   # 노드당 최소 5샘플 → 과적합 억제
-                gamma=0.1,            # 분기 최소 이득 → 불필요한 트리 분기 차단
-                reg_alpha=0.1,        # L1 정규화
-                reg_lambda=2.0,       # L2 정규화 (기본값 1 → 2배)
+                min_child_weight=5,
+                gamma=0.1,
+                reg_alpha=0.1,
+                reg_lambda=2.0,
+                scale_pos_weight=scale_pos,  # buy/sell 불균형 자동 보정
                 eval_metric="logloss",
                 random_state=42,
                 n_jobs=-1,
@@ -379,10 +387,14 @@ class SimAgent:
     def virtual_buy(self, ticker: str, price: float) -> AgentTrade | None:
         if ticker in self._positions:
             return None
+        if len(self._positions) >= MAX_OPEN_POSITIONS:
+            return None  # 동시 포지션 최대 3개 초과 차단
         amount = self._balance * POSITION_RATIO
         if amount < 5_000:
             return None
-        qty = amount / price
+        actual_price = price * 1.0005  # 슬리피지 0.05% 반영 (실제 체결가 불리 보정)
+        qty = amount / actual_price
+        price = actual_price  # 이하 price 변수를 실제 체결가로 통일
         self._balance -= amount
         now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         self._positions[ticker] = AgentPosition(ticker, price, qty, now)
