@@ -46,6 +46,7 @@ class TradingScheduler:
         self._upbit_tickers: list[str] = []
         self._lock = asyncio.Lock()
         self._ml_signals: dict[str, dict] = {}  # {symbol: {"signal": ..., "buy_prob": ..., "news_score": ...}}
+        self._use_atr_risk: bool = False  # 에이전트 검증 완료 시 True → 실매매도 ATR 동적 손익 적용
 
     # ── 종목 관리 ─────────────────────────────────────────────────
 
@@ -375,12 +376,24 @@ class TradingScheduler:
 
             await kis.place_buy_order(symbol, qty)
 
+            # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
+            sl_rate = tp_rate = None
+            if self._use_atr_risk:
+                from backend.ml.agents import AGENTS
+                atr_vals = [a._last_atr_pct for a in AGENTS.values() if a.market == "stock" and a._last_atr_pct > 0.001]
+                if atr_vals:
+                    atr = sum(atr_vals) / len(atr_vals)
+                    sl_rate = -(atr * 1.5)
+                    tp_rate = atr * 2.0
+
             position = RiskManager.open_position(
                 symbol=symbol,
                 entry_price=current_price,
                 qty=float(qty),
                 strategy=strategy_name,
                 is_crypto=False,
+                stop_loss_rate=sl_rate,
+                take_profit_rate=tp_rate,
             )
             async with self._lock:
                 self._positions[symbol] = position
@@ -539,12 +552,25 @@ class TradingScheduler:
 
             # qty는 추정값 (실제 체결 수량은 주문 체결 후 확정됨)
             qty = amount_krw / current_price
+
+            # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
+            sl_rate = tp_rate = None
+            if self._use_atr_risk:
+                from backend.ml.agents import AGENTS
+                atr_vals = [a._last_atr_pct for a in AGENTS.values() if a.market == "coin" and a._last_atr_pct > 0.001]
+                if atr_vals:
+                    atr = sum(atr_vals) / len(atr_vals)
+                    sl_rate = -(atr * 1.5)
+                    tp_rate = atr * 2.0
+
             position = RiskManager.open_position(
                 symbol=ticker,
                 entry_price=current_price,
                 qty=qty,
                 strategy=strategy_name,
                 is_crypto=True,
+                stop_loss_rate=sl_rate,
+                take_profit_rate=tp_rate,
             )
             async with self._lock:
                 self._positions[ticker] = position
@@ -943,6 +969,8 @@ class TradingScheduler:
 
         # 재학습 완료 후 성능 기반 임계값 자동 조정
         await self._auto_adjust_thresholds()
+        # 에이전트 검증 충분 시 실매매 ATR 손익 자동 전환 체크
+        await self._check_atr_upgrade()
 
     async def _auto_adjust_thresholds(self) -> None:
         """재학습 후 수익률 기반 임계값 자동 조정 + 텔레그램 알림.
@@ -1007,6 +1035,45 @@ class TradingScheduler:
             await telegram.notify_message(msg)
         except Exception:
             pass
+
+    async def _check_atr_upgrade(self) -> None:
+        """에이전트 가상매매 성과 기반 실매매 ATR 손익 자동 전환.
+
+        조건: 활성 에이전트 총 거래 500건 이상 + 평균 수익률 > 0
+        충족 시 self._use_atr_risk = True → 이후 실매매 매수 시 ATR 기반 손익 적용.
+        """
+        if self._use_atr_risk:
+            return  # 이미 전환됨
+
+        from backend.ml.agents import AGENTS
+        active = [a for a in AGENTS.values() if a.total_trades >= 10 and a.is_active]
+        if not active:
+            return
+
+        total_trades = sum(a.total_trades for a in active)
+        avg_return   = sum(a.total_return for a in active) / len(active)
+
+        if total_trades >= 500 and avg_return > 0:
+            self._use_atr_risk = True
+            logger.info(
+                "[ATR전환] 에이전트 검증 완료 (%d건, 평균수익률 %.2f%%) → 실매매 ATR 손익 적용",
+                total_trades, avg_return * 100,
+            )
+            try:
+                await telegram.notify_message(
+                    f"✅ <b>실매매 ATR 손익 자동 전환</b>\n"
+                    f"에이전트 총 거래: {total_trades}건\n"
+                    f"평균 수익률: {avg_return*100:+.2f}%\n\n"
+                    f"고정 손절/익절 → ATR×1.5 손절 / ATR×2.0 익절\n"
+                    f"(변동성 자동 적응 실매매 적용 시작)"
+                )
+            except Exception:
+                pass
+        else:
+            logger.info(
+                "[ATR전환] 조건 미충족 (거래 %d/500건, 평균수익률 %.2f%%)",
+                total_trades, avg_return * 100,
+            )
 
     async def _send_daily_agent_report(self) -> None:
         """매일 22:00 — 에이전트 현황 레포트 텔레그램 전송."""

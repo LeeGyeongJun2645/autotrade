@@ -71,7 +71,7 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI07",  5, 0.004, 0.60, "trend",    "coin",  3),
     ("AI08",  5, 0.002, 0.60, "volume",   "coin",  5),
     ("AI09",  5, 0.005, 0.62, "all",      "coin",  8),
-    ("AI10",  5, 0.002, 0.62, "momentum", "coin",  3),
+    ("AI10",  5, 0.003, 0.58, "trend",    "coin",  5),  # AI07 추세전략과 다른 lookahead
     # ── 주식 AI11~AI20 ── 동일 구조
     ("AI11",  5, 0.001, 0.55, "all",      "stock", 3),
     ("AI12",  5, 0.001, 0.62, "trend",    "stock", 5),
