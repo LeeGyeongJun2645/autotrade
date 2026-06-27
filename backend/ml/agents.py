@@ -143,7 +143,8 @@ class SimAgent:
         self.is_active = True  # False면 매수 스킵 (자동 임계값 조정에서 관리)
         self.recent_trades: list[dict] = []
         self._last_position_values: dict[str, float] = {}  # ticker → 현재 평가액
-        self._last_atr_pct: float = 0.0  # ATR 기반 동적 손익용 (predict()에서 업데이트)
+        self._last_atr_pct: float = 0.0          # ATR 기반 동적 손익용 (predict()에서 업데이트)
+        self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -337,7 +338,8 @@ class SimAgent:
         if self._model is None and not self.load_model():
             return "hold", 0.5
         try:
-            full_df = compute_features(ohlcv_list)  # 전체 피처
+            # 재학습 시 저장된 펀딩비 캐시 사용 → 학습/예측 피처 분포 일관성 유지
+            full_df = compute_features(ohlcv_list, funding_rates=self._cached_funding_rates or None)
             if full_df.empty:
                 return "hold", 0.5
             # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
@@ -366,6 +368,9 @@ class SimAgent:
 
         기본 predict() 확률에 공포탐욕·김치프리미엄·펀딩비·호가창·기관외국인을 실시간 반영.
         """
+        if not ohlcv_list:
+            return "hold", 0.5
+
         _, prob = self.predict(ohlcv_list)
 
         if self.market == "coin" and ticker:
@@ -490,9 +495,10 @@ class SimAgent:
         self.win_trades    = stats.get("win_trades", 0)
         self.is_champion   = bool(stats.get("is_champion", 0))
         self.is_active     = bool(stats.get("is_active", 1))
-        # 자동 조정된 임계값 복구 (기본값은 AGENT_CONFIGS 기준)
-        if "buy_threshold" in stats and stats["buy_threshold"]:
-            self.buy_threshold = float(stats["buy_threshold"])
+        # 자동 조정된 임계값 복구 (0이거나 없으면 AGENT_CONFIGS 기본값 유지)
+        thr = stats.get("buy_threshold")
+        if thr is not None and float(thr) > 0:
+            self.buy_threshold = float(thr)
         for p in positions:
             pos = AgentPosition(
                 ticker=p["ticker"],

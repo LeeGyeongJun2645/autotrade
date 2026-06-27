@@ -221,16 +221,6 @@ def compute_features(
     # 연속 상승/하락 봉 수 (최대 5봉까지)
     is_up   = (close > close.shift(1)).astype(int)
     is_down = (close < close.shift(1)).astype(int)
-
-    def _count_consecutive(series: pd.Series) -> pd.Series:
-        result = pd.Series(0, index=series.index)
-        count  = pd.Series(0, index=series.index)
-        for i in range(1, min(6, len(series))):
-            count += series.shift(i).fillna(0)
-            # 끊기면 중단 (누적이 아닌 연속 체크)
-        # 간단 버전: rolling sum (연속 여부 근사)
-        return series.rolling(5, min_periods=1).sum()
-
     df["consecutive_up"]   = is_up.rolling(5, min_periods=1).sum()
     df["consecutive_down"] = is_down.rolling(5, min_periods=1).sum()
 
@@ -248,9 +238,10 @@ def compute_features(
     if funding_rates:
         try:
             fr_df = pd.DataFrame(funding_rates)
+            # UTC ms → KST naive (df.index와 타임존 일치시켜야 reindex 매칭됨)
             fr_df["ts"] = pd.to_datetime(
                 fr_df["fundingTime"].astype(float), unit="ms", utc=True
-            ).dt.tz_localize(None)
+            ).dt.tz_convert("Asia/Seoul").dt.tz_localize(None)
             fr_df = fr_df.set_index("ts").sort_index()
             fr_series = fr_df["fundingRate"].astype(float)
             df["funding_rate"] = fr_series.reindex(df.index, method="ffill").fillna(0.0)

@@ -129,6 +129,9 @@ class TradingScheduler:
         except Exception:
             logger.exception("[복구] 에이전트 stats 복구 실패")
 
+        # 재시작 후에도 ATR 전환 조건 재평가 (인메모리 플래그 복구)
+        await self._check_atr_upgrade()
+
     async def _validate_positions(self) -> None:
         """거래소 실잔고와 DB 포지션 비교 — 불일치 포지션(좀비) 자동 제거."""
         zombies: list[str] = []
@@ -836,7 +839,9 @@ class TradingScheduler:
             # 가격 데이터 없이 24시간 이상 묶인 포지션 → 마지막 알려진 가격으로 강제 청산
             if price <= 0:
                 if held_min >= 1440:  # 24시간
-                    last_price = agent._last_position_values.get(symbol, 0) / pos.qty if pos.qty > 0 else 0
+                    if pos.qty <= 0:
+                        return  # qty 0이면 처리 불가 (ZeroDivisionError 방지)
+                    last_price = agent._last_position_values.get(symbol, 0) / pos.qty
                     if last_price > 0:
                         signal = "sell"
                         price = last_price
@@ -859,7 +864,7 @@ class TradingScheduler:
 
             if unreal >= take_profit:
                 signal = "sell"
-                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "BUY")
+                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
             elif unreal <= STOP_LOSS:
                 signal = "sell"
                 sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
@@ -895,7 +900,7 @@ class TradingScheduler:
                 sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
 
     async def _daily_retrain(self) -> None:
-        """매일 03:00 KST — 전 에이전트 최신 데이터로 재학습.
+        """매일 18:00 KST — 전 에이전트 최신 데이터로 재학습.
 
         코인: BTC·ETH·XRP·SOL 4개 순차 시도, 첫 성공 데이터 사용 (2000봉 = 약 7일치)
         주식: 삼성전자·SK하이닉스·NAVER 3개 순차 시도 (500봉 = 약 2일치)
@@ -944,6 +949,9 @@ class TradingScheduler:
         for agent in AGENTS.values():
             data = coin_ohlcv if agent.market == "coin" else stock_ohlcv
             fr   = coin_funding if agent.market == "coin" else None
+            # 펀딩비 캐시 업데이트 → predict()에서도 동일 피처 사용 (학습/예측 일관성)
+            if agent.market == "coin":
+                agent._cached_funding_rates = coin_funding
             if not data:
                 logger.warning("[Retrain][%s] 학습 데이터 없음, 스킵", agent.agent_id)
                 continue
