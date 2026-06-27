@@ -64,14 +64,30 @@ FEATURE_NAMES = [
     "consecutive_up",
     "consecutive_down",
     "candle_color",
+    # ── 래그 피처 (XGBoost에 시계열 맥락 제공) ────────────────────
+    "rsi_lag_1",        # 1봉 전 RSI
+    "rsi_lag_2",        # 2봉 전 RSI
+    "macd_diff_lag_1",  # 1봉 전 MACD 다이버전스
+    "vol_ratio_lag_1",  # 1봉 전 거래량 비율
+    "bb_pband_lag_1",   # 1봉 전 볼린저밴드 위치
+    "ret_lag_1",        # 1봉 전 수익률
+    "ret_lag_2",        # 2봉 전 수익률
+    "ret_lag_3",        # 3봉 전 수익률
+    # ── 펀딩비 (코인: 8시간 주기 실제값, 주식: 항상 0) ─────────────
+    "funding_rate",
 ]
 
 
-def compute_features(ohlcv_list: list[dict]) -> pd.DataFrame:
+def compute_features(
+    ohlcv_list: list[dict],
+    funding_rates: list[dict] | None = None,
+) -> pd.DataFrame:
     """OHLCV 리스트 → Feature DataFrame 변환.
 
     Args:
-        ohlcv_list: API 반환 형식 (최신 날짜 앞, 내림차순)
+        ohlcv_list:    API 반환 형식 (최신 날짜 앞, 내림차순)
+        funding_rates: 바이낸스 펀딩비 히스토리 (코인만, 주식 None → 0으로 채움)
+                       형식: [{"fundingTime": ms타임스탬프, "fundingRate": "0.0001"}, ...]
 
     Returns:
         FEATURE_NAMES 컬럼만 가진 DataFrame (NaN 행 제거됨)
@@ -217,5 +233,30 @@ def compute_features(ohlcv_list: list[dict]) -> pd.DataFrame:
 
     df["consecutive_up"]   = is_up.rolling(5, min_periods=1).sum()
     df["consecutive_down"] = is_down.rolling(5, min_periods=1).sum()
+
+    # ── 래그 피처 (XGBoost에 시계열 맥락 제공) ───────────────────────
+    df["rsi_lag_1"]       = df["rsi_9"].shift(1)
+    df["rsi_lag_2"]       = df["rsi_9"].shift(2)
+    df["macd_diff_lag_1"] = df["macd_diff"].shift(1)
+    df["vol_ratio_lag_1"] = df["vol_ratio"].shift(1)
+    df["bb_pband_lag_1"]  = df["bb_pband"].shift(1)
+    df["ret_lag_1"]       = close.pct_change(1).shift(1)
+    df["ret_lag_2"]       = close.pct_change(1).shift(2)
+    df["ret_lag_3"]       = close.pct_change(1).shift(3)
+
+    # ── 펀딩비 (코인: 8시간 주기 forward-fill, 주식: 항상 0) ─────────
+    if funding_rates:
+        try:
+            fr_df = pd.DataFrame(funding_rates)
+            fr_df["ts"] = pd.to_datetime(
+                fr_df["fundingTime"].astype(float), unit="ms", utc=True
+            ).dt.tz_localize(None)
+            fr_df = fr_df.set_index("ts").sort_index()
+            fr_series = fr_df["fundingRate"].astype(float)
+            df["funding_rate"] = fr_series.reindex(df.index, method="ffill").fillna(0.0)
+        except Exception:
+            df["funding_rate"] = 0.0
+    else:
+        df["funding_rate"] = 0.0
 
     return df[FEATURE_NAMES].dropna()

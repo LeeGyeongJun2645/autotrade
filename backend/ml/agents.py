@@ -37,6 +37,9 @@ FEATURE_SETS: dict[str, list[str]] = {
     "momentum": [
         "rsi_9", "macd_diff", "stoch_rsi", "williams_r",
         "mfi_14", "roc_10", "ret_1d", "ret_3d", "ret_5d", "ret_10d",
+        # 래그 피처 (단기 모멘텀 전환 포착)
+        "rsi_lag_1", "rsi_lag_2", "macd_diff_lag_1",
+        "ret_lag_1", "ret_lag_2", "ret_lag_3",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -44,10 +47,12 @@ FEATURE_SETS: dict[str, list[str]] = {
         "adx_14", "adx_pos", "adx_neg",
         "trix_15", "dpo_20", "vortex_diff",
         "ema9_cross_ema21", "vwap_ratio", "vwap_cross",
+        "bb_pband_lag_1",  # 볼린저밴드 직전 위치
     ],
     "volume": [
         "vol_ratio", "obv_change", "cmf_20",
         "mfi_14", "ret_1d", "ret_5d", "ret_20d",
+        "vol_ratio_lag_1",  # 직전 거래량 비율
     ],
 }
 
@@ -138,6 +143,7 @@ class SimAgent:
         self.is_active = True  # False면 매수 스킵 (자동 임계값 조정에서 관리)
         self.recent_trades: list[dict] = []
         self._last_position_values: dict[str, float] = {}  # ticker → 현재 평가액
+        self._last_atr_pct: float = 0.0  # ATR 기반 동적 손익용 (predict()에서 업데이트)
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -181,6 +187,26 @@ class SimAgent:
         kelly = (p * b - (1 - p)) / b
         return max(0.1, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 10~50% 범위
 
+    def _sharpe_weight(self) -> float:
+        """최근 거래 수익률 기반 샤프 비율 가중치.
+
+        꾸준히 수익 내는 에이전트를 우대. 운으로 한 번 크게 번 에이전트보다
+        안정적으로 조금씩 버는 에이전트가 앙상블에서 더 큰 발언권을 가짐.
+        거래 5개 미만이면 승률로 폴백.
+        """
+        sell_trades = [
+            t["profit_rate"] for t in self.recent_trades
+            if t.get("action") == "SELL" and t.get("profit_rate") is not None
+        ]
+        if len(sell_trades) < 5:
+            return max(self.win_rate, 0.1)
+        mean_r = float(np.mean(sell_trades))
+        std_r  = float(np.std(sell_trades))
+        if std_r < 1e-9:
+            return max(mean_r * 10 + 0.5, 0.1)
+        sharpe = mean_r / std_r
+        return max(sharpe + 0.5, 0.1)  # 음수 방지 (최소 0.1 보장)
+
     @property
     def interval_str(self) -> str:
         return f"minutes/{self.interval_min}"
@@ -218,10 +244,10 @@ class SimAgent:
 
     # ── 학습 (동기 — asyncio.to_thread 로 호출) ─────────────────
 
-    def train(self, ohlcv_list: list[dict]) -> bool:
+    def train(self, ohlcv_list: list[dict], funding_rates: list[dict] | None = None) -> bool:
         """분봉 OHLCV로 전용 모델 학습."""
         try:
-            feat_df = compute_features(ohlcv_list)
+            feat_df = compute_features(ohlcv_list, funding_rates=funding_rates)
             feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
             if len(feat_df) < 50:
                 return False
@@ -311,9 +337,12 @@ class SimAgent:
         if self._model is None and not self.load_model():
             return "hold", 0.5
         try:
-            full_df = compute_features(ohlcv_list)  # 48개 피처 전체
+            full_df = compute_features(ohlcv_list)  # 전체 피처
             if full_df.empty:
                 return "hold", 0.5
+            # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
+            if "atr_pct" in full_df.columns:
+                self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
             # ADX 레짐 필터 — 횡보장(ADX<20)은 예측 신뢰도 낮으므로 스킵
             if full_df["adx_14"].iloc[-1] < 20:
                 return "hold", 0.5
@@ -548,13 +577,13 @@ async def predict_ensemble(
     if not candidates:
         return "hold", 0.5
 
-    # ── 가중 예측 집계 ───────────────────────────────────────────
+    # ── 가중 예측 집계 (샤프 비율 × 총수익률) ─────────────────────
     weighted_prob = 0.0
     total_weight  = 0.0
     for agent in candidates:
-        wr     = agent.win_rate if agent.total_trades >= 3 else 0.0
-        ret    = max(agent.total_return, -0.5)   # 큰 손실 에이전트 하한 제한
-        weight = max(wr * (1.0 + ret), 0.1)      # 최소 발언권 0.1 보장
+        ret    = max(agent.total_return, -0.5)      # 큰 손실 에이전트 하한 제한
+        sharpe = agent._sharpe_weight()              # 꾸준한 수익 에이전트 우대
+        weight = max(sharpe * max(1.0 + ret, 0.1), 0.1)  # 최소 발언권 0.1 보장
         _, prob = agent.predict(ohlcv_list)
         weighted_prob += prob * weight
         total_weight  += weight

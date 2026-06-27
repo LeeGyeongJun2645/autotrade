@@ -20,11 +20,13 @@ _PRICE_CACHE:    dict[str, tuple[float, float]] = {}  # symbol → (price, ts)
 _FX_CACHE:       tuple[float, float] | None = None    # (usd_krw, ts)
 _FUNDING_CACHE:  dict[str, tuple[float, float]] = {}  # symbol → (rate, ts)
 _KIMCHI_CACHE:   dict[str, tuple[float, float]] = {}  # ticker → (premium%, ts)
+_HIST_FUNDING_CACHE: dict[str, tuple[list, float]] = {}  # symbol:limit → (data, ts)
 
-_PRICE_TTL   = 30.0
-_FX_TTL      = 300.0
-_FUNDING_TTL = 300.0
-_KIMCHI_TTL  = 60.0
+_PRICE_TTL        = 30.0
+_FX_TTL           = 300.0
+_FUNDING_TTL      = 300.0
+_KIMCHI_TTL       = 60.0
+_HIST_FUNDING_TTL = 3600.0  # 8시간 주기 데이터라 1시간 캐시로 충분
 
 
 async def get_binance_price(symbol: str = "BTCUSDT") -> float:
@@ -94,6 +96,34 @@ async def get_funding_rate(symbol: str = "BTCUSDT") -> float:
     except Exception as e:
         logger.warning("[펀딩비] 조회 실패 %s: %s", symbol, e)
         return _FUNDING_CACHE.get(symbol, (0.0, 0))[0]
+
+
+async def get_historical_funding_rates(symbol: str = "BTCUSDT", limit: int = 50) -> list[dict]:
+    """바이낸스 선물 과거 펀딩비 히스토리 반환.
+
+    8시간 주기로 발생. limit=50이면 약 16일치.
+    반환: [{"fundingTime": ms타임스탬프, "fundingRate": "0.0001"}, ...]
+    """
+    cache_key = f"{symbol}:{limit}"
+    now = time.time()
+    if cache_key in _HIST_FUNDING_CACHE:
+        data, ts = _HIST_FUNDING_CACHE[cache_key]
+        if now - ts < _HIST_FUNDING_TTL:
+            return data
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(
+                "https://fapi.binance.com/fapi/v1/fundingRate",
+                params={"symbol": symbol.upper(), "limit": min(limit, 1000)},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            _HIST_FUNDING_CACHE[cache_key] = (data, now)
+            return data
+    except Exception as e:
+        logger.warning("[펀딩비히스토리] 조회 실패 %s: %s", symbol, e)
+        cached = _HIST_FUNDING_CACHE.get(cache_key)
+        return cached[0] if cached else []
 
 
 async def get_kimchi_premium(upbit_krw_price: float, binance_symbol: str = "BTCUSDT") -> float:

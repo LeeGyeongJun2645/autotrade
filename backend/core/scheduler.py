@@ -787,7 +787,15 @@ class TradingScheduler:
 
     async def _agent_execute(self, db, agent, symbol: str, signal: str, prob: float, price: float) -> None:
         """에이전트 단일 종목 가상 매수/매도 실행 + DB 기록."""
-        STOP_LOSS = -0.03  # -3% 손절 — 항상 적용
+        # ── ATR 기반 동적 손익 ────────────────────────────────────────
+        # ATR이 유효하면(>0.1%) 시장 변동성에 자동 적응, 없으면 고정값 폴백
+        atr_pct = agent._last_atr_pct
+        if atr_pct > 0.001:
+            STOP_LOSS   = -(atr_pct * 1.5)          # ATR × 1.5 손절
+            tp_base     = atr_pct * 2.0              # ATR × 2.0 기준 익절
+        else:
+            STOP_LOSS   = -0.03
+            tp_base     = 0.05
 
         # ── 보유 포지션 익절/손절 우선 체크 ─────────────────────────
         if symbol in agent._positions:
@@ -815,20 +823,20 @@ class TradingScheduler:
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
-            # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤 (자금 효율)
+            # 시간 경과 하향 ROI: ATR 기준으로 스케일, 오래 묶일수록 익절 기준 낮춤
             if held_min < 30:
-                take_profit = 0.05    # 30분 미만 → +5% 익절
+                take_profit = tp_base
             elif held_min < 60:
-                take_profit = 0.03    # 30~60분 → +3% 익절
+                take_profit = max(tp_base * 0.6, 0.015)
             else:
-                take_profit = 0.015   # 60분 이상 → +1.5% 익절 (자금 묶임 방지)
+                take_profit = max(tp_base * 0.3, 0.01)
 
             if unreal >= take_profit:
                 signal = "sell"
-                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) @ {price:,.0f}원", "BUY")
+                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "BUY")
             elif unreal <= STOP_LOSS:
                 signal = "sell"
-                sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
+                sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
 
         if signal == "buy":
             trade = agent.virtual_buy(symbol, price)
@@ -896,15 +904,25 @@ class TradingScheduler:
             except Exception:
                 continue
 
+        # ── 코인 펀딩비 히스토리 수집 (BTC 대표값, 50봉 = 약 16일치) ──
+        from backend.api.binance import get_historical_funding_rates
+        coin_funding: list[dict] = []
+        try:
+            coin_funding = await get_historical_funding_rates("BTCUSDT", limit=50)
+            logger.info("[Retrain] 펀딩비 히스토리: %d개", len(coin_funding))
+        except Exception:
+            logger.warning("[Retrain] 펀딩비 히스토리 수집 실패, 펀딩비=0으로 학습")
+
         # ── 에이전트별 재학습 ────────────────────────────────────
         success = 0
         for agent in AGENTS.values():
             data = coin_ohlcv if agent.market == "coin" else stock_ohlcv
+            fr   = coin_funding if agent.market == "coin" else None
             if not data:
                 logger.warning("[Retrain][%s] 학습 데이터 없음, 스킵", agent.agent_id)
                 continue
             try:
-                trained = await asyncio.to_thread(agent.train, data)
+                trained = await asyncio.to_thread(agent.train, data, fr)
                 if trained:
                     success += 1
                     logger.info("[Retrain][%s] 재학습 완료", agent.agent_id)
