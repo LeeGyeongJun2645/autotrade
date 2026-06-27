@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-INITIAL_CAPITAL = 1_000_000.0   # 에이전트당 초기 가상 자금 (100만원)
+INITIAL_CAPITAL = 10_000_000.0  # 에이전트당 초기 가상 자금 (1000만원)
 POSITION_RATIO  = 0.5            # 잔액의 50%씩 사용
 
 # ── 피처 세트 정의 ────────────────────────────────────────────────
@@ -34,14 +34,15 @@ POSITION_RATIO  = 0.5            # 잔액의 50%씩 사용
 FEATURE_SETS: dict[str, list[str]] = {
     "all": FEATURE_NAMES,
     "momentum": [
-        "rsi_14", "macd_diff", "stoch_rsi", "williams_r",
+        "rsi_9", "macd_diff", "stoch_rsi", "williams_r",
         "mfi_14", "roc_10", "ret_1d", "ret_3d", "ret_5d", "ret_10d",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
         "ma5_cross_ma20", "ma20_cross_ma60",
         "adx_14", "adx_pos", "adx_neg",
-        "trix_15", "dpo_20", "vortex_diff", "cci_20",
+        "trix_15", "dpo_20", "vortex_diff",
+        "ema9_cross_ema21", "vwap_ratio", "vwap_cross",
     ],
     "volume": [
         "vol_ratio", "obv_change", "cmf_20",
@@ -49,37 +50,35 @@ FEATURE_SETS: dict[str, list[str]] = {
     ],
 }
 
-# ── 20개 에이전트 설정 ───────────────────────────────────────────
+# ── 20개 에이전트 설정 (전체 5분봉, 중복 전략 없음) ─────────────
 # (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market)
-# market: "coin" → 업비트 24/7 | "stock" → KIS 장중만
+# 승률 1위 → 자정에 해당 마켓 게이트로 흡수됨
 
 AGENT_CONFIGS: list[tuple[str, int, float, float, str, str]] = [
-    # ── 코인 전담 AI01~AI10 (업비트 거래대금 상위 50개, 24/7) ──
-    ("AI01",  1, 0.001, 0.55, "all",      "coin"),
-    ("AI02",  1, 0.002, 0.60, "momentum", "coin"),
-    ("AI03",  1, 0.003, 0.65, "volume",   "coin"),
-    ("AI04",  1, 0.005, 0.55, "trend",    "coin"),
-    ("AI05",  5, 0.001, 0.60, "all",      "coin"),
-    ("AI06",  5, 0.002, 0.55, "momentum", "coin"),
-    ("AI07",  5, 0.003, 0.65, "volume",   "coin"),
-    ("AI08",  5, 0.005, 0.60, "trend",    "coin"),
-    ("AI09",  5, 0.001, 0.65, "all",      "coin"),
-    ("AI10", 15, 0.002, 0.55, "all",      "coin"),
-    # ── 주식 전담 AI11~AI20 (KIS 거래량 상위 50개, 장중만) ──────
-    ("AI11",  1, 0.001, 0.55, "all",      "stock"),
-    ("AI12",  1, 0.002, 0.60, "momentum", "stock"),
-    ("AI13",  5, 0.001, 0.55, "all",      "stock"),
+    # ── 코인 AI01~AI10 (5분봉, 레이블기준×피처세트 다양화) ────────
+    ("AI01",  5, 0.001, 0.55, "all",      "coin"),
+    ("AI02",  5, 0.001, 0.62, "momentum", "coin"),
+    ("AI03",  5, 0.002, 0.55, "trend",    "coin"),
+    ("AI04",  5, 0.002, 0.60, "volume",   "coin"),
+    ("AI05",  5, 0.003, 0.58, "all",      "coin"),
+    ("AI06",  5, 0.003, 0.65, "momentum", "coin"),
+    ("AI07",  5, 0.004, 0.60, "trend",    "coin"),
+    ("AI08",  5, 0.002, 0.60, "volume",   "coin"),
+    ("AI09",  5, 0.005, 0.62, "all",      "coin"),
+    ("AI10",  5, 0.002, 0.62, "momentum", "coin"),
+    # ── 주식 AI11~AI20 (5분봉, 레이블기준×피처세트 다양화) ────────
+    ("AI11",  5, 0.001, 0.55, "all",      "stock"),
+    ("AI12",  5, 0.001, 0.62, "trend",    "stock"),
+    ("AI13",  5, 0.002, 0.55, "momentum", "stock"),
     ("AI14",  5, 0.002, 0.60, "volume",   "stock"),
-    ("AI15",  5, 0.003, 0.65, "trend",    "stock"),
-    ("AI16",  5, 0.005, 0.55, "all",      "stock"),
-    ("AI17", 15, 0.001, 0.60, "all",      "stock"),
-    ("AI18", 15, 0.002, 0.55, "momentum", "stock"),
-    ("AI19", 15, 0.003, 0.65, "volume",   "stock"),
-    ("AI20", 15, 0.005, 0.55, "all",      "stock"),
+    ("AI15",  5, 0.003, 0.58, "all",      "stock"),
+    ("AI16",  5, 0.003, 0.65, "trend",    "stock"),
+    ("AI17",  5, 0.004, 0.60, "momentum", "stock"),
+    ("AI18",  5, 0.004, 0.68, "volume",   "stock"),
+    ("AI19",  5, 0.005, 0.62, "all",      "stock"),
+    ("AI20",  5, 0.005, 0.70, "trend",    "stock"),
 ]
 
-# 에이전트가 감시하는 기본 코인 티커
-DEFAULT_TICKERS = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"]
 
 
 @dataclass
@@ -134,6 +133,7 @@ class SimAgent:
         self.win_trades = 0
         self.is_champion = False
         self.recent_trades: list[dict] = []
+        self._last_position_values: dict[str, float] = {}  # ticker → 현재 평가액
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -141,10 +141,28 @@ class SimAgent:
     def win_rate(self) -> float:
         return self.win_trades / self.total_trades if self.total_trades > 0 else 0.0
 
+    def update_position_values(self, prices: dict[str, float]) -> None:
+        """매 틱마다 포지션 평가액 갱신 — 가격 없으면 마지막 알려진 값 유지."""
+        for ticker, pos in self._positions.items():
+            if ticker in prices:
+                self._last_position_values[ticker] = pos.qty * prices[ticker]
+            elif ticker not in self._last_position_values:
+                self._last_position_values[ticker] = pos.qty * pos.entry_price
+        # 청산된 포지션 제거
+        self._last_position_values = {
+            t: v for t, v in self._last_position_values.items()
+            if t in self._positions
+        }
+
+    @property
+    def position_value(self) -> float:
+        """현재 포지션 총 평가액."""
+        return sum(self._last_position_values.values())
+
     @property
     def total_return(self) -> float:
-        """현재 잔액 기준 총 수익률 (포지션 미실현 손익 제외)."""
-        return (self._balance - INITIAL_CAPITAL) / INITIAL_CAPITAL
+        """현재 잔액 + 포지션 평가액 기준 총 수익률."""
+        return (self._balance + self.position_value - INITIAL_CAPITAL) / INITIAL_CAPITAL
 
     @property
     def interval_str(self) -> str:
@@ -190,22 +208,48 @@ class SimAgent:
             if len(feat_df) < 50:
                 return False
 
-            df_raw = pd.DataFrame(list(reversed(ohlcv_list)))
-            df_raw["date"] = pd.to_datetime(df_raw["date"].astype(str).str[:19])
-            df_raw = df_raw.set_index("date").sort_index()
-            close = df_raw["close"].astype(float)
+            # feat_df와 동일한 인덱스 기반으로 close 추출 (인덱스 불일치 방지)
+            feat_df = feat_df.reset_index(drop=True)
+            close_vals = [float(c["close"]) for c in reversed(ohlcv_list)]
+            close = pd.Series(close_vals)
+            # feat_df 행 수에 맞게 close 뒤에서 자름
+            n = len(feat_df)
+            close = close.iloc[-n:].reset_index(drop=True)
 
-            next_close = close.shift(-1)
-            label = ((next_close / close - 1) >= self.label_threshold).astype(int)
-            label = label.reindex(feat_df.index).dropna()
-            feat_df = feat_df.loc[label.index].iloc[:-1]
-            label = label.iloc[:-1]
+            # ── 노이즈 제거 레이블링 ─────────────────────────────────
+            LOOKAHEAD   = 5       # 5봉(25분) 앞 수익 — 단기 무작위 노이즈 희석
+            NOISE_FLOOR = 0.001   # ±0.1% 이내는 잡음 → 학습 제외
+
+            next_close = close.shift(-LOOKAHEAD)
+            ret   = next_close / close - 1
+            label = (ret >= self.label_threshold).astype(int)
+
+            # 마지막 LOOKAHEAD 행 제거 (next_close NaN)
+            feat_df = feat_df.iloc[:-LOOKAHEAD]
+            label   = label.iloc[:-LOOKAHEAD]
+            ret     = ret.iloc[:-LOOKAHEAD]
+
+            # 길이 보정
+            min_len = min(len(feat_df), len(label))
+            feat_df = feat_df.iloc[:min_len]
+            label   = label.iloc[:min_len]
+            ret     = ret.iloc[:min_len]
+
+            # 모호한 레이블 제거 (±NOISE_FLOOR 이내 수익은 잡음)
+            clear_mask = ret.abs() >= NOISE_FLOOR
+            feat_df = feat_df[clear_mask.values]
+            label   = label[clear_mask.values]
 
             if len(feat_df) < 30 or len(set(label.values)) < 2:
                 return False
 
             X = feat_df.values
             y = label.values.astype(int)
+
+            # 최근 500샘플 2배 가중치 (최신 시장 환경 우선 반영)
+            weights = np.ones(len(X))
+            if len(X) > 500:
+                weights[-500:] = 2.0
 
             scaler = StandardScaler()
             X_s = scaler.fit_transform(X)
@@ -216,11 +260,15 @@ class SimAgent:
                 learning_rate=0.05,
                 subsample=0.8,
                 colsample_bytree=0.8,
+                min_child_weight=5,   # 노드당 최소 5샘플 → 과적합 억제
+                gamma=0.1,            # 분기 최소 이득 → 불필요한 트리 분기 차단
+                reg_alpha=0.1,        # L1 정규화
+                reg_lambda=2.0,       # L2 정규화 (기본값 1 → 2배)
                 eval_metric="logloss",
                 random_state=42,
                 n_jobs=-1,
             )
-            clf.fit(X_s, y, verbose=False)
+            clf.fit(X_s, y, sample_weight=weights, verbose=False)
 
             self._model = clf
             self._scaler = scaler
@@ -239,8 +287,13 @@ class SimAgent:
         if self._model is None and not self.load_model():
             return "hold", 0.5
         try:
-            feat_df = compute_features(ohlcv_list)
-            feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
+            full_df = compute_features(ohlcv_list)  # 48개 피처 전체
+            if full_df.empty:
+                return "hold", 0.5
+            # ADX 레짐 필터 — 횡보장(ADX<20)은 예측 신뢰도 낮으므로 스킵
+            if full_df["adx_14"].iloc[-1] < 20:
+                return "hold", 0.5
+            feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:
                 return "hold", 0.5
             X_last = feat_df.iloc[[-1]].values
@@ -248,6 +301,72 @@ class SimAgent:
             prob = float(self._model.predict_proba(X_scaled)[0, 1])  # type: ignore[union-attr]
         except Exception:
             return "hold", 0.5
+
+        if prob >= self.buy_threshold:
+            return "buy", round(prob, 4)
+        if prob <= (1.0 - self.buy_threshold):
+            return "sell", round(prob, 4)
+        return "hold", round(prob, 4)
+
+    async def predict_live(self, ohlcv_list: list[dict], ticker: str | None = None) -> tuple[str, float]:
+        """실시간 보정 포함 예측 — 실매매 게이트 전용.
+
+        기본 predict() 확률에 공포탐욕·김치프리미엄·펀딩비·호가창·기관외국인을 실시간 반영.
+        """
+        _, prob = self.predict(ohlcv_list)
+
+        if self.market == "coin" and ticker:
+            # 공포탐욕 지수 (탐욕→과열 하향, 공포→저평가 상향)
+            try:
+                from backend.ml.model import _get_fear_greed
+                fg = await _get_fear_greed()
+                prob = max(0.01, min(0.99, prob - fg * 0.04))
+            except Exception:
+                pass
+
+            # 김치프리미엄 + 펀딩비
+            try:
+                coin_sym = ticker.replace("KRW-", "") + "USDT"
+                current_price = float(ohlcv_list[0]["close"])
+                from backend.api.binance import get_funding_rate, get_kimchi_premium
+                kimchi, funding = await asyncio.gather(
+                    get_kimchi_premium(current_price, coin_sym),
+                    get_funding_rate(coin_sym),
+                )
+                if kimchi > 3.0:
+                    prob = max(0.01, prob - min((kimchi - 3.0) * 0.01, 0.05))
+                elif kimchi < -1.0:
+                    prob = min(0.99, prob + min((-kimchi - 1.0) * 0.01, 0.03))
+                if abs(funding) > 0.001:
+                    fund_adj = min(abs(funding) * 20, 0.04) * (1 if funding > 0 else -1)
+                    prob = max(0.01, min(0.99, prob - fund_adj))
+            except Exception:
+                pass
+
+            # 업비트 호가창 buy_pressure
+            try:
+                from backend.api.upbit import get_orderbook
+                ob = await get_orderbook(ticker)
+                prob = max(0.01, min(0.99, prob + (ob.get("buy_pressure", 0.5) - 0.5) * 0.08))
+            except Exception:
+                pass
+
+        elif self.market == "stock" and ticker:
+            # KIS 호가창 + 기관/외국인 순매수
+            try:
+                from backend.api.kis import get_investor_trend, get_orderbook_kis
+                ob, inv = await asyncio.gather(
+                    get_orderbook_kis(ticker),
+                    get_investor_trend(ticker),
+                )
+                prob = max(0.01, min(0.99, prob + (ob.get("buy_pressure", 0.5) - 0.5) * 0.06))
+                net = inv.get("institution_net_buy", 0) + inv.get("foreign_net_buy", 0)
+                if net > 0:
+                    prob = min(0.99, prob + 0.02)
+                elif net < 0:
+                    prob = max(0.01, prob - 0.02)
+            except Exception:
+                pass
 
         if prob >= self.buy_threshold:
             return "buy", round(prob, 4)
@@ -323,58 +442,155 @@ class SimAgent:
     # ── 직렬화 ─────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
+        pos_value = self.position_value
+        total_value = self._balance + pos_value
+        positions_detail = {}
+        for ticker, pos in self._positions.items():
+            cost = pos.entry_price * pos.qty
+            cur_val = self._last_position_values.get(ticker, cost)
+            positions_detail[ticker] = {
+                "entry_price":         pos.entry_price,
+                "qty":                 pos.qty,
+                "entered_at":          pos.entered_at,
+                "current_value":       round(cur_val, 0),
+                "unrealized_pnl_pct":  round((cur_val / cost - 1) * 100, 2) if cost > 0 else 0.0,
+            }
         return {
-            "agent_id":        self.agent_id,
-            "market":          self.market,
-            "interval_min":    self.interval_min,
-            "label_threshold": self.label_threshold,
-            "buy_threshold":   self.buy_threshold,
-            "feature_set":     self.feature_set,
-            "balance":         round(self._balance, 0),
+            "agent_id":         self.agent_id,
+            "market":           self.market,
+            "interval_min":     self.interval_min,
+            "label_threshold":  self.label_threshold,
+            "buy_threshold":    self.buy_threshold,
+            "feature_set":      self.feature_set,
+            "balance":          round(self._balance, 0),
+            "position_value":   round(pos_value, 0),
+            "total_value":      round(total_value, 0),
             "total_return_pct": round(self.total_return * 100, 2),
-            "win_rate":        round(self.win_rate * 100, 1),
-            "total_trades":    self.total_trades,
-            "win_trades":      self.win_trades,
-            "is_champion":     self.is_champion,
-            "trained_at":      self._trained_at,
-            "positions": {
-                ticker: {
-                    "entry_price": pos.entry_price,
-                    "qty":         pos.qty,
-                    "entered_at":  pos.entered_at,
-                }
-                for ticker, pos in self._positions.items()
-            },
-            "recent_trades": self.recent_trades[:10],
+            "win_rate":         round(self.win_rate * 100, 1),
+            "total_trades":     self.total_trades,
+            "win_trades":       self.win_trades,
+            "is_champion":      self.is_champion,
+            "trained_at":       self._trained_at,
+            "positions":        positions_detail,
+            "recent_trades":    self.recent_trades[:20],
         }
 
 
 # ── 싱글톤 에이전트 풀 ────────────────────────────────────────────
 
 def build_agents() -> dict[str, SimAgent]:
-    return {
-        cfg[0]: SimAgent(*cfg)
-        for cfg in AGENT_CONFIGS
-    }
+    return {cfg[0]: SimAgent(*cfg) for cfg in AGENT_CONFIGS}
 
 
 AGENTS: dict[str, SimAgent] = build_agents()
 
 
-def get_champion() -> SimAgent | None:
-    """승률 최고 에이전트 반환 (최소 10거래 이상)."""
+def get_champion(market: str | None = None) -> SimAgent | None:
+    """마켓별 총 자산(잔액+포지션) 1위 에이전트 반환 (최소 10거래)."""
     candidates = [a for a in AGENTS.values() if a.total_trades >= 10]
+    if market:
+        candidates = [a for a in candidates if a.market == market]
+    return max(candidates, key=lambda a: a.total_return) if candidates else None
+
+
+async def predict_ensemble(
+    ohlcv_list: list[dict],
+    ticker: str,
+    market: str,
+) -> tuple[str, float]:
+    """가중 앙상블 게이트 — 전 에이전트 동적 투표 + 실시간 보정.
+
+    가중치 = 승률 × (1 + 총수익률).
+    지금 잘하는 전략이 자동으로 발언권이 커져서 장세에 자동 적응.
+    """
+    candidates = [
+        a for a in AGENTS.values()
+        if a.market == market and a._model is not None
+    ]
     if not candidates:
-        return None
-    return max(candidates, key=lambda a: a.win_rate)
+        return "hold", 0.5
+
+    # ── 가중 예측 집계 ───────────────────────────────────────────
+    weighted_prob = 0.0
+    total_weight  = 0.0
+    for agent in candidates:
+        wr     = agent.win_rate if agent.total_trades >= 3 else 0.0
+        ret    = max(agent.total_return, -0.5)   # 큰 손실 에이전트 하한 제한
+        weight = max(wr * (1.0 + ret), 0.1)      # 최소 발언권 0.1 보장
+        _, prob = agent.predict(ohlcv_list)
+        weighted_prob += prob * weight
+        total_weight  += weight
+
+    final_prob = weighted_prob / total_weight if total_weight > 0 else 0.5
+
+    # ── 실시간 보정 (시장 데이터 1회씩만 조회) ──────────────────
+    if market == "coin" and ticker:
+        try:
+            from backend.ml.model import _get_fear_greed
+            fg = await _get_fear_greed()
+            final_prob = max(0.01, min(0.99, final_prob - fg * 0.04))
+        except Exception:
+            pass
+        try:
+            coin_sym = ticker.replace("KRW-", "") + "USDT"
+            current_price = float(ohlcv_list[0]["close"])
+            from backend.api.binance import get_funding_rate, get_kimchi_premium
+            kimchi, funding = await asyncio.gather(
+                get_kimchi_premium(current_price, coin_sym),
+                get_funding_rate(coin_sym),
+            )
+            if kimchi > 3.0:
+                final_prob = max(0.01, final_prob - min((kimchi - 3.0) * 0.01, 0.05))
+            elif kimchi < -1.0:
+                final_prob = min(0.99, final_prob + min((-kimchi - 1.0) * 0.01, 0.03))
+            if abs(funding) > 0.001:
+                fund_adj = min(abs(funding) * 20, 0.04) * (1 if funding > 0 else -1)
+                final_prob = max(0.01, min(0.99, final_prob - fund_adj))
+        except Exception:
+            pass
+        try:
+            from backend.api.upbit import get_orderbook
+            ob = await get_orderbook(ticker)
+            final_prob = max(0.01, min(0.99, final_prob + (ob.get("buy_pressure", 0.5) - 0.5) * 0.08))
+        except Exception:
+            pass
+
+    elif market == "stock" and ticker:
+        try:
+            from backend.api.kis import get_investor_trend, get_orderbook_kis
+            ob, inv = await asyncio.gather(
+                get_orderbook_kis(ticker),
+                get_investor_trend(ticker),
+            )
+            final_prob = max(0.01, min(0.99, final_prob + (ob.get("buy_pressure", 0.5) - 0.5) * 0.06))
+            net = inv.get("institution_net_buy", 0) + inv.get("foreign_net_buy", 0)
+            if net > 0:
+                final_prob = min(0.99, final_prob + 0.02)
+            elif net < 0:
+                final_prob = max(0.01, final_prob - 0.02)
+        except Exception:
+            pass
+
+    # ── 임계값: 학습된 에이전트 buy_threshold 가중 평균 ─────────
+    avg_thr = sum(a.buy_threshold for a in candidates) / len(candidates)
+
+    if final_prob >= avg_thr:
+        return "buy", round(final_prob, 4)
+    if final_prob <= (1.0 - avg_thr):
+        return "sell", round(final_prob, 4)
+    return "hold", round(final_prob, 4)
 
 
-def update_champion() -> str | None:
-    """챔피언 재선정 후 agent_id 반환."""
-    for a in AGENTS.values():
-        a.is_champion = False
-    champ = get_champion()
-    if champ:
-        champ.is_champion = True
-        return champ.agent_id
-    return None
+def refresh_champion_flags() -> None:
+    """마켓별 총자산 1위 에이전트에 is_champion=True 표시 (UI 전용, 실시간 갱신).
+
+    게이트는 앙상블 투표 방식이므로 챔피언 플래그는 순위 표시 목적만 가짐.
+    _agent_tick 끝에서 5분마다 호출.
+    """
+    for market in ("coin", "stock"):
+        market_agents = [a for a in AGENTS.values() if a.market == market]
+        for a in market_agents:
+            a.is_champion = False
+        active = [a for a in market_agents if a.total_trades > 0]
+        if active:
+            max(active, key=lambda a: a.total_return).is_champion = True

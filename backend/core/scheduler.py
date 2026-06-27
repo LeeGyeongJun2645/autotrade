@@ -29,6 +29,7 @@ from backend.strategies import volatility_breakout as vb_strategy
 logger = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
+_OHLCV_SEM = asyncio.Semaphore(10)  # 업비트/KIS OHLCV 동시 요청 최대 10개
 
 
 class TradingScheduler:
@@ -120,33 +121,6 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # ML 모델 자동 재학습: 매주 월요일 07:00 KST
-        self._scheduler.add_job(
-            self._weekly_ml_train,
-            CronTrigger(day_of_week="mon", hour=7, minute=0, timezone=KST),
-            id="weekly_ml_train",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
-        # ML 신호 체크 (코인): 매 정각 24/7
-        self._scheduler.add_job(
-            self._ml_upbit_tick,
-            CronTrigger(minute=0, timezone=KST),
-            id="ml_upbit_tick",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
-        # ML 신호 체크 (주식): 평일 장중 30분마다
-        self._scheduler.add_job(
-            self._ml_kis_tick,
-            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/30", timezone=KST),
-            id="ml_kis_tick",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
         # AI 에이전트 경쟁 시뮬레이션: 5분마다
         self._scheduler.add_job(
             self._agent_tick,
@@ -156,11 +130,11 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # 챔피언 선정: 매일 00:00
+        # 전 에이전트 일일 재학습: 매일 03:00 (거래 없는 새벽, 최신 데이터 반영)
         self._scheduler.add_job(
-            self._agent_champion_update,
-            CronTrigger(hour=0, minute=0, timezone=KST),
-            id="agent_champion",
+            self._daily_retrain,
+            CronTrigger(hour=3, minute=0, timezone=KST),
+            id="daily_retrain",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -206,25 +180,24 @@ class TradingScheduler:
                 await self._execute_kis_sell(symbol, position, exit_signal.reason, current_price)
                 return
 
-            # MA/RSI 전략은 전략 자체의 청산 신호도 확인 (데드크로스 / RSI 과매수)
-            # 변동성 돌파는 EOD 잡(_kis_eod_sell)에서 처리하므로 제외
+            # MA/RSI 전략 청산 신호 확인 (5분봉)
             if position.strategy in ("moving_average", "rsi"):
-                ohlcv = await kis.get_daily_ohlcv(symbol, count=70)
-                sell = self._check_strategy_sell(ohlcv, position.strategy)
+                ohlcv_5min = await kis.get_minute_ohlcv(symbol, interval_min=5, count=300)
+                sell = self._check_strategy_sell(ohlcv_5min, position.strategy)
                 if sell is not None and sell.is_sell:
                     await self._execute_kis_sell(symbol, position, "STRATEGY_SELL", current_price)
             return
 
-        # ── 포지션 없음: 매수 신호 탐색 ──
-        ohlcv = await kis.get_daily_ohlcv(symbol, count=200)
-        result, strategy_name = self._run_kis_strategies(ohlcv, current_price)
+        # ── 포지션 없음: 매수 신호 탐색 (5분봉) ──
+        ohlcv_5min = await kis.get_minute_ohlcv(symbol, interval_min=5, count=300)
+        result, strategy_name = self._run_kis_strategies(ohlcv_5min, current_price)
         if result.is_buy:
-            ml_ok = await self._check_ml_gate(symbol, ohlcv)
+            ml_ok = await self._check_ml_gate(symbol, ohlcv_5min, market="stock")
             if ml_ok:
-                sim_log.push(symbol, f"{strategy_name}+ML 이중확인 — {result.reason} @ {current_price:,.0f}원", "BUY")
+                sim_log.push(symbol, f"{strategy_name}+5분봉ML — {result.reason} @ {current_price:,.0f}원", "BUY")
                 await self._execute_kis_buy(symbol, current_price, result, strategy_name)
             else:
-                sim_log.push(symbol, f"{strategy_name} 신호 있으나 ML 이중확인 차단 @ {current_price:,.0f}원", "INFO")
+                sim_log.push(symbol, f"{strategy_name} 신호 있으나 ML 차단 @ {current_price:,.0f}원", "INFO")
         else:
             sim_log.push(symbol, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
 
@@ -250,26 +223,32 @@ class TradingScheduler:
         )
         return result, "rsi"
 
-    async def _check_ml_gate(self, symbol: str, ohlcv: list) -> bool:
-        """ML 이중 확인 게이트. buy/strong_buy일 때만 True 반환.
+    async def _check_ml_gate(self, symbol: str, ohlcv_5min: list, market: str = "coin") -> bool:
+        """앙상블 ML 게이트.
 
-        모델 미학습이면 True(게이트 통과)로 처리해 기존 전략대로 동작.
+        모든 학습된 에이전트가 최근 성과 기반 가중 투표.
+        지금 잘 맞히는 전략이 자동으로 발언권 커짐 → 장세 변화 자동 적응.
+        학습된 에이전트 없으면 초기 상태이므로 통과.
         """
+        from backend.ml.agents import AGENTS, predict_ensemble
+
+        trained = [a for a in AGENTS.values() if a.market == market and a._model is not None]
+        if not trained:
+            logger.info("[ML Gate][%s] 학습된 에이전트 없음 → 통과", symbol)
+            return True
+
         try:
-            from backend.ml.model import XGBSignalModel
-            model = XGBSignalModel(symbol)
-            result = await model.predict(ohlcv, settings.cryptopanic_token)
-            approved = result.signal in ("buy", "strong_buy")
+            signal, prob = await predict_ensemble(ohlcv_5min, ticker=symbol, market=market)
+            approved = signal == "buy"
+            n = len(trained)
             logger.info(
-                "[ML Gate][%s] %s (확률 %.1f%%) → %s",
-                symbol, result.signal, result.buy_prob * 100,
+                "[ML Gate][%s] 앙상블(%d개) %s %.1f%% → %s",
+                symbol, n, signal, prob * 100,
                 "통과" if approved else "차단",
             )
             return approved
-        except RuntimeError:
-            return True  # 모델 없음 → 통과
         except Exception:
-            logger.warning("[ML Gate][%s] 체크 실패, 통과 처리", symbol)
+            logger.warning("[ML Gate][%s] 앙상블 실패, 통과 처리", symbol)
             return True
 
     def _check_strategy_sell(
@@ -404,24 +383,24 @@ class TradingScheduler:
                 await self._execute_upbit_sell(ticker, position, exit_signal.reason, current_price)
                 return
 
-            # MA/RSI 전략 기반 청산
+            # MA/RSI 전략 기반 청산 (5분봉)
             if position.strategy in ("moving_average", "rsi"):
-                ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=70)
-                sell = self._check_strategy_sell(ohlcv, position.strategy)
+                ohlcv_5min = await upbit.get_ohlcv(ticker, interval="minutes/5", count=300)
+                sell = self._check_strategy_sell(ohlcv_5min, position.strategy)
                 if sell is not None and sell.is_sell:
                     await self._execute_upbit_sell(ticker, position, "STRATEGY_SELL", current_price)
             return
 
-        # ── 포지션 없음: 매수 신호 탐색 ──
-        ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=200)
-        result, strategy_name = self._run_upbit_strategies(ohlcv, current_price)
+        # ── 포지션 없음: 매수 신호 탐색 (5분봉) ──
+        ohlcv_5min = await upbit.get_ohlcv(ticker, interval="minutes/5", count=300)
+        result, strategy_name = self._run_upbit_strategies(ohlcv_5min, current_price)
         if result.is_buy:
-            ml_ok = await self._check_ml_gate(ticker, ohlcv)
+            ml_ok = await self._check_ml_gate(ticker, ohlcv_5min, market="coin")
             if ml_ok:
-                sim_log.push(ticker, f"{strategy_name}+ML 이중확인 — {result.reason} @ {current_price:,.0f}원", "BUY")
+                sim_log.push(ticker, f"{strategy_name}+5분봉ML — {result.reason} @ {current_price:,.0f}원", "BUY")
                 await self._execute_upbit_buy(ticker, current_price, result, strategy_name)
             else:
-                sim_log.push(ticker, f"{strategy_name} 신호 있으나 ML 이중확인 차단 @ {current_price:,.0f}원", "INFO")
+                sim_log.push(ticker, f"{strategy_name} 신호 있으나 ML 차단 @ {current_price:,.0f}원", "INFO")
         else:
             sim_log.push(ticker, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
 
@@ -520,97 +499,6 @@ class TradingScheduler:
         except Exception:
             logger.exception("[리포트] 일일 리포트 실행 중 예외")
 
-    async def _weekly_ml_train(self) -> None:
-        """매주 월요일 07:00 — 업비트 ML 모델 자동 재학습."""
-        try:
-            from backend.ml.trainer import train_all
-            targets = self._upbit_tickers if self._upbit_tickers else None
-            results = await train_all(targets)
-            logger.info("[ML] 주간 재학습 완료: %d개 모델", len(results))
-            sim_log.push("ML", f"주간 재학습 완료: {len(results)}개 모델", "INFO")
-        except Exception:
-            logger.exception("[ML] 주간 재학습 중 예외")
-
-    async def _ml_upbit_tick(self) -> None:
-        """매 정각 — 감시 중인 업비트 티커 ML 신호 체크 및 텔레그램 알림."""
-        from backend.api import upbit
-        from backend.ml.model import XGBSignalModel
-
-        tickers = self._upbit_tickers or ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"]
-        for ticker in tickers:
-            try:
-                ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=200)
-                model = XGBSignalModel(ticker)
-                result = await model.predict(ohlcv, settings.cryptopanic_token)
-
-                prev = self._ml_signals.get(ticker, {})
-                prev_signal = prev.get("signal")
-                self._ml_signals[ticker] = {
-                    "signal":     result.signal,
-                    "buy_prob":   result.buy_prob,
-                    "news_score": result.news_score,
-                    "checked_at": datetime.now(KST).strftime("%H:%M"),
-                }
-
-                signal_changed = prev_signal and prev_signal != result.signal
-                is_notable = result.signal in ("buy", "strong_buy", "strong_sell")
-
-                level = "BUY" if "buy" in result.signal else ("SELL" if "sell" in result.signal else "INFO")
-                sim_log.push(
-                    ticker,
-                    f"[ML] {result.signal} | 확률 {result.buy_prob:.1%} | 뉴스 {result.news_score:+.3f}",
-                    level,
-                )
-
-                if signal_changed or is_notable:
-                    await telegram.notify_ml_signal(
-                        ticker, result.signal, result.buy_prob,
-                        result.news_score, prev_signal if signal_changed else None,
-                    )
-
-            except RuntimeError:
-                # 모델 미학습 상태 — 조용히 skip
-                pass
-            except Exception:
-                logger.exception("[ML][%s] 업비트 신호 체크 실패", ticker)
-
-    async def _ml_kis_tick(self) -> None:
-        """평일 장중 30분마다 — 감시 중인 KIS 종목 ML 신호 체크."""
-        from backend.ml.model import XGBSignalModel
-        from backend.ml.news import get_sentiment_score
-
-        # KIS는 일봉 데이터 기반, ML 예측은 동일 모델 구조 사용
-        # 주식용 모델이 없으면 뉴스 감성만 체크
-        for symbol in list(self._kis_symbols):
-            try:
-                news_score = await get_sentiment_score(symbol)
-                prev = self._ml_signals.get(symbol, {})
-                prev_score = prev.get("news_score", 0.0)
-
-                self._ml_signals[symbol] = {
-                    "signal":     "hold",
-                    "buy_prob":   0.5,
-                    "news_score": news_score,
-                    "checked_at": datetime.now(KST).strftime("%H:%M"),
-                }
-
-                # 뉴스 감성이 크게 변했을 때 알림 (±0.3 이상 변화)
-                score_shift = abs(news_score - prev_score)
-                if score_shift >= 0.3:
-                    direction = "긍정적" if news_score > prev_score else "부정적"
-                    sim_log.push(
-                        symbol,
-                        f"[뉴스] 감성 변화 {prev_score:+.3f} → {news_score:+.3f} ({direction})",
-                        "WARN",
-                    )
-                    await telegram.notify_ml_signal(
-                        symbol, "hold", 0.5, news_score,
-                    )
-
-            except Exception:
-                logger.exception("[ML][%s] KIS 신호 체크 실패", symbol)
-
-
     async def _agent_tick(self) -> None:
         """5분마다 — 20개 에이전트 가상 매매 실행.
 
@@ -644,66 +532,132 @@ class TradingScheduler:
             except Exception:
                 stock_symbols = list(self._kis_symbols)
 
-        # OHLCV 캐시 (같은 틱 안에서 재사용)
-        ohlcv_cache: dict[str, list] = {}
+        # ── 코인 인터벌별 OHLCV + 현재가 병렬 프리패치 ────────────
+        coin_intervals = list({a.interval_str for a in AGENTS.values() if a.market == "coin"})
 
-        async def _coin_ohlcv(ticker: str, interval: str) -> list:
-            key = f"{ticker}:{interval}"
-            if key not in ohlcv_cache:
-                try:
-                    ohlcv_cache[key] = await _upbit.get_ohlcv(ticker, interval=interval, count=200)
-                except Exception:
-                    ohlcv_cache[key] = []
-            return ohlcv_cache[key]
+        # 보유 포지션 코인이 상위 50개에서 빠져도 반드시 청산 체크
+        open_coin_pos = {
+            t for a in AGENTS.values() if a.market == "coin"
+            for t in a._positions.keys()
+        }
+        extra_tickers = sorted(open_coin_pos - set(coin_tickers))
+        fetch_coin_tickers = coin_tickers + extra_tickers
+        if extra_tickers:
+            logger.info("[AgentTick] 상위50 이탈 포지션 %d개 추가 조회: %s", len(extra_tickers), extra_tickers)
 
-        async def _stock_ohlcv(symbol: str, interval_min: int) -> list:
-            key = f"KIS:{symbol}:{interval_min}"
-            if key not in ohlcv_cache:
+        async def _fetch_coin_ohlcv(ticker: str, interval: str) -> tuple[str, str, list]:
+            async with _OHLCV_SEM:
                 try:
-                    ohlcv_cache[key] = await _kis.get_minute_ohlcv(symbol, interval_min, count=200)
+                    data = await _upbit.get_ohlcv(ticker, interval=interval, count=200)
                 except Exception:
-                    ohlcv_cache[key] = []
-            return ohlcv_cache[key]
+                    data = []
+            return ticker, interval, data
+
+        async def _fetch_coin_price(ticker: str) -> tuple[str, float]:
+            try:
+                pd_ = await _upbit.get_price(ticker)
+                return ticker, float(pd_["current_price"])
+            except Exception:
+                return ticker, 0.0
+
+        # 병렬 OHLCV 요청 (fetch_coin_tickers × 코인 인터벌 수)
+        ohlcv_tasks = [
+            _fetch_coin_ohlcv(t, iv) for t in fetch_coin_tickers for iv in coin_intervals
+        ]
+        ohlcv_results = await asyncio.gather(*ohlcv_tasks)
+        ohlcv_cache: dict[str, list] = {
+            f"{t}:{iv}": data for t, iv, data in ohlcv_results
+        }
+
+        # 배치 현재가 (상위50 + 포지션 보유 코인 — 1회 요청으로 429 방지)
+        try:
+            coin_prices = await _upbit.get_prices_batch(fetch_coin_tickers)
+        except Exception:
+            coin_prices = {}
+
+        # 주식 OHLCV + 현재가도 병렬 프리패치
+        stock_intervals = list({a.interval_min for a in AGENTS.values() if a.market == "stock"})
+        stock_ohlcv_cache: dict[str, list] = {}
+        stock_prices: dict[str, float] = {}
+
+        if is_market_open and stock_symbols:
+            async def _fetch_stock_ohlcv(sym: str, iv_min: int) -> tuple[str, int, list]:
+                async with _OHLCV_SEM:
+                    try:
+                        data = await _kis.get_minute_ohlcv(sym, iv_min, count=200)
+                    except Exception:
+                        data = []
+                return sym, iv_min, data
+
+            async def _fetch_stock_price(sym: str) -> tuple[str, float]:
+                try:
+                    pd_ = await _kis.get_price(sym)
+                    return sym, float(pd_["current_price"])
+                except Exception:
+                    return sym, 0.0
+
+            s_ohlcv_tasks = [
+                _fetch_stock_ohlcv(s, iv) for s in stock_symbols for iv in stock_intervals
+            ]
+            s_results = await asyncio.gather(*s_ohlcv_tasks)
+            stock_ohlcv_cache = {f"{s}:{iv}": data for s, iv, data in s_results}
+
+            sp_results = await asyncio.gather(*[_fetch_stock_price(s) for s in stock_symbols])
+            stock_prices = {s: p for s, p in sp_results if p > 0}
 
         async with aiosqlite.connect(DB_PATH) as db:
             for agent in AGENTS.values():
                 try:
                     if agent.market == "coin":
                         # ── 코인 전담 (AI01~AI10): 24/7 ──────────────
-                        for ticker in coin_tickers:
-                            ohlcv = await _coin_ohlcv(ticker, agent.interval_str)
+                        agent.update_position_values(coin_prices)
+                        for ticker in fetch_coin_tickers:
+                            ohlcv = ohlcv_cache.get(f"{ticker}:{agent.interval_str}", [])
                             if not ohlcv:
                                 continue
                             if agent._model is None and not agent.load_model():
-                                trained = await asyncio.to_thread(agent.train, ohlcv)
+                                # 학습용 1주일치 데이터 별도 조회 (코인: 2016봉 이상)
+                                train_count = 2000 if agent.interval_min <= 5 else 700
+                                try:
+                                    train_ohlcv = await _upbit.get_ohlcv(
+                                        ticker, interval=agent.interval_str, count=train_count
+                                    )
+                                except Exception:
+                                    train_ohlcv = ohlcv
+                                trained = await asyncio.to_thread(agent.train, train_ohlcv)
                                 if not trained:
                                     continue
-                            signal, prob = agent.predict(ohlcv)
-                            try:
-                                price_data = await _upbit.get_price(ticker)
-                                price = float(price_data["current_price"])
-                            except Exception:
+                            price = coin_prices.get(ticker, 0.0)
+                            if price <= 0:
                                 continue
+                            signal, prob = agent.predict(ohlcv)
                             await self._agent_execute(db, agent, ticker, signal, prob, price)
 
                     else:
                         # ── 주식 전담 (AI11~AI20): 장중만 ────────────
                         if not is_market_open:
-                            continue  # 장 마감 후 신규 매수 없음
+                            continue
+                        agent.update_position_values(stock_prices)
                         for symbol in stock_symbols:
-                            ohlcv = await _stock_ohlcv(symbol, agent.interval_min)
+                            ohlcv = stock_ohlcv_cache.get(f"{symbol}:{agent.interval_min}", [])
                             if not ohlcv:
                                 continue
                             if agent._model is None and not agent.load_model():
-                                trained = await asyncio.to_thread(agent.train, ohlcv)
+                                # 학습용 1주일치 데이터 별도 조회 (주식 5분봉: 390봉/주)
+                                train_count = 500 if agent.interval_min <= 5 else 200
+                                try:
+                                    train_ohlcv = await _kis.get_minute_ohlcv(
+                                        symbol, agent.interval_min, count=train_count
+                                    )
+                                except Exception:
+                                    train_ohlcv = ohlcv
+                                trained = await asyncio.to_thread(agent.train, train_ohlcv)
                                 if not trained:
                                     continue
-                            signal, prob = agent.predict(ohlcv)
-                            try:
-                                price_data = await _kis.get_price(symbol)
-                                price = float(price_data["current_price"])
-                            except Exception:
+                            price = stock_prices.get(symbol, 0.0)
+                            if price <= 0:
                                 continue
+                            signal, prob = agent.predict(ohlcv)
                             await self._agent_execute(db, agent, symbol, signal, prob, price)
 
                     # agent_stats upsert
@@ -731,9 +685,24 @@ class TradingScheduler:
 
             await db.commit()
 
+        from backend.ml.agents import refresh_champion_flags
+        refresh_champion_flags()
+
     async def _agent_execute(self, db, agent, symbol: str, signal: str, prob: float, price: float) -> None:
         """에이전트 단일 종목 가상 매수/매도 실행 + DB 기록."""
-        from backend.ml.agents import AgentTrade
+        TAKE_PROFIT = 0.05   # +5% 익절 — ML 신호 없어도 수익 실현
+        STOP_LOSS   = -0.03  # -3% 손절 — ML 신호 없어도 손실 차단
+
+        # ── 보유 포지션 익절/손절 우선 체크 ─────────────────────────
+        if symbol in agent._positions:
+            pos = agent._positions[symbol]
+            unreal = (price - pos.entry_price) / pos.entry_price
+            if unreal >= TAKE_PROFIT:
+                signal = "sell"
+                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% @ {price:,.0f}원", "BUY")
+            elif unreal <= STOP_LOSS:
+                signal = "sell"
+                sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
 
         if signal == "buy":
             trade = agent.virtual_buy(symbol, price)
@@ -755,19 +724,76 @@ class TradingScheduler:
                 level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
                 sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
 
-    async def _agent_champion_update(self) -> None:
-        """매일 자정 — 챔피언 에이전트 선정 + 텔레그램 알림."""
-        from backend.ml.agents import update_champion
-        champ_id = update_champion()
-        if champ_id:
-            logger.info("[Agent] 챔피언 선정: %s", champ_id)
-            sim_log.push("AGENT", f"챔피언 선정: {champ_id}", "INFO")
-            await telegram.notify_message(f"🏆 <b>AI 챔피언 선정</b>\n에이전트: <code>{champ_id}</code>")
+    async def _daily_retrain(self) -> None:
+        """매일 03:00 KST — 전 에이전트 최신 데이터로 재학습.
+
+        코인: BTC·ETH·XRP·SOL 4개 순차 시도, 첫 성공 데이터 사용 (2000봉 = 약 7일치)
+        주식: 삼성전자·SK하이닉스·NAVER 3개 순차 시도 (500봉 = 약 2일치)
+        에이전트별로 피처셋이 다르므로 같은 데이터로 학습해도 모델이 달라짐.
+        """
+        from backend.api import upbit as _upbit, kis as _kis
+        from backend.ml.agents import AGENTS
+
+        logger.info("[Retrain] 전 에이전트 일일 재학습 시작")
+
+        # ── 학습 데이터 수집 ─────────────────────────────────────
+        COIN_TICKERS  = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL"]
+        STOCK_SYMBOLS = ["005930", "000660", "035420"]  # 삼성전자, SK하이닉스, NAVER
+
+        coin_ohlcv: list[dict] = []
+        for ticker in COIN_TICKERS:
+            try:
+                coin_ohlcv = await _upbit.get_ohlcv(ticker, interval="minutes/5", count=2000)
+                if len(coin_ohlcv) >= 500:
+                    logger.info("[Retrain] 코인 학습 데이터: %s (%d봉)", ticker, len(coin_ohlcv))
+                    break
+            except Exception:
+                continue
+
+        stock_ohlcv: list[dict] = []
+        for symbol in STOCK_SYMBOLS:
+            try:
+                stock_ohlcv = await _kis.get_minute_ohlcv(symbol, 5, count=500)
+                if len(stock_ohlcv) >= 100:
+                    logger.info("[Retrain] 주식 학습 데이터: %s (%d봉)", symbol, len(stock_ohlcv))
+                    break
+            except Exception:
+                continue
+
+        # ── 에이전트별 재학습 ────────────────────────────────────
+        success = 0
+        for agent in AGENTS.values():
+            data = coin_ohlcv if agent.market == "coin" else stock_ohlcv
+            if not data:
+                logger.warning("[Retrain][%s] 학습 데이터 없음, 스킵", agent.agent_id)
+                continue
+            try:
+                trained = await asyncio.to_thread(agent.train, data)
+                if trained:
+                    success += 1
+                    logger.info("[Retrain][%s] 재학습 완료", agent.agent_id)
+                else:
+                    logger.warning("[Retrain][%s] 재학습 실패 (데이터 부족 또는 레이블 편향)", agent.agent_id)
+            except Exception:
+                logger.exception("[Retrain][%s] 재학습 중 예외", agent.agent_id)
+
+        logger.info("[Retrain] 완료: %d/20 에이전트 재학습", success)
+        try:
+            await telegram.notify_message(
+                f"🔄 <b>AI 일일 재학습 완료</b>\n"
+                f"성공: {success}/20 에이전트\n"
+                f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv)}봉"
+            )
+        except Exception:
+            pass
 
     def get_agents_snapshot(self) -> list[dict]:
-        """현재 20개 에이전트 상태 스냅샷 반환."""
+        """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 순)."""
         from backend.ml.agents import AGENTS
-        return [a.to_dict() for a in AGENTS.values()]
+        agents = list(AGENTS.values())
+        coins  = sorted([a for a in agents if a.market == "coin"],  key=lambda a: (not a.is_champion, -a.win_rate))
+        stocks = sorted([a for a in agents if a.market == "stock"], key=lambda a: (not a.is_champion, -a.win_rate))
+        return [a.to_dict() for a in coins + stocks]
 
 
 # 싱글톤 인스턴스 — FastAPI main.py 에서 import 해서 사용

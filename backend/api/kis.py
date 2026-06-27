@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -243,25 +244,142 @@ async def get_volume_rank(n: int = 50) -> list[str]:
         return []
 
 
+# ── 호가창 조회 ──────────────────────────────────────────────────
+
+_ORDERBOOK_KIS_CACHE: dict[str, tuple[dict, float]] = {}
+_ORDERBOOK_KIS_TTL = 5.0  # 5초 캐시
+
+
+async def get_orderbook_kis(symbol: str) -> dict:
+    """국내 주식 호가창 조회 (매수벽/매도벽).
+
+    Returns:
+        {
+            "bid_ask_spread": float,  # (매도1호가 - 매수1호가) / 매수1호가
+            "buy_pressure":   float,  # 매수잔량 / (매수+매도 총잔량)
+            "bid_wall":       int,    # 최대 매수호가 잔량
+            "ask_wall":       int,    # 최대 매도호가 잔량
+            "total_bid_qty":  int,
+            "total_ask_qty":  int,
+        }
+    """
+    now = time.time()
+    if symbol in _ORDERBOOK_KIS_CACHE:
+        cached, ts = _ORDERBOOK_KIS_CACHE[symbol]
+        if now - ts < _ORDERBOOK_KIS_TTL:
+            return cached
+
+    _DEFAULT = {
+        "bid_ask_spread": 0.0, "buy_pressure": 0.5,
+        "bid_wall": 0, "ask_wall": 0,
+        "total_bid_qty": 0, "total_ask_qty": 0,
+    }
+    try:
+        data = await _kis_request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+            tr_id="FHKST01010200",
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+            },
+        )
+        out = data.get("output1", {})
+
+        ask_qtys = [int(out.get(f"askp_rsqn{i}", 0) or 0) for i in range(1, 11)]
+        bid_qtys = [int(out.get(f"bidp_rsqn{i}", 0) or 0) for i in range(1, 11)]
+        best_ask = int(out.get("askp1", 0) or 0)
+        best_bid = int(out.get("bidp1", 0) or 0)
+        total_ask = int(out.get("total_askp_rsqn", 0) or 0)
+        total_bid = int(out.get("total_bidp_rsqn", 0) or 0)
+
+        result = {
+            "bid_ask_spread": (best_ask - best_bid) / best_bid if best_bid > 0 else 0.0,
+            "buy_pressure": total_bid / (total_bid + total_ask) if (total_bid + total_ask) > 0 else 0.5,
+            "bid_wall": max(bid_qtys) if bid_qtys else 0,
+            "ask_wall": max(ask_qtys) if ask_qtys else 0,
+            "total_bid_qty": total_bid,
+            "total_ask_qty": total_ask,
+        }
+        _ORDERBOOK_KIS_CACHE[symbol] = (result, now)
+        return result
+    except Exception as e:
+        logger.warning("[KIS] %s 호가창 조회 실패: %s", symbol, e)
+        return _DEFAULT
+
+
+# ── 투자자별 매매동향 ─────────────────────────────────────────────
+
+_INVESTOR_CACHE: dict[str, tuple[dict, float]] = {}
+_INVESTOR_TTL = 300.0  # 5분 캐시
+
+
+async def get_investor_trend(symbol: str) -> dict:
+    """기관/외국인 순매수 동향 조회.
+
+    Returns:
+        {
+            "institution_net_buy": int,  # 기관 순매수량 (양수=매수우세)
+            "foreign_net_buy":     int,  # 외국인 순매수량
+            "individual_net_buy":  int,  # 개인 순매수량
+        }
+    """
+    now = time.time()
+    if symbol in _INVESTOR_CACHE:
+        cached, ts = _INVESTOR_CACHE[symbol]
+        if now - ts < _INVESTOR_TTL:
+            return cached
+
+    _DEFAULT = {"institution_net_buy": 0, "foreign_net_buy": 0, "individual_net_buy": 0}
+    try:
+        data = await _kis_request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-investor",
+            tr_id="FHKST01010900",
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+            },
+        )
+        rows = data.get("output", [])
+        if not rows:
+            raise ValueError("빈 응답")
+
+        today = rows[0]
+        result = {
+            "institution_net_buy": int(today.get("orgn_ntby_qty", 0) or 0),
+            "foreign_net_buy":     int(today.get("frgn_ntby_qty", 0) or 0),
+            "individual_net_buy":  int(today.get("prsn_ntby_qty", 0) or 0),
+        }
+        _INVESTOR_CACHE[symbol] = (result, now)
+        logger.debug("[KIS] %s 투자자 동향: 기관%+d 외국인%+d", symbol,
+                     result["institution_net_buy"], result["foreign_net_buy"])
+        return result
+    except Exception as e:
+        logger.warning("[KIS] %s 투자자 동향 조회 실패: %s", symbol, e)
+        return _DEFAULT
+
+
 # ── 분봉 OHLCV 조회 ─────────────────────────────────────────────
 
 async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200) -> list[dict]:
     """국내 주식 분봉 데이터 조회.
 
     KIS API는 1회 최대 30봉 반환 → count만큼 반복 호출.
+    ML 학습 시 count=2000 등 대량 요청 가능 (1주일치 분봉 획득).
 
     Args:
         symbol:       종목코드 6자리
         interval_min: 분봉 단위 (1·5·15·30·60)
-        count:        가져올 봉 수 (최대 200)
+        count:        가져올 봉 수 (제한 없음 — API 가능 범위까지)
 
     Returns:
         [{"date": str, "open": int, "high": int, "low": int, "close": int, "volume": int}, ...]
         최신 봉이 앞에 옴 (내림차순)
     """
-    count = min(count, 200)
     result: list[dict] = []
-    time_str = ""  # 빈 문자열 = 최신부터
+    time_str = ""       # 빈 문자열 = 최신부터
+    prev_last_key = None
 
     while len(result) < count:
         params = {
@@ -274,7 +392,7 @@ async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200)
         try:
             data = await _kis_request(
                 "GET",
-                f"/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+                "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
                 tr_id="FHKST03010200",
                 params=params,
             )
@@ -289,7 +407,7 @@ async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200)
         for r in rows:
             try:
                 result.append({
-                    "date": f"{r['stck_bsop_date']}T{r['stck_cntg_hour']}",
+                    "date":   f"{r['stck_bsop_date']}T{r['stck_cntg_hour']}",
                     "open":   int(r["stck_oprc"]),
                     "high":   int(r["stck_hgpr"]),
                     "low":    int(r["stck_lwpr"]),
@@ -299,11 +417,18 @@ async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200)
             except Exception:
                 continue
 
+        last = rows[-1]
+        last_key = f"{last.get('stck_bsop_date', '')}_{last.get('stck_cntg_hour', '')}"
+
+        # 같은 커서면 무한루프 방지
+        if last_key == prev_last_key:
+            break
+        prev_last_key = last_key
+
         if len(rows) < 30:
             break  # 더 이상 데이터 없음
 
         # 다음 페이지: 마지막 봉 시각으로 이동
-        last = rows[-1]
         time_str = last.get("stck_cntg_hour", "")
         if not time_str:
             break

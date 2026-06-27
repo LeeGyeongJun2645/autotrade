@@ -147,59 +147,135 @@ async def get_price(ticker: str) -> dict[str, Any]:
     }
 
 
+# ── 배치 현재가 조회 (공개) ─────────────────────────────────────
+
+async def get_prices_batch(tickers: list[str]) -> dict[str, float]:
+    """여러 티커 현재가 한 번에 조회 (429 방지 — 단일 요청).
+
+    Args:
+        tickers: 마켓 코드 리스트 (예: ['KRW-BTC', 'KRW-ETH'])
+
+    Returns:
+        {ticker: current_price, ...}
+    """
+    if not tickers:
+        return {}
+    markets = ",".join(tickers)
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(f"{_BASE}/ticker", params={"markets": markets})
+            resp.raise_for_status()
+            return {item["market"]: float(item["trade_price"]) for item in resp.json()}
+    except Exception as e:
+        logger.warning("[Upbit] 배치 현재가 조회 실패: %s", e)
+        return {}
+
+
+# ── 호가창 조회 (공개) ───────────────────────────────────────────
+
+async def get_orderbook(ticker: str) -> dict[str, Any]:
+    """업비트 호가창(매수벽/매도벽) 분석.
+
+    Returns:
+        {
+            "bid_ask_spread": float,   # (최저매도 - 최고매수) / 최고매수
+            "buy_pressure":  float,    # 매수호가 총량 / (매수+매도 총량)  0~1
+            "bid_wall":      float,    # 매수 최대 단일 잔량 / 총 매수 잔량
+            "ask_wall":      float,    # 매도 최대 단일 잔량 / 총 매도 잔량
+            "total_bid_qty": float,
+            "total_ask_qty": float,
+        }
+    """
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(f"{_BASE}/orderbook", params={"markets": ticker})
+        resp.raise_for_status()
+        data = resp.json()
+
+    if not data:
+        return {}
+
+    ob = data[0]
+    units = ob.get("orderbook_units", [])
+    if not units:
+        return {}
+
+    bid_prices = [u["bid_price"] for u in units]
+    ask_prices = [u["ask_price"] for u in units]
+    bid_sizes  = [u["bid_size"]  for u in units]
+    ask_sizes  = [u["ask_size"]  for u in units]
+
+    best_bid   = max(bid_prices) if bid_prices else 0
+    best_ask   = min(ask_prices) if ask_prices else 0
+    spread     = (best_ask - best_bid) / best_bid if best_bid > 0 else 0
+
+    total_bid  = sum(bid_sizes)
+    total_ask  = sum(ask_sizes)
+    total_all  = total_bid + total_ask
+
+    return {
+        "bid_ask_spread": round(spread, 6),
+        "buy_pressure":   round(total_bid / total_all, 4) if total_all > 0 else 0.5,
+        "bid_wall":       round(max(bid_sizes) / total_bid, 4) if total_bid > 0 else 0,
+        "ask_wall":       round(max(ask_sizes) / total_ask, 4) if total_ask > 0 else 0,
+        "total_bid_qty":  round(total_bid, 4),
+        "total_ask_qty":  round(total_ask, 4),
+    }
+
+
 # ── 캔들(OHLCV) 조회 (공개) ─────────────────────────────────────
+
+def _parse_candle(c: dict) -> dict[str, Any]:
+    return {
+        "date":        c["candle_date_time_kst"],
+        "open":        float(c["opening_price"]),
+        "high":        float(c["high_price"]),
+        "low":         float(c["low_price"]),
+        "close":       float(c["trade_price"]),
+        "volume":      float(c["candle_acc_trade_volume"]),
+        "trade_value": float(c["candle_acc_trade_price"]),
+    }
+
 
 async def get_ohlcv(
     ticker: str,
     interval: str = "days",
-    count: int = 60,
+    count: int = 200,
 ) -> list[dict[str, Any]]:
-    """업비트 캔들 데이터 조회 (이동평균·RSI 전략용).
+    """업비트 캔들 데이터 조회. 최신 캔들이 리스트 앞에 옴(내림차순).
 
-    Args:
-        ticker:   마켓 코드 (예: 'KRW-BTC')
-        interval: 'minutes/1' | 'minutes/3' | 'minutes/5' | 'minutes/60' |
-                  'days' | 'weeks' | 'months'
-        count:    가져올 캔들 수 (최대 200)
-
-    Returns:
-        [
-            {
-                "date": str,          # 'YYYY-MM-DDTHH:MM:SS' (KST)
-                "open": float,
-                "high": float,
-                "low": float,
-                "close": float,
-                "volume": float,      # 코인 거래량
-                "trade_value": float, # 원화 거래대금
-            },
-            ...
-        ]
-        최신 캔들이 리스트 앞에 옴 (내림차순)
+    count > 200 이면 자동 페이징하여 최대 count개 수집.
     """
-    count = min(count, 200)
     url = f"{_BASE}/candles/{interval}"
+    result: list[dict] = []
+    to_param: str | None = None
+
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get(url, params={"market": ticker, "count": count})
-        resp.raise_for_status()
-        data = resp.json()
+        while len(result) < count:
+            fetch = min(200, count - len(result))
+            params: dict = {"market": ticker, "count": fetch}
+            if to_param:
+                params["to"] = to_param
 
-    _raise_for_upbit_error(data)
-    if not data:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            _raise_for_upbit_error(data)
+
+            if not data:
+                break
+
+            result.extend([_parse_candle(c) for c in data])
+
+            if len(data) < fetch:
+                break  # 더 이상 데이터 없음
+
+            # 다음 페이지: 마지막 캔들의 시간 기준
+            oldest = data[-1]["candle_date_time_utc"]
+            to_param = oldest  # 이 시각 이전 캔들 조회
+
+    if not result:
         raise ValueError(f"캔들 데이터 없음: {ticker} / {interval}")
-
-    return [
-        {
-            "date": c["candle_date_time_kst"],
-            "open": float(c["opening_price"]),
-            "high": float(c["high_price"]),
-            "low": float(c["low_price"]),
-            "close": float(c["trade_price"]),
-            "volume": float(c["candle_acc_trade_volume"]),
-            "trade_value": float(c["candle_acc_trade_price"]),
-        }
-        for c in data
-    ]
+    return result
 
 
 # ── 잔고 조회 (비공개) ───────────────────────────────────────────

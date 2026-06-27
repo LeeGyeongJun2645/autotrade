@@ -150,16 +150,20 @@ class XGBSignalModel:
                 f"{self.ticker}: 학습 데이터 부족 ({len(feat_df)}봉, 최소 60봉 필요)"
             )
 
-        df_raw = pd.DataFrame(list(reversed(ohlcv_list)))
-        df_raw["date"] = pd.to_datetime(df_raw["date"].astype(str).str[:10])
-        df_raw = df_raw.set_index("date").sort_index()
-        close = df_raw["close"].astype(float)
+        # 위치 기반 정렬 — 일봉/분봉 모두 인덱스 불일치 없이 동작
+        feat_df = feat_df.reset_index(drop=True)
+        close_vals = [float(c["close"]) for c in reversed(ohlcv_list)]
+        close = pd.Series(close_vals)
+        n = len(feat_df)
+        close = close.iloc[-n:].reset_index(drop=True)
 
         next_close = close.shift(-1)
         label = ((next_close / close - 1) >= LABEL_THRESHOLD).astype(int)
-        label = label.reindex(feat_df.index).dropna()
-        feat_df = feat_df.loc[label.index].iloc[:-1]
+        feat_df = feat_df.iloc[:-1]
         label = label.iloc[:-1]
+        min_len = min(len(feat_df), len(label))
+        feat_df = feat_df.iloc[:min_len]
+        label = label.iloc[:min_len]
 
         X = feat_df[FEATURE_NAMES].values
         y = label.values.astype(int)
@@ -232,8 +236,16 @@ class XGBSignalModel:
 
     # ── 예측 ────────────────────────────────────────────────────
 
-    async def predict(self, ohlcv_list: list[dict], token: str | None = None) -> PredictResult:
-        """최신 봉 기준 매수 확률 및 신호 반환."""
+    async def predict(
+        self,
+        ohlcv_list: list[dict],
+        token: str | None = None,
+        market: str = "auto",
+    ) -> PredictResult:
+        """최신 봉 기준 매수 확률 및 신호 반환.
+
+        market: "coin" | "stock" | "auto" (KRW- 접두사로 자동 판별)
+        """
         if self._model is None:
             if not self.load():
                 raise RuntimeError(
@@ -248,14 +260,62 @@ class XGBSignalModel:
         X_scaled = self._scaler.transform(X_last)  # type: ignore[union-attr]
         buy_prob = float(self._model.predict_proba(X_scaled)[0, 1])  # type: ignore[union-attr]
 
-        # 공포&탐욕 지수 (코인 전용)
+        is_coin = self.ticker.startswith("KRW-") if market == "auto" else (market == "coin")
         fear_greed = 0.0
-        if self.ticker.startswith("KRW-"):
+
+        if is_coin:
+            # 공포&탐욕 지수 (역발상: 탐욕→과열 하향, 공포→저평가 상향)
             fear_greed = await _get_fear_greed()
-            # 역발상: 극도 공포(-1)→buy_prob 소폭 상향, 극도 탐욕(+1)→소폭 하향
-            # 최대 ±4% 조정 (신호 결정에 영향주되 지배하지 않도록)
-            fg_adj = fear_greed * 0.04
-            buy_prob = max(0.01, min(0.99, buy_prob - fg_adj))
+            buy_prob = max(0.01, min(0.99, buy_prob - fear_greed * 0.04))
+
+            # 김치프리미엄 + 펀딩비 — 최신 종가 기준
+            try:
+                current_price = float(ohlcv_list[0]["close"])
+                coin_sym = self.ticker.replace("KRW-", "") + "USDT"
+                from backend.api.binance import get_funding_rate, get_kimchi_premium
+                kimchi, funding = await asyncio.gather(
+                    get_kimchi_premium(current_price, coin_sym),
+                    get_funding_rate(coin_sym),
+                )
+                # 김치프리미엄 >3% 과열, <-1% 저평가
+                if kimchi > 3.0:
+                    buy_prob = max(0.01, buy_prob - min((kimchi - 3.0) * 0.01, 0.05))
+                elif kimchi < -1.0:
+                    buy_prob = min(0.99, buy_prob + min((-kimchi - 1.0) * 0.01, 0.03))
+                # 펀딩비 양수→롱과열, 음수→숏과열
+                if abs(funding) > 0.001:
+                    fund_adj = min(abs(funding) * 20, 0.04) * (1 if funding > 0 else -1)
+                    buy_prob = max(0.01, min(0.99, buy_prob - fund_adj))
+            except Exception as e:
+                logger.debug("[ML] 코인 보조지표 실패 (무시): %s", e)
+
+            # 업비트 호가창: buy_pressure 0.5 기준 ±4%
+            try:
+                from backend.api.upbit import get_orderbook
+                ob = await get_orderbook(self.ticker)
+                bp_adj = (ob.get("buy_pressure", 0.5) - 0.5) * 0.08
+                buy_prob = max(0.01, min(0.99, buy_prob + bp_adj))
+            except Exception as e:
+                logger.debug("[ML] 업비트 호가창 실패 (무시): %s", e)
+
+        else:  # stock
+            # KIS 호가창 + 기관/외국인 순매수
+            try:
+                from backend.api.kis import get_investor_trend, get_orderbook_kis
+                ob, inv = await asyncio.gather(
+                    get_orderbook_kis(self.ticker),
+                    get_investor_trend(self.ticker),
+                )
+                bp_adj = (ob.get("buy_pressure", 0.5) - 0.5) * 0.06
+                buy_prob = max(0.01, min(0.99, buy_prob + bp_adj))
+
+                net = inv.get("institution_net_buy", 0) + inv.get("foreign_net_buy", 0)
+                if net > 0:
+                    buy_prob = min(0.99, buy_prob + 0.02)
+                elif net < 0:
+                    buy_prob = max(0.01, buy_prob - 0.02)
+            except Exception as e:
+                logger.debug("[ML] KIS 보조지표 실패 (무시): %s", e)
 
         signal, confidence = _prob_to_signal(buy_prob)
 
@@ -264,7 +324,7 @@ class XGBSignalModel:
 
         # hold 신호를 뉴스+공포탐욕으로 보정
         if signal == "hold":
-            combined = news_score * 0.6 + (-fear_greed) * 0.4  # 공포탐욕 역방향 반영
+            combined = news_score * 0.6 + (-fear_greed) * 0.4
             if combined > 0.25:
                 signal, confidence = "buy", "low"
             elif combined < -0.25:
