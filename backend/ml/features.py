@@ -81,12 +81,26 @@ FEATURE_NAMES = [
     "anchored_vwap_cross",  # close > 당일 앵커드VWAP → 1
     "bb_squeeze",           # BB폭 수축 중 → 1 (돌파 직전 포착)
     "mtf_ema_bull",         # 15분봉 EMA9 > EMA21 → 1 (상위 추세 강세)
+    # ── 시간대 패턴 (KST 기준) ───────────────────────────────────────
+    "hour_sin",             # 시간 sin 인코딩 (0~24h 주기 연속성)
+    "hour_cos",             # 시간 cos 인코딩
+    "is_opening_hour",      # 09:00~10:00 (장 시작 급변동)
+    "is_lunch_hour",        # 11:30~13:00 (유동성 저하)
+    "is_closing_hour",      # 14:30~15:30 (마감 정리)
+    # ── BTC 상관관계 (코인 에이전트 전용, 주식·BTC자신은 0) ──────────
+    "btc_corr_20",          # 최근 20봉 BTC 상관계수 (동조화 강도)
+    "btc_ret_5",            # BTC 5봉 수익률 (알트 선행 지표)
+    # ── KOSPI 연동 (주식 에이전트 전용, 코인은 0) ────────────────────
+    "kospi_ret_5",          # KOSPI 5봉 수익률 (시장 방향)
+    "kospi_rel_str",        # 개별주 상대강도 (종목ret5 - KOSPI ret5)
 ]
 
 
 def compute_features(
     ohlcv_list: list[dict],
     funding_rates: list[dict] | None = None,
+    btc_ohlcv: list[dict] | None = None,     # BTC 상관관계용 (코인 에이전트, 주식·BTC본인은 None)
+    kospi_ohlcv: list[dict] | None = None,    # KOSPI 연동용 (주식 에이전트, 코인은 None)
 ) -> pd.DataFrame:
     """OHLCV 리스트 → Feature DataFrame 변환.
 
@@ -291,5 +305,51 @@ def compute_features(
             df["funding_rate"] = 0.0
     else:
         df["funding_rate"] = 0.0
+
+    # ── 시간대 패턴 (KST 기준) ───────────────────────────────────────
+    _h = df.index.hour
+    _m = df.index.minute
+    _hour_frac = _h + _m / 60.0
+    df["hour_sin"] = np.sin(2 * np.pi * _hour_frac / 24)
+    df["hour_cos"] = np.cos(2 * np.pi * _hour_frac / 24)
+    df["is_opening_hour"] = ((_h == 9) | ((_h == 10) & (_m == 0))).astype(float)
+    df["is_lunch_hour"]   = (((_h == 11) & (_m >= 30)) | (_h == 12)).astype(float)
+    df["is_closing_hour"] = (((_h == 14) & (_m >= 30)) | ((_h == 15) & (_m <= 30))).astype(float)
+
+    # ── BTC 상관관계 (코인 전용: btc_ohlcv 전달 시 계산, else 0) ──────
+    if btc_ohlcv:
+        try:
+            _btc = pd.DataFrame(list(reversed(btc_ohlcv)))
+            _btc["date"] = pd.to_datetime(_btc["date"].astype(str).str[:19])
+            _btc = _btc.set_index("date").sort_index()
+            _btc_close = _btc["close"].astype(float).reindex(df.index, method="ffill")
+            _btc_ret   = _btc_close.pct_change(1)
+            _coin_ret  = close.pct_change(1)
+            df["btc_corr_20"] = _btc_ret.rolling(20).corr(_coin_ret)
+            df["btc_ret_5"]   = _btc_close.pct_change(5)
+        except Exception:
+            df["btc_corr_20"] = 0.0
+            df["btc_ret_5"]   = 0.0
+    else:
+        df["btc_corr_20"] = 0.0
+        df["btc_ret_5"]   = 0.0
+
+    # ── KOSPI 연동 (주식 전용: kospi_ohlcv 전달 시 계산, else 0) ───────
+    if kospi_ohlcv:
+        try:
+            _ki = pd.DataFrame(list(reversed(kospi_ohlcv)))
+            _ki["date"] = pd.to_datetime(_ki["date"].astype(str).str[:19])
+            _ki = _ki.set_index("date").sort_index()
+            _ki_close   = _ki["close"].astype(float).reindex(df.index, method="ffill")
+            _ki_ret5    = _ki_close.pct_change(5)
+            _stock_ret5 = close.pct_change(5)
+            df["kospi_ret_5"]  = _ki_ret5
+            df["kospi_rel_str"] = _stock_ret5 - _ki_ret5
+        except Exception:
+            df["kospi_ret_5"]  = 0.0
+            df["kospi_rel_str"] = 0.0
+    else:
+        df["kospi_ret_5"]  = 0.0
+        df["kospi_rel_str"] = 0.0
 
     return df[FEATURE_NAMES].dropna()

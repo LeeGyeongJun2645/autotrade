@@ -703,6 +703,14 @@ class TradingScheduler:
         stock_ohlcv_cache: dict[str, list] = {}
         stock_prices: dict[str, float] = {}
 
+        # KOSPI 지수 5분봉 (주식 에이전트 상대강도 피처용)
+        kospi_ohlcv: list[dict] = []
+        if is_market_open and stock_symbols:
+            try:
+                kospi_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=200)
+            except Exception:
+                kospi_ohlcv = []
+
         if is_market_open and stock_symbols:
             async def _fetch_stock_ohlcv(sym: str, iv_min: int) -> tuple[str, int, list]:
                 async with _OHLCV_SEM:
@@ -734,26 +742,43 @@ class TradingScheduler:
                     if agent.market == "coin":
                         # ── 코인 전담 (AI01~AI10): 24/7 ──────────────
                         agent.update_position_values(coin_prices)
+                        # BTC OHLCV (비BTC 코인의 상관관계 피처용)
+                        btc_ohlcv_cache = ohlcv_cache.get("KRW-BTC:minutes/5", [])
                         for ticker in fetch_coin_tickers:
                             ohlcv = ohlcv_cache.get(f"{ticker}:{agent.interval_str}", [])
                             if not ohlcv:
                                 continue
+                            # BTC 자신은 BTC 상관관계 불필요
+                            _btc_ref = btc_ohlcv_cache if ticker != "KRW-BTC" else None
                             if agent._model is None and not agent.load_model():
-                                # 학습용 1주일치 데이터 별도 조회 (코인: 2016봉 이상)
                                 train_count = 2000 if agent.interval_min <= 5 else 700
                                 try:
                                     train_ohlcv = await _upbit.get_ohlcv(
                                         ticker, interval=agent.interval_str, count=train_count
                                     )
+                                    # 학습용 BTC 데이터도 동일 기간으로 조회
+                                    _btc_train = None
+                                    if ticker != "KRW-BTC":
+                                        try:
+                                            _btc_train = await _upbit.get_ohlcv(
+                                                "KRW-BTC", interval=agent.interval_str, count=train_count
+                                            )
+                                        except Exception:
+                                            pass
                                 except Exception:
                                     train_ohlcv = ohlcv
-                                trained = await asyncio.to_thread(agent.train, train_ohlcv)
+                                    _btc_train = _btc_ref
+                                trained = await asyncio.to_thread(
+                                    agent.train, train_ohlcv,
+                                    agent._cached_funding_rates or None,
+                                    _btc_train, None,
+                                )
                                 if not trained:
                                     continue
                             price = coin_prices.get(ticker, 0.0)
                             if price <= 0:
                                 continue
-                            signal, prob = agent.predict(ohlcv)
+                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref)
                             await self._agent_execute(db, agent, ticker, signal, prob, price)
 
                     else:
@@ -766,21 +791,24 @@ class TradingScheduler:
                             if not ohlcv:
                                 continue
                             if agent._model is None and not agent.load_model():
-                                # 학습용 1주일치 데이터 별도 조회 (주식 5분봉: 390봉/주)
                                 train_count = 500 if agent.interval_min <= 5 else 200
                                 try:
                                     train_ohlcv = await _kis.get_minute_ohlcv(
                                         symbol, agent.interval_min, count=train_count
                                     )
+                                    _kospi_train = await _kis.get_minute_ohlcv("0001", 5, count=train_count)
                                 except Exception:
                                     train_ohlcv = ohlcv
-                                trained = await asyncio.to_thread(agent.train, train_ohlcv)
+                                    _kospi_train = kospi_ohlcv
+                                trained = await asyncio.to_thread(
+                                    agent.train, train_ohlcv, None, None, _kospi_train
+                                )
                                 if not trained:
                                     continue
                             price = stock_prices.get(symbol, 0.0)
                             if price <= 0:
                                 continue
-                            signal, prob = agent.predict(ohlcv)
+                            signal, prob = agent.predict(ohlcv, kospi_ohlcv=kospi_ohlcv or None)
                             await self._agent_execute(db, agent, symbol, signal, prob, price)
 
                     # agent_stats upsert
@@ -870,18 +898,20 @@ class TradingScheduler:
                 sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
 
         if signal == "buy":
-            trade = agent.virtual_buy(symbol, price)
+            # DCA: 확률 강도에 비례한 진입 비율 (약한 신호는 50%, 강한 신호는 100%)
+            _gap = prob - agent.buy_threshold
+            _portion = 1.0 if _gap >= 0.08 else (0.7 if _gap >= 0.04 else 0.5)
+            trade = agent.virtual_buy(symbol, price, portion=_portion)
             if trade:
                 await db.execute(
                     "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
                     (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
                 )
-                # 포지션 영속성: 재시작 후 복구 가능하도록 저장
                 await db.execute(
                     "INSERT OR REPLACE INTO agent_positions (agent_id, ticker, entry_price, qty, entered_at) VALUES (?,?,?,?,?)",
                     (trade.agent_id, trade.ticker, trade.price, trade.qty, trade.traded_at),
                 )
-                sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%})", "BUY")
+                sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%} / 진입{_portion*100:.0f}%)", "BUY")
 
         elif signal == "sell" and symbol in agent._positions:
             trade = agent.virtual_sell(symbol, price)
@@ -944,19 +974,36 @@ class TradingScheduler:
         except Exception:
             logger.warning("[Retrain] 펀딩비 히스토리 수집 실패, 펀딩비=0으로 학습")
 
+        # ── BTC 학습용 데이터 (코인 에이전트 상관관계 피처용) ────────
+        btc_train_ohlcv: list[dict] = []
+        try:
+            btc_train_ohlcv = await _upbit.get_ohlcv("KRW-BTC", interval="minutes/5", count=2000)
+            logger.info("[Retrain] BTC 학습 데이터: %d봉", len(btc_train_ohlcv))
+        except Exception:
+            logger.warning("[Retrain] BTC 상관관계 학습 데이터 수집 실패")
+
+        # ── KOSPI 학습용 데이터 (주식 에이전트 상대강도 피처용) ──────
+        kospi_train_ohlcv: list[dict] = []
+        try:
+            kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=500)
+            logger.info("[Retrain] KOSPI 학습 데이터: %d봉", len(kospi_train_ohlcv))
+        except Exception:
+            logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
+
         # ── 에이전트별 재학습 ────────────────────────────────────
         success = 0
         for agent in AGENTS.values():
             data = coin_ohlcv if agent.market == "coin" else stock_ohlcv
             fr   = coin_funding if agent.market == "coin" else None
-            # 펀딩비 캐시 업데이트 → predict()에서도 동일 피처 사용 (학습/예측 일관성)
+            _btc_ref   = btc_train_ohlcv if agent.market == "coin" else None
+            _kospi_ref = kospi_train_ohlcv if agent.market == "stock" else None
             if agent.market == "coin":
                 agent._cached_funding_rates = coin_funding
             if not data:
                 logger.warning("[Retrain][%s] 학습 데이터 없음, 스킵", agent.agent_id)
                 continue
             try:
-                trained = await asyncio.to_thread(agent.train, data, fr)
+                trained = await asyncio.to_thread(agent.train, data, fr, _btc_ref, _kospi_ref)
                 if trained:
                     success += 1
                     logger.info("[Retrain][%s] 재학습 완료", agent.agent_id)

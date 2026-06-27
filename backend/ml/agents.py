@@ -37,11 +37,11 @@ FEATURE_SETS: dict[str, list[str]] = {
     "momentum": [
         "rsi_9", "macd_diff", "stoch_rsi", "williams_r",
         "mfi_14", "roc_10", "ret_1d", "ret_3d", "ret_5d", "ret_10d",
-        # 래그 피처
         "rsi_lag_1", "rsi_lag_2", "macd_diff_lag_1",
         "ret_lag_1", "ret_lag_2", "ret_lag_3",
-        # 레짐·MTF (횡보장에서 momentum 우대)
         "regime_state", "mtf_ema_bull",
+        "hour_sin", "hour_cos", "is_opening_hour",
+        "btc_corr_20", "btc_ret_5",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -50,15 +50,17 @@ FEATURE_SETS: dict[str, list[str]] = {
         "trix_15", "dpo_20", "vortex_diff",
         "ema9_cross_ema21", "vwap_ratio", "vwap_cross",
         "bb_pband_lag_1",
-        # 기관 기준선·레짐·MTF (추세장에서 trend 우대)
         "regime_state", "anchored_vwap_ratio", "anchored_vwap_cross", "mtf_ema_bull",
+        "hour_sin", "hour_cos", "is_closing_hour",
+        "kospi_ret_5", "kospi_rel_str",
     ],
     "volume": [
         "vol_ratio", "obv_change", "cmf_20",
         "mfi_14", "ret_1d", "ret_5d", "ret_20d",
         "vol_ratio_lag_1",
-        # 레짐·BB스퀴즈
         "regime_state", "bb_squeeze",
+        "hour_sin", "hour_cos", "is_lunch_hour",
+        "btc_ret_5", "kospi_ret_5",
     ],
 }
 
@@ -251,10 +253,21 @@ class SimAgent:
 
     # ── 학습 (동기 — asyncio.to_thread 로 호출) ─────────────────
 
-    def train(self, ohlcv_list: list[dict], funding_rates: list[dict] | None = None) -> bool:
+    def train(
+        self,
+        ohlcv_list: list[dict],
+        funding_rates: list[dict] | None = None,
+        btc_ohlcv: list[dict] | None = None,
+        kospi_ohlcv: list[dict] | None = None,
+    ) -> bool:
         """분봉 OHLCV로 전용 모델 학습."""
         try:
-            feat_df = compute_features(ohlcv_list, funding_rates=funding_rates)
+            feat_df = compute_features(
+                ohlcv_list,
+                funding_rates=funding_rates,
+                btc_ohlcv=btc_ohlcv,
+                kospi_ohlcv=kospi_ohlcv,
+            )
             feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
             if len(feat_df) < 50:
                 return False
@@ -263,19 +276,35 @@ class SimAgent:
             feat_df = feat_df.reset_index(drop=True)
             close_vals = [float(c["close"]) for c in reversed(ohlcv_list)]
             close = pd.Series(close_vals)
-            # feat_df 행 수에 맞게 close 뒤에서 자름
             n = len(feat_df)
             close = close.iloc[-n:].reset_index(drop=True)
 
-            # ── 노이즈 제거 레이블링 ─────────────────────────────────
-            LOOKAHEAD   = self.lookahead  # 에이전트별 시간 지평 (3/5/8봉)
-            NOISE_FLOOR = 0.001           # ±0.1% 이내는 잡음 → 학습 제외
+            # ── 트리플 배리어 레이블링 ────────────────────────────────
+            # 익절(TP) 또는 손절(SL) 배리어 먼저 터치한 쪽으로 레이블 결정
+            # 시간 배리어(LOOKAHEAD)까지 아무것도 안 터치하면 0(=미진입 최선)
+            LOOKAHEAD   = self.lookahead
+            NOISE_FLOOR = 0.001
+            tp_pct = self.label_threshold
+            sl_pct = self.label_threshold
 
+            raw_labels = np.zeros(len(close), dtype=int)
+            for i in range(len(close) - LOOKAHEAD):
+                entry = close.iloc[i]
+                tp, sl = entry * (1 + tp_pct), entry * (1 - sl_pct)
+                for j in range(1, LOOKAHEAD + 1):
+                    p = close.iloc[i + j]
+                    if p >= tp:
+                        raw_labels[i] = 1
+                        break
+                    if p <= sl:
+                        break  # 손절 터치 → 0 유지
+            label = pd.Series(raw_labels, index=range(len(close)))
+
+            # 수익률은 노이즈 필터용으로 유지
             next_close = close.shift(-LOOKAHEAD)
-            ret   = next_close / close - 1
-            label = (ret >= self.label_threshold).astype(int)
+            ret = (next_close / close - 1).fillna(0)
 
-            # 마지막 LOOKAHEAD 행 제거 (next_close NaN)
+            # 마지막 LOOKAHEAD 행 제거
             feat_df = feat_df.iloc[:-LOOKAHEAD]
             label   = label.iloc[:-LOOKAHEAD]
             ret     = ret.iloc[:-LOOKAHEAD]
@@ -286,7 +315,7 @@ class SimAgent:
             label   = label.iloc[:min_len]
             ret     = ret.iloc[:min_len]
 
-            # 모호한 레이블 제거 (±NOISE_FLOOR 이내 수익은 잡음)
+            # 노이즈 필터 (±NOISE_FLOOR 이내 구간 학습 제외)
             clear_mask = ret.abs() >= NOISE_FLOOR
             feat_df = feat_df[clear_mask.values]
             label   = label[clear_mask.values]
@@ -339,13 +368,22 @@ class SimAgent:
 
     # ── 예측 ────────────────────────────────────────────────────
 
-    def predict(self, ohlcv_list: list[dict]) -> tuple[str, float]:
+    def predict(
+        self,
+        ohlcv_list: list[dict],
+        btc_ohlcv: list[dict] | None = None,
+        kospi_ohlcv: list[dict] | None = None,
+    ) -> tuple[str, float]:
         """(signal, buy_prob) 반환. 모델 없으면 ('hold', 0.5)."""
         if self._model is None and not self.load_model():
             return "hold", 0.5
         try:
-            # 재학습 시 저장된 펀딩비 캐시 사용 → 학습/예측 피처 분포 일관성 유지
-            full_df = compute_features(ohlcv_list, funding_rates=self._cached_funding_rates or None)
+            full_df = compute_features(
+                ohlcv_list,
+                funding_rates=self._cached_funding_rates or None,
+                btc_ohlcv=btc_ohlcv,
+                kospi_ohlcv=kospi_ohlcv,
+            )
             if full_df.empty:
                 return "hold", 0.5
             # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
@@ -440,14 +478,14 @@ class SimAgent:
 
     # ── 가상 매수/매도 ───────────────────────────────────────────
 
-    def virtual_buy(self, ticker: str, price: float) -> AgentTrade | None:
+    def virtual_buy(self, ticker: str, price: float, portion: float = 1.0) -> AgentTrade | None:
         if not self.is_active:
-            return None  # 비활성화된 에이전트는 매수 스킵
+            return None
         if ticker in self._positions:
             return None
         if len(self._positions) >= MAX_OPEN_POSITIONS:
-            return None  # 동시 포지션 최대 3개 초과 차단
-        amount = self._balance * self._kelly_ratio  # Half-Kelly 자동 사이징
+            return None
+        amount = self._balance * self._kelly_ratio * min(max(portion, 0.1), 1.0)  # DCA 비율 반영
         if amount < 5_000:
             return None
         actual_price = price * 1.0005  # 슬리피지 0.05% 반영 (실제 체결가 불리 보정)
@@ -576,6 +614,8 @@ async def predict_ensemble(
     ohlcv_list: list[dict],
     ticker: str,
     market: str,
+    btc_ohlcv: list[dict] | None = None,
+    kospi_ohlcv: list[dict] | None = None,
 ) -> tuple[str, float]:
     """가중 앙상블 게이트 — 전 에이전트 동적 투표 + 실시간 보정.
 
@@ -622,7 +662,7 @@ async def predict_ensemble(
             if agent.feature_set == "all":
                 weight *= 1.3
 
-        _, prob = agent.predict(ohlcv_list)
+        _, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv)
         weighted_prob += prob * weight
         total_weight  += weight
 
