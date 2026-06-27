@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS agent_stats (
     total_return    REAL    DEFAULT 0.0,
     current_balance REAL    DEFAULT 1000000.0,
     is_champion     INTEGER DEFAULT 0,
+    is_active       INTEGER DEFAULT 1,
     updated_at      TEXT
 )
 """
@@ -99,6 +100,11 @@ async def init_db() -> None:
         await db.execute(_CREATE_AGENT_TRADES)
         await db.execute(_CREATE_AGENT_POSITIONS)
         await db.execute(_CREATE_AGENT_STATS)
+        # 기존 DB migration: is_active 컬럼 없으면 추가
+        try:
+            await db.execute("ALTER TABLE agent_stats ADD COLUMN is_active INTEGER DEFAULT 1")
+        except Exception:
+            pass  # 이미 존재하면 무시
         await db.commit()
     logger.info("DB 초기화 완료: %s", DB_PATH)
 

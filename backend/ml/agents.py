@@ -135,6 +135,7 @@ class SimAgent:
         self.total_trades = 0
         self.win_trades = 0
         self.is_champion = False
+        self.is_active = True  # False면 매수 스킵 (자동 임계값 조정에서 관리)
         self.recent_trades: list[dict] = []
         self._last_position_values: dict[str, float] = {}  # ticker → 현재 평가액
 
@@ -400,6 +401,8 @@ class SimAgent:
     # ── 가상 매수/매도 ───────────────────────────────────────────
 
     def virtual_buy(self, ticker: str, price: float) -> AgentTrade | None:
+        if not self.is_active:
+            return None  # 비활성화된 에이전트는 매수 스킵
         if ticker in self._positions:
             return None
         if len(self._positions) >= MAX_OPEN_POSITIONS:
@@ -457,6 +460,10 @@ class SimAgent:
         self.total_trades  = stats.get("total_trades", 0)
         self.win_trades    = stats.get("win_trades", 0)
         self.is_champion   = bool(stats.get("is_champion", 0))
+        self.is_active     = bool(stats.get("is_active", 1))
+        # 자동 조정된 임계값 복구 (기본값은 AGENT_CONFIGS 기준)
+        if "buy_threshold" in stats and stats["buy_threshold"]:
+            self.buy_threshold = float(stats["buy_threshold"])
         for p in positions:
             pos = AgentPosition(
                 ticker=p["ticker"],
@@ -500,6 +507,7 @@ class SimAgent:
             "total_trades":     self.total_trades,
             "win_trades":       self.win_trades,
             "is_champion":      self.is_champion,
+            "is_active":        self.is_active,
             "trained_at":       self._trained_at,
             "positions":        positions_detail,
             "recent_trades":    self.recent_trades[:20],

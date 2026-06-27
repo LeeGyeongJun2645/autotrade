@@ -85,6 +85,48 @@ class TradingScheduler:
 
         # ── 좀비 포지션 검증 (서버 재시작 사이 청산된 포지션 제거) ──
         await self._validate_positions()
+        # ── 에이전트 stats 복구 (잔액·거래수·승률·is_active·buy_threshold) ──
+        await self._restore_agent_stats()
+
+    async def _restore_agent_stats(self) -> None:
+        """서버 재시작 시 DB에서 에이전트 상태 복구 (잔액·거래수·is_active·buy_threshold)."""
+        from backend.ml.agents import AGENTS
+        from backend.db.database import DB_PATH
+        import aiosqlite
+
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT * FROM agent_stats") as cur:
+                    stats_rows = {r["agent_id"]: dict(r) async for r in cur}
+
+                async with db.execute(
+                    "SELECT * FROM agent_positions"
+                ) as cur:
+                    pos_rows: dict[str, list] = {}
+                    async for r in cur:
+                        pos_rows.setdefault(r["agent_id"], []).append(dict(r))
+
+                async with db.execute(
+                    "SELECT * FROM agent_trades ORDER BY traded_at DESC"
+                ) as cur:
+                    trade_rows: dict[str, list] = {}
+                    async for r in cur:
+                        aid = r["agent_id"]
+                        if len(trade_rows.get(aid, [])) < 30:
+                            trade_rows.setdefault(aid, []).append(dict(r))
+
+            for agent in AGENTS.values():
+                stats = stats_rows.get(agent.agent_id)
+                if stats:
+                    agent.restore_from_db(
+                        stats,
+                        pos_rows.get(agent.agent_id, []),
+                        trade_rows.get(agent.agent_id, []),
+                    )
+            logger.info("[복구] 에이전트 stats %d개 복구 완료", len(stats_rows))
+        except Exception:
+            logger.exception("[복구] 에이전트 stats 복구 실패")
 
     async def _validate_positions(self) -> None:
         """거래소 실잔고와 DB 포지션 비교 — 불일치 포지션(좀비) 자동 제거."""
@@ -161,11 +203,20 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # 전 에이전트 일일 재학습: 매일 03:00 (거래 없는 새벽, 최신 데이터 반영)
+        # 전 에이전트 일일 재학습: 매일 18:00 (장 마감 후, 코인/주식 모두 안전)
         self._scheduler.add_job(
             self._daily_retrain,
-            CronTrigger(hour=3, minute=0, timezone=KST),
+            CronTrigger(hour=18, minute=0, timezone=KST),
             id="daily_retrain",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 일일 현황 레포트: 매일 22:00 텔레그램 전송
+        self._scheduler.add_job(
+            self._send_daily_agent_report,
+            CronTrigger(hour=22, minute=0, timezone=KST),
+            id="daily_agent_report",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -707,19 +758,22 @@ class TradingScheduler:
                     await db.execute(
                         """INSERT INTO agent_stats
                            (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
-                            total_trades, win_trades, win_rate, total_return, current_balance, is_champion, updated_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                            total_trades, win_trades, win_rate, total_return, current_balance,
+                            is_champion, is_active, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
                              total_trades=excluded.total_trades, win_trades=excluded.win_trades,
                              win_rate=excluded.win_rate, total_return=excluded.total_return,
                              current_balance=excluded.current_balance, is_champion=excluded.is_champion,
+                             buy_threshold=excluded.buy_threshold, is_active=excluded.is_active,
                              updated_at=excluded.updated_at""",
                         (
                             agent.agent_id, agent.interval_min, agent.label_threshold,
-                            agent.buy_threshold, agent.feature_set,
+                            round(agent.buy_threshold, 4), agent.feature_set,
                             agent.total_trades, agent.win_trades,
                             round(agent.win_rate, 4), round(agent.total_return, 4),
                             round(agent._balance, 2), int(agent.is_champion),
+                            int(agent.is_active),
                             now.strftime("%Y-%m-%dT%H:%M:%S"),
                         ),
                     )
@@ -848,12 +902,124 @@ class TradingScheduler:
         logger.info("[Retrain] 완료: %d/20 에이전트 재학습", success)
         try:
             await telegram.notify_message(
-                f"🔄 <b>AI 일일 재학습 완료</b>\n"
+                f"🔄 <b>AI 일일 재학습 완료 (18:00)</b>\n"
                 f"성공: {success}/20 에이전트\n"
                 f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv)}봉"
             )
         except Exception:
             pass
+
+        # 재학습 완료 후 성능 기반 임계값 자동 조정
+        await self._auto_adjust_thresholds()
+
+    async def _auto_adjust_thresholds(self) -> None:
+        """재학습 후 수익률 기반 임계값 자동 조정 + 텔레그램 알림.
+
+        수익률 < -15%: buy_threshold +0.05 (보수적 매수)
+        수익률 < -30%: 비활성화 (매수 완전 스킵)
+        수익률 > +5%: 임계값/활성 상태 정상 복구
+        """
+        from backend.ml.agents import AGENTS, AGENT_CONFIGS
+        from backend.db.database import DB_PATH
+        import aiosqlite
+
+        default_thresholds = {cfg[0]: cfg[3] for cfg in AGENT_CONFIGS}
+        adjustments: list[str] = []
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            for agent in AGENTS.values():
+                if agent.total_trades < 20:
+                    continue  # 거래 수 부족 → 판단 보류
+
+                ret_pct = agent.total_return * 100
+                default_thr = default_thresholds.get(agent.agent_id, 0.55)
+
+                if ret_pct < -30 and agent.is_active:
+                    agent.is_active = False
+                    agent.buy_threshold = min(agent.buy_threshold + 0.05, 0.80)
+                    adjustments.append(
+                        f"⛔ {agent.agent_id}({agent.feature_set}): 비활성화 (수익률 {ret_pct:.1f}%)"
+                    )
+                elif ret_pct < -15 and agent.is_active:
+                    new_thr = min(round(agent.buy_threshold + 0.05, 4), 0.75)
+                    if new_thr > agent.buy_threshold:
+                        agent.buy_threshold = new_thr
+                        adjustments.append(
+                            f"⚠️ {agent.agent_id}({agent.feature_set}): 임계값→{new_thr:.2f} (수익률 {ret_pct:.1f}%)"
+                        )
+                elif ret_pct > 5 and not agent.is_active:
+                    agent.is_active = True
+                    agent.buy_threshold = default_thr
+                    adjustments.append(
+                        f"✅ {agent.agent_id}({agent.feature_set}): 재활성화 (수익률 {ret_pct:.1f}%)"
+                    )
+                elif ret_pct > 5 and agent.buy_threshold > default_thr + 0.001:
+                    agent.buy_threshold = default_thr
+                    adjustments.append(
+                        f"✅ {agent.agent_id}({agent.feature_set}): 임계값 복구→{default_thr:.2f} (수익률 {ret_pct:.1f}%)"
+                    )
+
+                await db.execute(
+                    "UPDATE agent_stats SET is_active=?, buy_threshold=? WHERE agent_id=?",
+                    (int(agent.is_active), round(agent.buy_threshold, 4), agent.agent_id),
+                )
+
+            await db.commit()
+
+        if adjustments:
+            msg = "🔧 <b>AI 임계값 자동 조정</b>\n\n" + "\n".join(adjustments)
+        else:
+            msg = "✅ <b>AI 임계값 점검 완료</b>\n전 에이전트 정상 운영 중 (조정 없음)"
+
+        try:
+            await telegram.notify_message(msg)
+        except Exception:
+            pass
+
+    async def _send_daily_agent_report(self) -> None:
+        """매일 22:00 — 에이전트 현황 레포트 텔레그램 전송."""
+        from backend.ml.agents import AGENTS, INITIAL_CAPITAL
+
+        now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
+        def _market_lines(agents: list) -> tuple[str, str]:
+            total_now = sum(a._balance + a.position_value for a in agents)
+            total_start = len(agents) * INITIAL_CAPITAL
+            ret_pct = (total_now - total_start) / total_start * 100
+            all_trades = sum(a.total_trades for a in agents)
+            all_wins = sum(a.win_trades for a in agents)
+            wr = all_wins / all_trades * 100 if all_trades else 0
+            active = sum(1 for a in agents if a.is_active)
+
+            summary = (
+                f"총평가: {total_now:,.0f}원 ({ret_pct:+.2f}%)\n"
+                f"승률: {wr:.1f}% / {all_trades}건 | 활성: {active}/{len(agents)}"
+            )
+            lines = []
+            for a in sorted(agents, key=lambda x: -x.total_return):
+                flag = "⛔" if not a.is_active else ("★" if a.is_champion else "·")
+                lines.append(
+                    f"{flag} {a.agent_id}({a.feature_set[:3]}): "
+                    f"{a.total_return*100:+.1f}% | {a.win_rate*100:.0f}% ({a.total_trades}건)"
+                )
+            return summary, "\n".join(lines)
+
+        coin_agents  = [a for a in AGENTS.values() if a.market == "coin"]
+        stock_agents = [a for a in AGENTS.values() if a.market == "stock"]
+        c_summary, c_lines = _market_lines(coin_agents)
+        s_summary, s_lines = _market_lines(stock_agents)
+
+        msg = (
+            f"📊 <b>AI 에이전트 일일 현황</b>  {now_str}\n"
+            f"{'─'*28}\n"
+            f"🪙 <b>코인 (AI01~10)</b>\n{c_summary}\n{c_lines}\n"
+            f"{'─'*28}\n"
+            f"📈 <b>주식 (AI11~20)</b>\n{s_summary}\n{s_lines}"
+        )
+        try:
+            await telegram.notify_message(msg)
+        except Exception:
+            logger.exception("[레포트] 일일 에이전트 레포트 발송 실패")
 
     def get_agents_snapshot(self) -> list[dict]:
         """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 순)."""
