@@ -21,12 +21,16 @@ _FX_CACHE:       tuple[float, float] | None = None    # (usd_krw, ts)
 _FUNDING_CACHE:  dict[str, tuple[float, float]] = {}  # symbol → (rate, ts)
 _KIMCHI_CACHE:   dict[str, tuple[float, float]] = {}  # ticker → (premium%, ts)
 _HIST_FUNDING_CACHE: dict[str, tuple[list, float]] = {}  # symbol:limit → (data, ts)
+_OI_CACHE:       dict[str, tuple[list, float]] = {}   # key → (data, ts)
+_TAKER_CACHE:    dict[str, tuple[list, float]] = {}   # key → (data, ts)
 
 _PRICE_TTL        = 30.0
 _FX_TTL           = 300.0
 _FUNDING_TTL      = 300.0
 _KIMCHI_TTL       = 60.0
 _HIST_FUNDING_TTL = 3600.0  # 8시간 주기 데이터라 1시간 캐시로 충분
+_OI_TTL           = 300.0   # 5분봉과 동일 주기
+_TAKER_TTL        = 300.0
 
 
 async def get_binance_price(symbol: str = "BTCUSDT") -> float:
@@ -123,6 +127,62 @@ async def get_historical_funding_rates(symbol: str = "BTCUSDT", limit: int = 50)
     except Exception as e:
         logger.warning("[펀딩비히스토리] 조회 실패 %s: %s", symbol, e)
         cached = _HIST_FUNDING_CACHE.get(cache_key)
+        return cached[0] if cached else []
+
+
+async def get_open_interest_hist(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 200) -> list[dict]:
+    """바이낸스 선물 미결제약정 히스토리 반환.
+
+    반환: [{"sumOpenInterest": "...", "sumOpenInterestValue": "...", "timestamp": ms}, ...]
+    최신 데이터가 맨 뒤 (오름차순 시간).
+    """
+    cache_key = f"{symbol}:{period}:{limit}"
+    now = time.time()
+    if cache_key in _OI_CACHE:
+        data, ts = _OI_CACHE[cache_key]
+        if now - ts < _OI_TTL:
+            return data
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(
+                "https://fapi.binance.com/futures/data/openInterestHist",
+                params={"symbol": symbol.upper(), "period": period, "limit": min(limit, 500)},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            _OI_CACHE[cache_key] = (data, now)
+            return data
+    except Exception as e:
+        logger.warning("[OI히스토리] 조회 실패 %s: %s", symbol, e)
+        cached = _OI_CACHE.get(cache_key)
+        return cached[0] if cached else []
+
+
+async def get_taker_ratio_hist(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 200) -> list[dict]:
+    """바이낸스 선물 Taker 매수/매도 비율 히스토리 반환.
+
+    반환: [{"buySellRatio": "...", "buyVol": "...", "sellVol": "...", "timestamp": ms}, ...]
+    ratio > 1.0: 공격적 매수 우세, ratio < 1.0: 공격적 매도 우세.
+    """
+    cache_key = f"{symbol}:{period}:{limit}"
+    now = time.time()
+    if cache_key in _TAKER_CACHE:
+        data, ts = _TAKER_CACHE[cache_key]
+        if now - ts < _TAKER_TTL:
+            return data
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(
+                "https://fapi.binance.com/futures/data/takerlongshortRatio",
+                params={"symbol": symbol.upper(), "period": period, "limit": min(limit, 500)},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            _TAKER_CACHE[cache_key] = (data, now)
+            return data
+    except Exception as e:
+        logger.warning("[TakerRatio] 조회 실패 %s: %s", symbol, e)
+        cached = _TAKER_CACHE.get(cache_key)
         return cached[0] if cached else []
 
 

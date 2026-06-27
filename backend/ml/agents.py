@@ -42,6 +42,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "regime_state", "mtf_ema_bull",
         "hour_sin", "hour_cos", "is_opening_hour",
         "btc_corr_20", "btc_ret_5",
+        "taker_buy_ratio",
+        "ha_color", "ha_bull_streak",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -53,6 +55,9 @@ FEATURE_SETS: dict[str, list[str]] = {
         "regime_state", "anchored_vwap_ratio", "anchored_vwap_cross", "mtf_ema_bull",
         "hour_sin", "hour_cos", "is_closing_hour",
         "kospi_ret_5", "kospi_rel_str",
+        "oi_price_diverge",
+        "ichi_above_cloud", "ichi_cloud_green", "ichi_tenkan_kijun_bull",
+        "above_pp", "dist_to_r1",
     ],
     "volume": [
         "vol_ratio", "obv_change", "cmf_20",
@@ -61,6 +66,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "regime_state", "bb_squeeze",
         "hour_sin", "hour_cos", "is_lunch_hour",
         "btc_ret_5", "kospi_ret_5",
+        "oi_change_pct", "taker_buy_ratio",
+        "dist_to_pp", "dist_to_s1",
     ],
 }
 
@@ -153,6 +160,8 @@ class SimAgent:
         self._last_position_values: dict[str, float] = {}  # ticker → 현재 평가액
         self._last_atr_pct: float = 0.0          # ATR 기반 동적 손익용 (predict()에서 업데이트)
         self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
+        self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
+        self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -259,6 +268,8 @@ class SimAgent:
         funding_rates: list[dict] | None = None,
         btc_ohlcv: list[dict] | None = None,
         kospi_ohlcv: list[dict] | None = None,
+        oi_hist: list[dict] | None = None,
+        taker_hist: list[dict] | None = None,
     ) -> bool:
         """분봉 OHLCV로 전용 모델 학습."""
         try:
@@ -267,6 +278,8 @@ class SimAgent:
                 funding_rates=funding_rates,
                 btc_ohlcv=btc_ohlcv,
                 kospi_ohlcv=kospi_ohlcv,
+                oi_hist=oi_hist,
+                taker_hist=taker_hist,
             )
             feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
             if len(feat_df) < 50:
@@ -326,17 +339,26 @@ class SimAgent:
             X = feat_df.values
             y = label.values.astype(int)
 
+            # ── Walk-Forward: 최근 200봉을 검증셋으로 분리 (과적합 방지) ──
+            VAL_SIZE = min(200, max(len(X) // 6, 30))
+            if len(X) > VAL_SIZE + 50:
+                X_train, X_val = X[:-VAL_SIZE], X[-VAL_SIZE:]
+                y_train, y_val = y[:-VAL_SIZE], y[-VAL_SIZE:]
+            else:
+                X_train, X_val = X, None
+                y_train, y_val = y, None
+
             # 최근 500샘플 2배 가중치 (최신 시장 환경 우선 반영)
-            weights = np.ones(len(X))
-            if len(X) > 500:
+            weights = np.ones(len(X_train))
+            if len(X_train) > 500:
                 weights[-500:] = 2.0
 
             scaler = StandardScaler()
-            X_s = scaler.fit_transform(X)
+            X_train_s = scaler.fit_transform(X_train)
 
             # 클래스 불균형 자동 보정 — buy 레이블이 적은 하락장에서도 공정한 학습
-            n_neg = int((y == 0).sum())
-            n_pos = int((y == 1).sum())
+            n_neg = int((y_train == 0).sum())
+            n_pos = int((y_train == 1).sum())
             scale_pos = n_neg / n_pos if n_pos > 0 else 1.0
 
             clf = XGBClassifier(
@@ -354,7 +376,15 @@ class SimAgent:
                 random_state=42,
                 n_jobs=-1,
             )
-            clf.fit(X_s, y, sample_weight=weights, verbose=False)
+            clf.fit(X_train_s, y_train, sample_weight=weights, verbose=False)
+
+            # Walk-Forward 검증 (50% 미만 = 랜덤보다 못함 → 학습 실패 처리)
+            if X_val is not None and len(X_val) > 0:
+                val_acc = clf.score(scaler.transform(X_val), y_val)
+                if val_acc < 0.50:
+                    logger.warning("[%s] WF검증 %.1f%% < 50%% → 학습 실패", self.agent_id, val_acc * 100)
+                    return False
+                logger.debug("[%s] WF검증 %.1f%%", self.agent_id, val_acc * 100)
 
             self._model = clf
             self._scaler = scaler
@@ -373,6 +403,8 @@ class SimAgent:
         ohlcv_list: list[dict],
         btc_ohlcv: list[dict] | None = None,
         kospi_ohlcv: list[dict] | None = None,
+        oi_hist: list[dict] | None = None,
+        taker_hist: list[dict] | None = None,
     ) -> tuple[str, float]:
         """(signal, buy_prob) 반환. 모델 없으면 ('hold', 0.5)."""
         if self._model is None and not self.load_model():
@@ -383,6 +415,8 @@ class SimAgent:
                 funding_rates=self._cached_funding_rates or None,
                 btc_ohlcv=btc_ohlcv,
                 kospi_ohlcv=kospi_ohlcv,
+                oi_hist=oi_hist or (self._cached_oi_hist or None),
+                taker_hist=taker_hist or (self._cached_taker_hist or None),
             )
             if full_df.empty:
                 return "hold", 0.5
@@ -616,6 +650,8 @@ async def predict_ensemble(
     market: str,
     btc_ohlcv: list[dict] | None = None,
     kospi_ohlcv: list[dict] | None = None,
+    oi_hist: list[dict] | None = None,
+    taker_hist: list[dict] | None = None,
 ) -> tuple[str, float]:
     """가중 앙상블 게이트 — 전 에이전트 동적 투표 + 실시간 보정.
 
@@ -662,7 +698,7 @@ async def predict_ensemble(
             if agent.feature_set == "all":
                 weight *= 1.3
 
-        _, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv)
+        _, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
         weighted_prob += prob * weight
         total_weight  += weight
 

@@ -29,6 +29,28 @@ from backend.strategies import volatility_breakout as vb_strategy
 logger = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
+
+# ── 주요 매크로 이벤트 (KST): 발표 ±2시간 코인 신규 매수 차단 ─────
+_MACRO_EVENTS_KST = [
+    # FOMC 2026 (미 동부 14:00 = KST 03:00/04:00)
+    "2026-07-29 04:00", "2026-09-17 04:00", "2026-10-29 04:00", "2026-12-10 04:00",
+    # US CPI 2026 (미 동부 08:30 = KST 21:30/22:30)
+    "2026-07-15 22:30", "2026-08-12 22:30", "2026-09-11 22:30",
+    "2026-10-14 22:30", "2026-11-12 22:30", "2026-12-10 22:30",
+    # US NFP 비농업고용 2026 (보통 첫째 금요일)
+    "2026-07-02 22:30", "2026-08-07 22:30", "2026-09-04 22:30",
+    "2026-10-02 22:30", "2026-11-06 22:30", "2026-12-04 22:30",
+]
+
+
+def _is_high_risk_window() -> bool:
+    """현재 KST 시각이 주요 매크로 이벤트 발표 ±2시간 이내인지 확인."""
+    now = datetime.now(KST).replace(tzinfo=None)
+    for es in _MACRO_EVENTS_KST:
+        ev = datetime.strptime(es, "%Y-%m-%d %H:%M")
+        if abs((now - ev).total_seconds()) <= 7200:
+            return True
+    return False
 _OHLCV_SEM = asyncio.Semaphore(10)  # 업비트/KIS OHLCV 동시 요청 최대 10개
 
 
@@ -47,6 +69,8 @@ class TradingScheduler:
         self._lock = asyncio.Lock()
         self._ml_signals: dict[str, dict] = {}  # {symbol: {"signal": ..., "buy_prob": ..., "news_score": ...}}
         self._use_atr_risk: bool = False  # 에이전트 검증 완료 시 True → 실매매도 ATR 동적 손익 적용
+        self._btc_oi_hist:    list[dict] = []  # BTC 선물 OI 히스토리 캐시 (코인 에이전트 전체 공유)
+        self._btc_taker_hist: list[dict] = []  # BTC 선물 Taker 비율 히스토리 캐시
 
     # ── 종목 관리 ─────────────────────────────────────────────────
 
@@ -324,7 +348,12 @@ class TradingScheduler:
             return True
 
         try:
-            signal, prob = await predict_ensemble(ohlcv_5min, ticker=symbol, market=market)
+            oi_hist    = self._btc_oi_hist    if market == "coin" else None
+            taker_hist = self._btc_taker_hist if market == "coin" else None
+            signal, prob = await predict_ensemble(
+                ohlcv_5min, ticker=symbol, market=market,
+                oi_hist=oi_hist, taker_hist=taker_hist,
+            )
             approved = signal == "buy"
             n = len(trained)
             logger.info(
@@ -698,6 +727,19 @@ class TradingScheduler:
         except Exception:
             coin_prices = {}
 
+        # BTC 선물 OI + Taker 히스토리 (코인 에이전트 전체 공유, 5분 TTL)
+        from backend.api.binance import get_open_interest_hist, get_taker_ratio_hist
+        try:
+            btc_oi_hist, btc_taker_hist = await asyncio.gather(
+                get_open_interest_hist("BTCUSDT", period="5m", limit=200),
+                get_taker_ratio_hist("BTCUSDT", period="5m", limit=200),
+            )
+            self._btc_oi_hist    = btc_oi_hist
+            self._btc_taker_hist = btc_taker_hist
+        except Exception:
+            btc_oi_hist    = self._btc_oi_hist
+            btc_taker_hist = self._btc_taker_hist
+
         # 주식 OHLCV + 현재가도 병렬 프리패치
         stock_intervals = list({a.interval_min for a in AGENTS.values() if a.market == "stock"})
         stock_ohlcv_cache: dict[str, list] = {}
@@ -768,17 +810,22 @@ class TradingScheduler:
                                 except Exception:
                                     train_ohlcv = ohlcv
                                     _btc_train = _btc_ref
+                                _oi_ref    = btc_oi_hist    if btc_oi_hist    else None
+                                _taker_ref = btc_taker_hist if btc_taker_hist else None
                                 trained = await asyncio.to_thread(
                                     agent.train, train_ohlcv,
                                     agent._cached_funding_rates or None,
                                     _btc_train, None,
+                                    _oi_ref, _taker_ref,
                                 )
                                 if not trained:
                                     continue
                             price = coin_prices.get(ticker, 0.0)
                             if price <= 0:
                                 continue
-                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref)
+                            _oi_ref    = btc_oi_hist    if btc_oi_hist    else None
+                            _taker_ref = btc_taker_hist if btc_taker_hist else None
+                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref)
                             await self._agent_execute(db, agent, ticker, signal, prob, price)
 
                     else:
@@ -898,6 +945,10 @@ class TradingScheduler:
                 sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
 
         if signal == "buy":
+            # 코인: 매크로 이벤트 발표 ±2시간은 변동성 폭발 위험 → 신규 매수 차단
+            if agent.market == "coin" and _is_high_risk_window():
+                sim_log.push(agent.agent_id, f"[이벤트회피] {symbol} 매수 차단 (매크로 발표 ±2시간)", "INFO")
+                return
             # DCA: 확률 강도에 비례한 진입 비율 (약한 신호는 50%, 강한 신호는 100%)
             _gap = prob - agent.buy_threshold
             _portion = 1.0 if _gap >= 0.08 else (0.7 if _gap >= 0.04 else 0.5)
@@ -990,20 +1041,39 @@ class TradingScheduler:
         except Exception:
             logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
 
+        # ── BTC 선물 OI + Taker 히스토리 (코인 에이전트 학습용) ─────
+        from backend.api.binance import get_open_interest_hist, get_taker_ratio_hist
+        btc_oi_train:    list[dict] = []
+        btc_taker_train: list[dict] = []
+        try:
+            btc_oi_train, btc_taker_train = await asyncio.gather(
+                get_open_interest_hist("BTCUSDT", period="5m", limit=500),
+                get_taker_ratio_hist("BTCUSDT", period="5m", limit=500),
+            )
+            logger.info("[Retrain] BTC OI: %d개, Taker비율: %d개", len(btc_oi_train), len(btc_taker_train))
+        except Exception:
+            logger.warning("[Retrain] BTC OI/Taker 데이터 수집 실패")
+
         # ── 에이전트별 재학습 ────────────────────────────────────
         success = 0
         for agent in AGENTS.values():
             data = coin_ohlcv if agent.market == "coin" else stock_ohlcv
             fr   = coin_funding if agent.market == "coin" else None
-            _btc_ref   = btc_train_ohlcv if agent.market == "coin" else None
+            _btc_ref   = btc_train_ohlcv  if agent.market == "coin"  else None
             _kospi_ref = kospi_train_ohlcv if agent.market == "stock" else None
+            _oi_ref    = btc_oi_train      if agent.market == "coin"  else None
+            _taker_ref = btc_taker_train   if agent.market == "coin"  else None
             if agent.market == "coin":
                 agent._cached_funding_rates = coin_funding
+                if btc_oi_train:
+                    agent._cached_oi_hist    = btc_oi_train
+                if btc_taker_train:
+                    agent._cached_taker_hist = btc_taker_train
             if not data:
                 logger.warning("[Retrain][%s] 학습 데이터 없음, 스킵", agent.agent_id)
                 continue
             try:
-                trained = await asyncio.to_thread(agent.train, data, fr, _btc_ref, _kospi_ref)
+                trained = await asyncio.to_thread(agent.train, data, fr, _btc_ref, _kospi_ref, _oi_ref, _taker_ref)
                 if trained:
                     success += 1
                     logger.info("[Retrain][%s] 재학습 완료", agent.agent_id)

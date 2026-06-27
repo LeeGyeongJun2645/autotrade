@@ -93,6 +93,24 @@ FEATURE_NAMES = [
     # ── KOSPI 연동 (주식 에이전트 전용, 코인은 0) ────────────────────
     "kospi_ret_5",          # KOSPI 5봉 수익률 (시장 방향)
     "kospi_rel_str",        # 개별주 상대강도 (종목ret5 - KOSPI ret5)
+    # ── OI & Taker (코인 에이전트 전용, BTC 선물 기준 / 주식은 0) ──
+    "oi_change_pct",        # OI 5봉 변화율 (포지션 쌓임 = 추세 확신)
+    "oi_price_diverge",     # OI↑+가격↓=숏증가(약세) / OI↑+가격↑=롱증가(강세) 불일치 여부
+    "taker_buy_ratio",      # Taker 매수 비율 (>0.5 = 공격적 매수 우세)
+    # ── 헤이킨 아시 (노이즈 제거 캔들, 추세 지속성 포착) ───────────
+    "ha_color",             # HA 봉 색깔 (1=양봉, 0=음봉)
+    "ha_no_lower_shadow",   # HA 아래꼬리 없음 → 강한 상승 지속 신호
+    "ha_no_upper_shadow",   # HA 위꼬리 없음 → 강한 하락 지속 신호
+    "ha_bull_streak",       # 연속 HA 양봉 수 (최대 5봉, 모멘텀 강도)
+    # ── 이치모쿠 클라우드 ────────────────────────────────────────────
+    "ichi_above_cloud",        # close > 구름 상단 (강세 구조)
+    "ichi_cloud_green",        # 선행스팬A > B → 상승 구름
+    "ichi_tenkan_kijun_bull",  # 전환선(9봉) > 기준선(26봉) → 단기 골든크로스
+    # ── 일별 피봇 포인트 (전일 H/L/C 기준) ──────────────────────────
+    "dist_to_pp",   # (close/PP) - 1: 피봇 대비 현재가 위치
+    "dist_to_r1",   # (R1/close) - 1: 익절 목표까지 남은 거리
+    "dist_to_s1",   # (close/S1) - 1: 지지선 대비 여유
+    "above_pp",     # close > PP → 1 (추세 방향)
 ]
 
 
@@ -101,6 +119,8 @@ def compute_features(
     funding_rates: list[dict] | None = None,
     btc_ohlcv: list[dict] | None = None,     # BTC 상관관계용 (코인 에이전트, 주식·BTC본인은 None)
     kospi_ohlcv: list[dict] | None = None,    # KOSPI 연동용 (주식 에이전트, 코인은 None)
+    oi_hist: list[dict] | None = None,        # BTC 선물 OI 히스토리 (코인 에이전트, 주식은 None)
+    taker_hist: list[dict] | None = None,     # BTC 선물 Taker 비율 히스토리 (코인 에이전트, 주식은 None)
 ) -> pd.DataFrame:
     """OHLCV 리스트 → Feature DataFrame 변환.
 
@@ -351,5 +371,91 @@ def compute_features(
     else:
         df["kospi_ret_5"]  = 0.0
         df["kospi_rel_str"] = 0.0
+
+    # ── OI 히스토리 (코인 전용: BTC 선물 기준, else 0) ──────────────
+    if oi_hist:
+        try:
+            _oi = pd.DataFrame(oi_hist)
+            _oi["ts"] = pd.to_datetime(
+                _oi["timestamp"].astype(float), unit="ms", utc=True
+            ).dt.tz_convert("Asia/Seoul").dt.tz_localize(None)
+            _oi = _oi.set_index("ts").sort_index()
+            _oi_val        = _oi["sumOpenInterest"].astype(float).reindex(df.index, method="ffill")
+            df["oi_change_pct"]  = _oi_val.pct_change(5).fillna(0.0)
+            _oi_rising     = _oi_val.pct_change(5) > 0
+            _price_rising  = close.pct_change(5) > 0
+            df["oi_price_diverge"] = (_oi_rising != _price_rising).astype(float)
+        except Exception:
+            df["oi_change_pct"]    = 0.0
+            df["oi_price_diverge"] = 0.0
+    else:
+        df["oi_change_pct"]    = 0.0
+        df["oi_price_diverge"] = 0.0
+
+    # ── Taker 비율 (코인 전용: BTC 선물 기준, else 0.5) ──────────────
+    if taker_hist:
+        try:
+            _tk = pd.DataFrame(taker_hist)
+            _tk["ts"] = pd.to_datetime(
+                _tk["timestamp"].astype(float), unit="ms", utc=True
+            ).dt.tz_convert("Asia/Seoul").dt.tz_localize(None)
+            _tk = _tk.set_index("ts").sort_index()
+            _buy   = _tk["buyVol"].astype(float)
+            _sell  = _tk["sellVol"].astype(float)
+            _ratio = _buy / (_buy + _sell).replace(0, np.nan)
+            df["taker_buy_ratio"] = _ratio.reindex(df.index, method="ffill").fillna(0.5)
+        except Exception:
+            df["taker_buy_ratio"] = 0.5
+    else:
+        df["taker_buy_ratio"] = 0.5
+
+    # ── 헤이킨 아시 (재귀 계산: ha_open = (prev_ha_open + prev_ha_close) / 2) ──
+    _ha_close  = (open_ + high + low + close) / 4
+    _hc_arr    = _ha_close.values
+    _ho_arr    = np.empty(len(df))
+    _ho_arr[0] = (open_.iloc[0] + close.iloc[0]) / 2
+    for _i in range(1, len(df)):
+        _ho_arr[_i] = (_ho_arr[_i - 1] + _hc_arr[_i - 1]) / 2
+    _ha_open = pd.Series(_ho_arr, index=df.index)
+    _ha_high = pd.concat([high, _ha_open, _ha_close], axis=1).max(axis=1)
+    _ha_low  = pd.concat([low,  _ha_open, _ha_close], axis=1).min(axis=1)
+    df["ha_color"]           = (_ha_close > _ha_open).astype(float)
+    df["ha_no_lower_shadow"] = ((_ha_open - _ha_low).abs()   < 1e-9).astype(float)
+    df["ha_no_upper_shadow"] = ((_ha_high - _ha_close).abs() < 1e-9).astype(float)
+    df["ha_bull_streak"]     = (_ha_close > _ha_open).astype(int).rolling(5, min_periods=1).sum().astype(float)
+
+    # ── 이치모쿠 클라우드 ─────────────────────────────────────────────
+    try:
+        _ichi   = trend.IchimokuIndicator(high, low, window1=9, window2=26, window3=52)
+        _span_a = _ichi.ichimoku_a()
+        _span_b = _ichi.ichimoku_b()
+        _tenkan = _ichi.ichimoku_conversion_line()
+        _kijun  = _ichi.ichimoku_base_line()
+        _cloud_top = pd.concat([_span_a, _span_b], axis=1).max(axis=1)
+        df["ichi_above_cloud"]       = (close > _cloud_top).astype(float)
+        df["ichi_cloud_green"]       = (_span_a > _span_b).astype(float)
+        df["ichi_tenkan_kijun_bull"] = (_tenkan > _kijun).astype(float)
+    except Exception:
+        df["ichi_above_cloud"]       = 0.5
+        df["ichi_cloud_green"]       = 0.5
+        df["ichi_tenkan_kijun_bull"] = 0.5
+
+    # ── 일별 피봇 포인트 (전일 H/L/C 기준) ──────────────────────────
+    try:
+        _ph = high.resample("1D").max().shift(1).reindex(df.index, method="ffill")
+        _pl = low.resample("1D").min().shift(1).reindex(df.index, method="ffill")
+        _pc = close.resample("1D").last().shift(1).reindex(df.index, method="ffill")
+        _pp = (_ph + _pl + _pc) / 3
+        _r1 = 2 * _pp - _pl
+        _s1 = 2 * _pp - _ph
+        df["dist_to_pp"] = (close / _pp.replace(0, np.nan) - 1).fillna(0.0)
+        df["dist_to_r1"] = (_r1 / close.replace(0, np.nan) - 1).fillna(0.0)
+        df["dist_to_s1"] = (close / _s1.replace(0, np.nan) - 1).fillna(0.0)
+        df["above_pp"]   = (close > _pp).astype(float)
+    except Exception:
+        df["dist_to_pp"] = 0.0
+        df["dist_to_r1"] = 0.0
+        df["dist_to_s1"] = 0.0
+        df["above_pp"]   = 0.5
 
     return df[FEATURE_NAMES].dropna()
