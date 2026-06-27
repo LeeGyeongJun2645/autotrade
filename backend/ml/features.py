@@ -75,6 +75,12 @@ FEATURE_NAMES = [
     "ret_lag_3",        # 3봉 전 수익률
     # ── 펀딩비 (코인: 8시간 주기 실제값, 주식: 항상 0) ─────────────
     "funding_rate",
+    # ── 시장 레짐 & 구조 피처 ────────────────────────────────────────
+    "regime_state",         # 0=횡보, 1=추세, 2=고변동 (ADX+BB폭 복합)
+    "anchored_vwap_ratio",  # close / 당일시가VWAP - 1 (기관 기준선)
+    "anchored_vwap_cross",  # close > 당일 앵커드VWAP → 1
+    "bb_squeeze",           # BB폭 수축 중 → 1 (돌파 직전 포착)
+    "mtf_ema_bull",         # 15분봉 EMA9 > EMA21 → 1 (상위 추세 강세)
 ]
 
 
@@ -146,6 +152,16 @@ def compute_features(
     df["vwap_ratio"] = close / vwap_20 - 1
     df["vwap_cross"] = (close > vwap_20).astype(float)
 
+    # ── 앵커드 VWAP (당일 시가 기준, 기관 매매 참조선) ──────────
+    _tp_av     = (df["high"] + df["low"] + df["close"]) / 3
+    _date_grp  = df.index.date
+    _avwap     = (
+        (_tp_av * df["volume"]).groupby(_date_grp).cumsum()
+        / df["volume"].groupby(_date_grp).cumsum().replace(0, np.nan)
+    )
+    df["anchored_vwap_ratio"] = (close / _avwap.fillna(close) - 1)
+    df["anchored_vwap_cross"] = (close > _avwap).astype(float)
+
     # ── 변동성 ────────────────────────────────────────────────────
     bb             = volatility.BollingerBands(close, window=20, window_dev=2)
     df["bb_pband"] = bb.bollinger_pband()
@@ -153,6 +169,11 @@ def compute_features(
     df["atr_pct"]  = atr / close
     df["mass_index"]  = trend.MassIndex(high, low, window_fast=9, window_slow=25).mass_index()
     df["hl_range_20"] = (high.rolling(20).max() - low.rolling(20).min()) / close
+
+    # BB폭 지표 (regime & squeeze에 공유)
+    _bb_wband    = bb.bollinger_wband()          # (상단-하단)/중간선
+    _bb_wband_ma = _bb_wband.rolling(20).mean()
+    df["bb_squeeze"] = (_bb_wband <= _bb_wband_ma * 0.85).astype(float)  # 폭 수축 → 돌파 대기
 
     # ── 거래량 ────────────────────────────────────────────────────
     vol_ma20          = vol.rolling(20).mean()
@@ -233,6 +254,27 @@ def compute_features(
     df["ret_lag_1"]       = close.pct_change(1).shift(1)
     df["ret_lag_2"]       = close.pct_change(1).shift(2)
     df["ret_lag_3"]       = close.pct_change(1).shift(3)
+
+    # ── 시장 레짐 (0=횡보, 1=추세, 2=고변동) ────────────────────
+    _regime = pd.Series(0.0, index=df.index)
+    _regime[df["adx_14"] > 25] = 1.0                     # ADX>25: 추세장
+    _regime[_bb_wband > _bb_wband_ma * 1.5] = 2.0        # BB폭 급팽창: 고변동장 (추세장 override)
+    df["regime_state"] = _regime
+
+    # ── MTF 15분봉 상위 추세 (5분봉 리샘플 → EMA 크로스) ────────
+    try:
+        _df15 = df[["open", "high", "low", "close", "volume"]].resample("15min").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna()
+        if len(_df15) >= 22:
+            _e9  = trend.EMAIndicator(_df15["close"], window=9).ema_indicator()
+            _e21 = trend.EMAIndicator(_df15["close"], window=21).ema_indicator()
+            _mtf = (_e9 > _e21).astype(float)
+            df["mtf_ema_bull"] = _mtf.reindex(df.index, method="ffill").fillna(0.5)
+        else:
+            df["mtf_ema_bull"] = 0.5
+    except Exception:
+        df["mtf_ema_bull"] = 0.5
 
     # ── 펀딩비 (코인: 8시간 주기 forward-fill, 주식: 항상 0) ─────────
     if funding_rates:

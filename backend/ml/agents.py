@@ -37,9 +37,11 @@ FEATURE_SETS: dict[str, list[str]] = {
     "momentum": [
         "rsi_9", "macd_diff", "stoch_rsi", "williams_r",
         "mfi_14", "roc_10", "ret_1d", "ret_3d", "ret_5d", "ret_10d",
-        # 래그 피처 (단기 모멘텀 전환 포착)
+        # 래그 피처
         "rsi_lag_1", "rsi_lag_2", "macd_diff_lag_1",
         "ret_lag_1", "ret_lag_2", "ret_lag_3",
+        # 레짐·MTF (횡보장에서 momentum 우대)
+        "regime_state", "mtf_ema_bull",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -47,12 +49,16 @@ FEATURE_SETS: dict[str, list[str]] = {
         "adx_14", "adx_pos", "adx_neg",
         "trix_15", "dpo_20", "vortex_diff",
         "ema9_cross_ema21", "vwap_ratio", "vwap_cross",
-        "bb_pband_lag_1",  # 볼린저밴드 직전 위치
+        "bb_pband_lag_1",
+        # 기관 기준선·레짐·MTF (추세장에서 trend 우대)
+        "regime_state", "anchored_vwap_ratio", "anchored_vwap_cross", "mtf_ema_bull",
     ],
     "volume": [
         "vol_ratio", "obv_change", "cmf_20",
         "mfi_14", "ret_1d", "ret_5d", "ret_20d",
-        "vol_ratio_lag_1",  # 직전 거래량 비율
+        "vol_ratio_lag_1",
+        # 레짐·BB스퀴즈
+        "regime_state", "bb_squeeze",
     ],
 }
 
@@ -583,13 +589,39 @@ async def predict_ensemble(
     if not candidates:
         return "hold", 0.5
 
-    # ── 가중 예측 집계 (샤프 비율 × 총수익률) ─────────────────────
+    # ── 현재 시장 레짐 감지 (앙상블 가중치 조정용) ───────────────
+    current_regime = 1  # 기본: 추세장
+    try:
+        _tmp = compute_features(ohlcv_list)
+        if not _tmp.empty and "regime_state" in _tmp.columns:
+            current_regime = int(_tmp["regime_state"].iloc[-1])
+    except Exception:
+        pass
+
+    # ── 가중 예측 집계 (샤프비율 × 수익률 × 레짐 부스터) ─────────
     weighted_prob = 0.0
     total_weight  = 0.0
     for agent in candidates:
-        ret    = max(agent.total_return, -0.5)      # 큰 손실 에이전트 하한 제한
-        sharpe = agent._sharpe_weight()              # 꾸준한 수익 에이전트 우대
-        weight = max(sharpe * max(1.0 + ret, 0.1), 0.1)  # 최소 발언권 0.1 보장
+        ret    = max(agent.total_return, -0.5)
+        sharpe = agent._sharpe_weight()
+        weight = max(sharpe * max(1.0 + ret, 0.1), 0.1)
+
+        # 레짐별 전략 가중치 조정
+        if current_regime == 1:    # 추세장: trend 우대, volume 축소
+            if agent.feature_set == "trend":
+                weight *= 1.5
+            elif agent.feature_set == "volume":
+                weight *= 0.7
+        elif current_regime == 0:  # 횡보장: momentum 우대, trend 축소
+            if agent.feature_set == "momentum":
+                weight *= 1.4
+            elif agent.feature_set == "trend":
+                weight *= 0.8
+        elif current_regime == 2:  # 고변동장: all 우대, 전체 보수적
+            weight *= 0.7
+            if agent.feature_set == "all":
+                weight *= 1.3
+
         _, prob = agent.predict(ohlcv_list)
         weighted_prob += prob * weight
         total_weight  += weight
