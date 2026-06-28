@@ -72,6 +72,9 @@ class TradingScheduler:
         self._btc_oi_hist:    list[dict] = []  # BTC 선물 OI 히스토리 캐시 (코인 에이전트 전체 공유)
         self._btc_taker_hist: list[dict] = []  # BTC 선물 Taker 비율 히스토리 캐시
         self._btc_ohlcv_cache: list[dict] = []  # BTC 5분봉 OHLCV 캐시 (ML 게이트 BTC 상관관계용)
+        # DCA 분할매수 상태: {symbol: {"stage": 1~3, "total_budget": float}}
+        # stage 1=1차완료, 2=2차완료, 3=3차완료(전량매수)
+        self._dca_state: dict[str, dict] = {}
 
     # ── 종목 관리 ─────────────────────────────────────────────────
 
@@ -297,6 +300,16 @@ class TradingScheduler:
                 sell = self._check_strategy_sell(ohlcv_5min, position.strategy)
                 if sell is not None and sell.is_sell:
                     await self._execute_kis_sell(symbol, position, "STRATEGY_SELL", current_price)
+                    return
+
+            # DCA 2/3차 추가매수 체크
+            dca = self._dca_state.get(symbol)
+            if dca:
+                drop = (current_price - position.entry_price) / position.entry_price
+                if dca["stage"] == 1 and drop <= -0.015:
+                    await self._execute_kis_dca_add(symbol, current_price, position, 2, 0.35)
+                elif dca["stage"] == 2 and drop <= -0.030:
+                    await self._execute_kis_dca_add(symbol, current_price, position, 3, 0.25)
             return
 
         # ── 포지션 없음: 매수 신호 탐색 (5분봉) ──
@@ -402,7 +415,8 @@ class TradingScheduler:
 
             balance = await kis.get_balance()
             cash = float(balance["cash"])
-            qty = int(RiskManager.calculate_qty(cash, current_price))
+            total_qty = int(RiskManager.calculate_qty(cash, current_price))
+            qty = max(1, int(total_qty * 0.40))  # DCA 1차: 총 수량의 40%
 
             ok, reason = RiskManager.validate_order(cash, current_price, float(qty))
             if not ok:
@@ -410,6 +424,7 @@ class TradingScheduler:
                 return
 
             await kis.place_buy_order(symbol, qty)
+            self._dca_state[symbol] = {"stage": 1, "total_qty": total_qty, "bought_qty": qty}
 
             # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
             sl_rate = tp_rate = None
@@ -466,9 +481,48 @@ class TradingScheduler:
 
             async with self._lock:
                 self._positions.pop(symbol, None)
+            self._dca_state.pop(symbol, None)
             await delete_position(symbol)
         except Exception:
             logger.exception("[KIS][%s] 매도 실행 중 예외", symbol)
+
+    async def _execute_kis_dca_add(
+        self,
+        symbol: str,
+        current_price: float,
+        position: Position,
+        next_stage: int,
+        qty_ratio: float,
+    ) -> None:
+        """KIS DCA 추가매수 (2차/3차)."""
+        try:
+            dca = self._dca_state.get(symbol)
+            if not dca:
+                return
+            add_qty = max(1, int(dca["total_qty"] * qty_ratio))
+            if add_qty < 1:
+                return
+
+            await kis.place_buy_order(symbol, add_qty)
+
+            total_cost = position.entry_price * position.qty + current_price * add_qty
+            new_qty = position.qty + add_qty
+            new_avg = total_cost / new_qty
+            position.entry_price = new_avg
+            position.qty = new_qty
+            position.stop_loss_price = new_avg * (1 + settings.stop_loss_rate)
+            position.take_profit_price = new_avg * (1 + settings.take_profit_rate)
+            async with self._lock:
+                self._positions[symbol] = position
+            await upsert_position(symbol, "KIS", position)
+            await insert_trade(symbol, "KIS", "BUY", float(add_qty), current_price, position.strategy, f"DCA {next_stage}차")
+            dca["stage"] = next_stage
+            dca["bought_qty"] = int(dca.get("bought_qty", 0)) + add_qty
+            sim_log.push(symbol, f"DCA {next_stage}차 {add_qty}주 추가매수 @ {current_price:,.0f}원 | 평균단가 {new_avg:,.0f}원", "BUY")
+            logger.info("[KIS DCA %d차] %s %d주 @ %,.0f원 | 평균단가 %,.0f원", next_stage, symbol, add_qty, current_price, new_avg)
+            await telegram.notify_buy(symbol, float(add_qty), current_price, position.strategy, f"DCA {next_stage}차 추가매수")
+        except Exception:
+            logger.exception("[KIS][%s] DCA %d차 추가매수 예외", symbol, next_stage)
 
     # ── KIS EOD 강제 매도 ────────────────────────────────────────
 
@@ -518,6 +572,15 @@ class TradingScheduler:
             if exit_signal.should_exit:
                 await self._execute_upbit_sell(ticker, position, exit_signal.reason, current_price)
                 return
+
+            # DCA 2/3차 추가 매수 체크
+            dca = self._dca_state.get(ticker)
+            if dca:
+                drop = (current_price - position.entry_price) / position.entry_price
+                if dca["stage"] == 1 and drop <= -0.015:
+                    await self._execute_upbit_dca_add(ticker, current_price, position, 2, 0.35)
+                elif dca["stage"] == 2 and drop <= -0.030:
+                    await self._execute_upbit_dca_add(ticker, current_price, position, 3, 0.25)
 
             # MA/RSI 전략 기반 청산 (5분봉)
             if position.strategy in ("moving_average", "rsi"):
@@ -577,7 +640,8 @@ class TradingScheduler:
 
             balance = await upbit.get_balance()
             krw = float(balance["krw"])
-            amount_krw = krw * settings.max_position_ratio
+            total_budget = krw * settings.max_position_ratio
+            amount_krw = total_budget * 0.40  # DCA 1차: 총 예산의 40%
 
             if amount_krw < 5_000:
                 logger.warning("[Upbit][%s] 매수 불가: 잔액 부족 (%.0f원)", ticker, krw)
@@ -587,6 +651,7 @@ class TradingScheduler:
 
             # qty는 추정값 (실제 체결 수량은 주문 체결 후 확정됨)
             qty = amount_krw / current_price
+            self._dca_state[ticker] = {"stage": 1, "total_budget": total_budget}
 
             # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
             sl_rate = tp_rate = None
@@ -621,6 +686,46 @@ class TradingScheduler:
         except Exception:
             logger.exception("[Upbit][%s] 매수 실행 중 예외", ticker)
 
+    async def _execute_upbit_dca_add(
+        self,
+        ticker: str,
+        current_price: float,
+        position: Position,
+        next_stage: int,
+        budget_ratio: float,
+    ) -> None:
+        """DCA 추가 매수 (2차 35% / 3차 25%). 평균 단가 갱신 후 DB 업데이트."""
+        try:
+            dca = self._dca_state.get(ticker)
+            if not dca:
+                return
+            add_krw = dca["total_budget"] * budget_ratio
+            if add_krw < 5_000:
+                return
+
+            await upbit.place_buy_order(ticker, add_krw)
+            add_qty = add_krw / current_price
+
+            # 평균 단가·수량 갱신
+            total_cost = position.entry_price * position.qty + current_price * add_qty
+            new_qty    = position.qty + add_qty
+            new_avg    = total_cost / new_qty
+            position.entry_price        = new_avg
+            position.qty                = new_qty
+            position.stop_loss_price    = new_avg * (1 + settings.stop_loss_rate)
+            position.take_profit_price  = new_avg * (1 + settings.take_profit_rate)
+
+            async with self._lock:
+                self._positions[ticker] = position
+            await upsert_position(ticker, "UPBIT", position)
+            await insert_trade(ticker, "UPBIT", "BUY", add_qty, current_price, position.strategy, f"DCA {next_stage}차")
+
+            dca["stage"] = next_stage
+            sim_log.push(ticker, f"DCA {next_stage}차 {add_qty:.6f} @ {current_price:,.0f}원 | 평균단가 {new_avg:,.0f}원", "BUY")
+            await telegram.notify_buy(ticker, add_qty, current_price, position.strategy, f"DCA {next_stage}차 추가매수 | 평균단가 {new_avg:,.0f}원", is_crypto=True)
+        except Exception:
+            logger.exception("[Upbit][%s] DCA %d차 추가매수 실패", ticker, next_stage)
+
     async def _execute_upbit_sell(
         self,
         ticker: str,
@@ -642,6 +747,7 @@ class TradingScheduler:
 
             async with self._lock:
                 self._positions.pop(ticker, None)
+            self._dca_state.pop(ticker, None)
             await delete_position(ticker)
         except Exception:
             logger.exception("[Upbit][%s] 매도 실행 중 예외", ticker)
