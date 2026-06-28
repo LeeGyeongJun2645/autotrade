@@ -81,6 +81,7 @@ FEATURE_NAMES = [
     "anchored_vwap_cross",  # close > 당일 앵커드VWAP → 1
     "bb_squeeze",           # BB폭 수축 중 → 1 (돌파 직전 포착)
     "mtf_ema_bull",         # 15분봉 EMA9 > EMA21 → 1 (상위 추세 강세)
+    "mtf_1h_ema_bull",      # 1시간봉 EMA9 > EMA21 → 1 (더 높은 상위 추세 필터)
     # ── 시간대 패턴 (KST 기준) ───────────────────────────────────────
     "hour_sin",             # 시간 sin 인코딩 (0~24h 주기 연속성)
     "hour_cos",             # 시간 cos 인코딩
@@ -290,10 +291,38 @@ def compute_features(
     df["ret_lag_3"]       = close.pct_change(1).shift(3)
 
     # ── 시장 레짐 (0=횡보, 1=추세, 2=고변동) ────────────────────
-    _regime = pd.Series(0.0, index=df.index)
-    _regime[df["adx_14"] > 25] = 1.0                     # ADX>25: 추세장
-    _regime[_bb_wband > _bb_wband_ma * 1.5] = 2.0        # BB폭 급팽창: 고변동장 (추세장 override)
-    df["regime_state"] = _regime
+    # HMM 3-state 우선 시도 → 실패 시 ADX+BB 폴백
+    _regime_ok = False
+    try:
+        import warnings
+        from hmmlearn import hmm as _hmm_lib
+        _ret_arr  = close.pct_change().fillna(0).values.reshape(-1, 1)
+        _vol_arr  = close.pct_change().rolling(5).std().bfill().fillna(0).values.reshape(-1, 1)
+        _hmm_X    = np.concatenate([_ret_arr, _vol_arr], axis=1)
+        if len(_hmm_X) >= 60:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                _model = _hmm_lib.GaussianHMM(
+                    n_components=3, covariance_type="diag",
+                    n_iter=10, random_state=42,
+                )
+                _model.fit(_hmm_X)
+            _states = _model.predict(_hmm_X)
+            # 상태별 평균 변동성 계산 → 낮은 변동성=횡보(0), 중간=추세(1), 높은=고변동(2)
+            _state_vol = {s: float(_vol_arr[_states == s].mean()) for s in range(3) if (_states == s).any()}
+            _sorted    = sorted(_state_vol, key=_state_vol.get)
+            _state_map = {_sorted[i]: float(i) for i in range(len(_sorted))}
+            df["regime_state"] = pd.Series(
+                [_state_map.get(int(s), 0.0) for s in _states], index=df.index
+            )
+            _regime_ok = True
+    except Exception:
+        pass
+    if not _regime_ok:
+        _regime = pd.Series(0.0, index=df.index)
+        _regime[df["adx_14"] > 25] = 1.0
+        _regime[_bb_wband > _bb_wband_ma * 1.5] = 2.0
+        df["regime_state"] = _regime
 
     # ── MTF 15분봉 상위 추세 (5분봉 리샘플 → EMA 크로스) ────────
     try:
@@ -309,6 +338,21 @@ def compute_features(
             df["mtf_ema_bull"] = 0.5
     except Exception:
         df["mtf_ema_bull"] = 0.5
+
+    # ── MTF 1시간봉 상위 추세 (5분봉 리샘플 → EMA 크로스, 더 높은 타임프레임 필터) ──
+    try:
+        _df1h = df[["open", "high", "low", "close", "volume"]].resample("1h").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna()
+        if len(_df1h) >= 22:
+            _e9h  = trend.EMAIndicator(_df1h["close"], window=9).ema_indicator()
+            _e21h = trend.EMAIndicator(_df1h["close"], window=21).ema_indicator()
+            _mtf1h = (_e9h > _e21h).astype(float)
+            df["mtf_1h_ema_bull"] = _mtf1h.reindex(df.index, method="ffill").fillna(0.5)
+        else:
+            df["mtf_1h_ema_bull"] = 0.5
+    except Exception:
+        df["mtf_1h_ema_bull"] = 0.5
 
     # ── 펀딩비 (코인: 8시간 주기 forward-fill, 주식: 항상 0) ─────────
     if funding_rates:

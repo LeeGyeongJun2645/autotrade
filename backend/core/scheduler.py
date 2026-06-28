@@ -295,20 +295,28 @@ class TradingScheduler:
                 return
 
             # MA/RSI 전략 청산 신호 확인 (5분봉)
+            _kis_pos_ohlcv: list[dict] | None = None
             if position.strategy in ("moving_average", "rsi"):
-                ohlcv_5min = await kis.get_minute_ohlcv(symbol, interval_min=5, count=300)
-                sell = self._check_strategy_sell(ohlcv_5min, position.strategy)
+                _kis_pos_ohlcv = await kis.get_minute_ohlcv(symbol, interval_min=5, count=300)
+                sell = self._check_strategy_sell(_kis_pos_ohlcv, position.strategy)
                 if sell is not None and sell.is_sell:
                     await self._execute_kis_sell(symbol, position, "STRATEGY_SELL", current_price)
                     return
 
-            # DCA 2/3차 추가매수 체크
+            # DCA 2/3차 추가매수 체크 (가격 하락 + RSI 과매도 동시 충족 시만)
             dca = self._dca_state.get(symbol)
             if dca:
                 drop = (current_price - position.entry_price) / position.entry_price
-                if dca["stage"] == 1 and drop <= -0.015:
+                if _kis_pos_ohlcv is None:
+                    try:
+                        _kis_pos_ohlcv = await kis.get_minute_ohlcv(symbol, interval_min=5, count=50)
+                    except Exception:
+                        _kis_pos_ohlcv = []
+                _rsi = self._quick_rsi(_kis_pos_ohlcv)
+                _oversold = _rsi < 40  # RSI 40 미만 = 과매도 구간 (물타기 적합)
+                if dca["stage"] == 1 and drop <= -0.015 and _oversold:
                     await self._execute_kis_dca_add(symbol, current_price, position, 2, 0.35)
-                elif dca["stage"] == 2 and drop <= -0.030:
+                elif dca["stage"] == 2 and drop <= -0.030 and _oversold:
                     await self._execute_kis_dca_add(symbol, current_price, position, 3, 0.25)
             return
 
@@ -398,6 +406,27 @@ class TradingScheduler:
                 overbought=settings.rsi_overbought,
             )
         return None
+
+    @staticmethod
+    def _quick_rsi(ohlcv_list: list[dict], period: int = 9) -> float:
+        """OHLCV에서 최신 RSI 빠르게 계산 (DCA 과매도 조건 체크용).
+
+        Wilder 평활 EMA 방식. 데이터 부족 시 중립값 50 반환.
+        """
+        closes = [float(c["close"]) for c in reversed(ohlcv_list)]
+        if len(closes) < period + 2:
+            return 50.0
+        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        gains  = [d if d > 0 else 0.0 for d in deltas]
+        losses = [-d if d < 0 else 0.0 for d in deltas]
+        avg_g = sum(gains[:period]) / period
+        avg_l = sum(losses[:period]) / period
+        for i in range(period, len(deltas)):
+            avg_g = (avg_g * (period - 1) + gains[i]) / period
+            avg_l = (avg_l * (period - 1) + losses[i]) / period
+        if avg_l == 0:
+            return 100.0
+        return round(100 - (100 / (1 + avg_g / avg_l)), 2)
 
     async def _execute_kis_buy(
         self,
@@ -575,21 +604,45 @@ class TradingScheduler:
                 await self._execute_upbit_sell(ticker, position, exit_signal.reason, current_price)
                 return
 
+            # OI 극단값 강제 청산 (롱 쏠림 + 고펀딩비 = 강제청산 폭발 위험)
+            # OI 5봉 변화율 > 3% AND 펀딩비 > 0.003 (0.3%) → 롱 포지션 미리 청산
+            if self._btc_oi_hist:
+                try:
+                    from backend.api.binance import get_funding_rate
+                    _funding = await get_funding_rate("BTCUSDT")
+                    _recent_oi = [float(d["sumOpenInterest"]) for d in self._btc_oi_hist[-6:]]
+                    if len(_recent_oi) >= 2:
+                        _oi_chg = (_recent_oi[-1] - _recent_oi[0]) / (_recent_oi[0] or 1)
+                        if _oi_chg > 0.03 and _funding > 0.003:
+                            sim_log.push(ticker, f"OI 급등({_oi_chg:.1%}) + 고펀딩비({_funding:.4f}) → 강제청산", "SELL")
+                            await self._execute_upbit_sell(ticker, position, "OI_EXTREME_LONG_FLUSH", current_price)
+                            return
+                except Exception:
+                    pass
+
             # MA/RSI 전략 기반 청산 (5분봉) — DCA보다 먼저 체크 (청산 시 DCA 스킵)
+            _upbit_pos_ohlcv: list[dict] | None = None
             if position.strategy in ("moving_average", "rsi"):
-                ohlcv_5min = await upbit.get_ohlcv(ticker, interval="minutes/5", count=300)
-                sell = self._check_strategy_sell(ohlcv_5min, position.strategy)
+                _upbit_pos_ohlcv = await upbit.get_ohlcv(ticker, interval="minutes/5", count=300)
+                sell = self._check_strategy_sell(_upbit_pos_ohlcv, position.strategy)
                 if sell is not None and sell.is_sell:
                     await self._execute_upbit_sell(ticker, position, "STRATEGY_SELL", current_price)
                     return
 
-            # DCA 2/3차 추가 매수 체크
+            # DCA 2/3차 추가 매수 체크 (가격 하락 + RSI 과매도 동시 충족 시만)
             dca = self._dca_state.get(ticker)
             if dca:
                 drop = (current_price - position.entry_price) / position.entry_price
-                if dca["stage"] == 1 and drop <= -0.015:
+                if _upbit_pos_ohlcv is None:
+                    try:
+                        _upbit_pos_ohlcv = await upbit.get_ohlcv(ticker, interval="minutes/5", count=50)
+                    except Exception:
+                        _upbit_pos_ohlcv = []
+                _rsi = self._quick_rsi(_upbit_pos_ohlcv)
+                _oversold = _rsi < 40
+                if dca["stage"] == 1 and drop <= -0.015 and _oversold:
                     await self._execute_upbit_dca_add(ticker, current_price, position, 2, 0.35)
-                elif dca["stage"] == 2 and drop <= -0.030:
+                elif dca["stage"] == 2 and drop <= -0.030 and _oversold:
                     await self._execute_upbit_dca_add(ticker, current_price, position, 3, 0.25)
             return
 
