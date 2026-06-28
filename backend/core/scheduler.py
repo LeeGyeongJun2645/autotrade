@@ -1169,6 +1169,8 @@ class TradingScheduler:
             logger.warning("[Retrain] BTC OI/Taker 데이터 수집 실패")
 
         # ── 에이전트 거래 결과 조회 (수익/손실 패턴 흡수용) ─────────
+        import aiosqlite
+        from backend.db.database import DB_PATH
         agent_trade_results: dict[str, list[dict]] = {}
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row

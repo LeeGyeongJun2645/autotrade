@@ -28,7 +28,7 @@ def make_ohlcv(n: int = 300, base: float = 50_000_000.0) -> list[dict]:
         o = p * (1 + rng.normal(0, 0.001))
         v = float(rng.uniform(1, 10))
         ts = (now - timedelta(minutes=5 * (n - 1 - i))).strftime("%Y-%m-%dT%H:%M:%S")
-        result.insert(0, {"open": o, "high": h, "low": l, "close": p, "volume": v, "candle_date_time_kst": ts})
+        result.insert(0, {"open": o, "high": h, "low": l, "close": p, "volume": v, "date": ts})
     return result
 
 
