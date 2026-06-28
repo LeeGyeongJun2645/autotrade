@@ -6,10 +6,15 @@
 코인: 업비트 마켓 API로 266개 전체 코인 이름 자동 지원
 주식: 종목 코드 + 구글 뉴스로 관련 기사 수집
 
+감성 분석:
+    OPENAI_API_KEY 설정 시 → GPT-4o-mini LLM 분석 (영+한 통합)
+    미설정 시              → VADER(영어) + 키워드사전(한국어) 폴백
+
 캐시 TTL: 뉴스 1시간 / 마켓 정보 24시간
 """
 
 import asyncio
+import json
 import logging
 import time
 import urllib.parse
@@ -17,6 +22,8 @@ import urllib.parse
 import feedparser
 import httpx
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +102,6 @@ def _get_coin_keywords(ticker: str) -> tuple[list[str], str]:
         kr_name = info["korean_name"]
         en_kws = list({symbol, en_name, symbol.upper()})
         return en_kws, kr_name
-    # 마켓 정보 없을 때 폴백
     symbol = ticker.replace("KRW-", "")
     return [symbol.lower(), symbol], symbol
 
@@ -119,7 +125,42 @@ def _google_news_url(query: str) -> str:
     )
 
 
-# ── 감성 점수 계산 ───────────────────────────────────────────────
+# ── LLM 감성 분석 (OpenAI GPT-4o-mini) ──────────────────────────
+
+async def _llm_sentiment(titles: list[str], symbol: str) -> float:
+    """GPT-4o-mini로 뉴스 헤드라인 감성 분석. -1.0 ~ +1.0 반환."""
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+        joined = "\n".join(f"- {t}" for t in titles[:30] if t.strip())
+        if not joined:
+            return 0.0
+
+        prompt = (
+            f"다음은 {symbol} 관련 최신 뉴스 헤드라인입니다.\n"
+            f"{joined}\n\n"
+            f"위 뉴스들이 {symbol}의 단기(1~24시간) 가격에 미치는 영향을 분석해서 "
+            f"-1.0(매우 부정적) ~ +1.0(매우 긍정적) 사이의 숫자를 "
+            f'JSON 형식으로만 반환하세요. 형식: {{"score": 0.3}}'
+        )
+
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            timeout=15,
+        )
+        data = json.loads(resp.choices[0].message.content)
+        score = float(data.get("score", 0.0))
+        return max(-1.0, min(1.0, score))
+    except Exception as e:
+        logger.warning("[뉴스] LLM 감성 분석 실패, VADER 폴백: %s", e)
+        return None  # type: ignore[return-value]
+
+
+# ── VADER 폴백 감성 점수 계산 ────────────────────────────────────
 
 def _score_en(titles: list[str], keywords: list[str]) -> tuple[float, int]:
     """영어 제목 → VADER compound 평균 + 매칭 건수."""
@@ -167,16 +208,13 @@ async def get_sentiment_score(symbol: str, token: str | None = None) -> float:  
 
     is_coin = symbol.startswith("KRW-")
 
-    # 마켓 정보 갱신 (코인인 경우)
     if is_coin:
         await _load_upbit_markets()
         en_kws, kr_query = _get_coin_keywords(symbol)
     else:
-        # 주식: 종목 코드로 검색 (예: "005930 주식")
         en_kws = [symbol]
         kr_query = f"{symbol} 주식"
 
-    # 수집할 RSS 목록 결정
     if is_coin:
         en_feeds = _EN_COIN_FEEDS + _EN_ECON_FEEDS
     else:
@@ -184,7 +222,7 @@ async def get_sentiment_score(symbol: str, token: str | None = None) -> float:  
 
     kr_feeds = _KR_STATIC_FEEDS + [_google_news_url(kr_query)]
 
-    # 전체 병렬 수집
+    # RSS 전체 병렬 수집
     all_urls = en_feeds + kr_feeds
     results = await asyncio.gather(
         *[asyncio.to_thread(_fetch_rss, url) for url in all_urls],
@@ -201,6 +239,19 @@ async def get_sentiment_score(symbol: str, token: str | None = None) -> float:  
         if isinstance(r, list):
             kr_titles.extend(r)
 
+    # ── LLM 경로 (OPENAI_API_KEY 있을 때) ──────────────────────────
+    if settings.openai_api_key:
+        # 관련 영어 제목 필터링 + 한국어 전체 합산 → GPT에 전달
+        relevant_en = [t for t in en_titles if any(kw in t.lower() for kw in en_kws)]
+        all_titles = relevant_en[:20] + kr_titles[:15]
+        llm_score = await _llm_sentiment(all_titles, symbol)
+        if llm_score is not None:
+            _score_cache[symbol] = (llm_score, now + _SCORE_TTL)
+            logger.info("[뉴스][LLM] %s → %.3f (제목 %d건)", symbol, llm_score, len(all_titles))
+            return llm_score
+        # LLM 실패 시 VADER 폴백으로 계속 진행
+
+    # ── VADER / 키워드 폴백 경로 ────────────────────────────────────
     en_score, en_cnt = _score_en(en_titles, en_kws)
     kr_score, kr_cnt = _score_kr(kr_titles)
     score = _weighted(en_score, kr_score)
@@ -208,7 +259,7 @@ async def get_sentiment_score(symbol: str, token: str | None = None) -> float:  
     _score_cache[symbol] = (score, now + _SCORE_TTL)
 
     logger.info(
-        "[뉴스] %s | 영어 %.3f(%d건) + 한국어 %.3f(%d건) → %.3f",
+        "[뉴스][VADER] %s | 영어 %.3f(%d건) + 한국어 %.3f(%d건) → %.3f",
         symbol, en_score, en_cnt, kr_score, kr_cnt, score,
     )
     return score
