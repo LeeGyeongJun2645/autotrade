@@ -1062,6 +1062,43 @@ class TradingScheduler:
         except Exception:
             logger.warning("[Retrain] BTC OI/Taker 데이터 수집 실패")
 
+        # ── 에이전트 거래 결과 조회 (수익/손실 패턴 흡수용) ─────────
+        agent_trade_results: dict[str, list[dict]] = {}
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            for agent in AGENTS.values():
+                async with db.execute(
+                    """
+                    SELECT b.traded_at AS buy_at, s.profit_rate
+                    FROM agent_trades b
+                    INNER JOIN agent_trades s
+                        ON  s.agent_id = b.agent_id
+                        AND s.ticker   = b.ticker
+                        AND s.action   = 'SELL'
+                        AND s.id = (
+                            SELECT MIN(id) FROM agent_trades
+                            WHERE agent_id = b.agent_id
+                              AND ticker   = b.ticker
+                              AND action   = 'SELL'
+                              AND id > b.id
+                        )
+                    WHERE b.action = 'BUY'
+                      AND s.profit_rate IS NOT NULL
+                      AND b.agent_id = ?
+                    ORDER BY b.id DESC
+                    LIMIT 300
+                    """,
+                    (agent.agent_id,),
+                ) as cur:
+                    rows = await cur.fetchall()
+                agent_trade_results[agent.agent_id] = [dict(r) for r in rows]
+                if rows:
+                    logger.info(
+                        "[Retrain][%s] 거래 결과 %d건 로드 (수익: %d건)",
+                        agent.agent_id, len(rows),
+                        sum(1 for r in rows if (r["profit_rate"] or 0) > 0),
+                    )
+
         # ── 에이전트별 재학습 ────────────────────────────────────
         success = 0
         for agent in AGENTS.values():
@@ -1080,8 +1117,11 @@ class TradingScheduler:
             if not data:
                 logger.warning("[Retrain][%s] 학습 데이터 없음, 스킵", agent.agent_id)
                 continue
+            _trade_res = agent_trade_results.get(agent.agent_id) or None
             try:
-                trained = await asyncio.to_thread(agent.train, data, fr, _btc_ref, _kospi_ref, _oi_ref, _taker_ref)
+                trained = await asyncio.to_thread(
+                    agent.train, data, fr, _btc_ref, _kospi_ref, _oi_ref, _taker_ref, _trade_res
+                )
                 if trained:
                     success += 1
                     logger.info("[Retrain][%s] 재학습 완료", agent.agent_id)

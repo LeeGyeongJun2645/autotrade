@@ -270,6 +270,7 @@ class SimAgent:
         kospi_ohlcv: list[dict] | None = None,
         oi_hist: list[dict] | None = None,
         taker_hist: list[dict] | None = None,
+        trade_results: list[dict] | None = None,
     ) -> bool:
         """분봉 OHLCV로 전용 모델 학습."""
         try:
@@ -352,6 +353,39 @@ class SimAgent:
             weights = np.ones(len(X_train))
             if len(X_train) > 500:
                 weights[-500:] = 2.0
+
+            # 에이전트 거래 결과 기반 sample_weight 조정
+            # 수익 낸 매수 시점 봉 → 가중치 ↑ (최대 3배)
+            # 손실 낸 매수 시점 봉 → 가중치 ↓ (최소 0.3배)
+            if trade_results:
+                try:
+                    ohlcv_dates = pd.to_datetime(
+                        [d["date"] for d in reversed(ohlcv_list)]
+                    ).round("5min")
+                    ohlcv_dates_arr = ohlcv_dates.values
+                    n_train = len(X_train)
+                    for tr in trade_results:
+                        try:
+                            buy_dt = pd.Timestamp(tr["buy_at"]).round("5min").value
+                            idx = int(np.searchsorted(ohlcv_dates_arr, buy_dt))
+                            if idx >= n_train:
+                                continue
+                            profit = float(tr["profit_rate"])
+                            if profit > 0:
+                                boost = min(1.0 + profit * 10, 3.0)
+                                weights[idx] *= boost
+                            elif profit < 0:
+                                decay = max(0.3, 1.0 + profit * 5)
+                                weights[idx] *= decay
+                        except Exception:
+                            continue
+                    absorbed = sum(1 for tr in trade_results if tr.get("profit_rate", 0) > 0)
+                    logger.info(
+                        "[%s] 거래 결과 흡수: 수익 %d건 / 전체 %d건",
+                        self.agent_id, absorbed, len(trade_results),
+                    )
+                except Exception as e:
+                    logger.debug("[%s] 거래 결과 weight 적용 실패 (무시): %s", self.agent_id, e)
 
             scaler = StandardScaler()
             X_train_s = scaler.fit_transform(X_train)
