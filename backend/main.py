@@ -32,6 +32,8 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -87,6 +89,14 @@ app = FastAPI(
     description="주식+코인 자동매매 시스템 (KIS + Upbit)",
     lifespan=lifespan,
 )
+
+_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+if _DIST.exists():
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    @app.get("/dashboard", include_in_schema=False)
+    async def dashboard():
+        return FileResponse(_DIST / "index.html")
 
 app.add_middleware(
     CORSMiddleware,
