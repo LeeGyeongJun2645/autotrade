@@ -142,9 +142,15 @@ class XGBSignalModel:
 
     # ── 학습 ────────────────────────────────────────────────────
 
-    def train(self, ohlcv_list: list[dict]) -> TrainResult:
+    def train(
+        self,
+        ohlcv_list: list[dict],
+        btc_ohlcv: list[dict] | None = None,
+        oi_hist: list[dict] | None = None,
+        taker_hist: list[dict] | None = None,
+    ) -> TrainResult:
         """동기 학습 함수 — FastAPI에서 asyncio.to_thread 로 호출."""
-        feat_df = compute_features(ohlcv_list)
+        feat_df = compute_features(ohlcv_list, btc_ohlcv=btc_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
         if len(feat_df) < 60:
             raise ValueError(
                 f"{self.ticker}: 학습 데이터 부족 ({len(feat_df)}봉, 최소 60봉 필요)"
@@ -241,6 +247,9 @@ class XGBSignalModel:
         ohlcv_list: list[dict],
         token: str | None = None,
         market: str = "auto",
+        btc_ohlcv: list[dict] | None = None,
+        oi_hist: list[dict] | None = None,
+        taker_hist: list[dict] | None = None,
     ) -> PredictResult:
         """최신 봉 기준 매수 확률 및 신호 반환.
 
@@ -252,7 +261,7 @@ class XGBSignalModel:
                     f"{self.ticker}: 학습된 모델 없음. POST /ml/train 먼저 호출"
                 )
 
-        feat_df = compute_features(ohlcv_list)
+        feat_df = compute_features(ohlcv_list, btc_ohlcv=btc_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
         if feat_df.empty:
             raise ValueError(f"{self.ticker}: Feature 계산 실패")
 
