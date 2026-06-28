@@ -552,6 +552,8 @@ class TradingScheduler:
     async def _upbit_tick(self) -> None:
         if not settings.upbit_access_key:
             return  # Upbit 키 미설정 시 전체 스킵
+        if settings.is_paper:
+            return  # PAPER 모드: 업비트 모의투자 API 없음 → 실주문 방지
 
         for ticker in list(self._upbit_tickers):
             try:
