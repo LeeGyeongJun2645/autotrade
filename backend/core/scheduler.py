@@ -573,6 +573,14 @@ class TradingScheduler:
                 await self._execute_upbit_sell(ticker, position, exit_signal.reason, current_price)
                 return
 
+            # MA/RSI 전략 기반 청산 (5분봉) — DCA보다 먼저 체크 (청산 시 DCA 스킵)
+            if position.strategy in ("moving_average", "rsi"):
+                ohlcv_5min = await upbit.get_ohlcv(ticker, interval="minutes/5", count=300)
+                sell = self._check_strategy_sell(ohlcv_5min, position.strategy)
+                if sell is not None and sell.is_sell:
+                    await self._execute_upbit_sell(ticker, position, "STRATEGY_SELL", current_price)
+                    return
+
             # DCA 2/3차 추가 매수 체크
             dca = self._dca_state.get(ticker)
             if dca:
@@ -581,13 +589,6 @@ class TradingScheduler:
                     await self._execute_upbit_dca_add(ticker, current_price, position, 2, 0.35)
                 elif dca["stage"] == 2 and drop <= -0.030:
                     await self._execute_upbit_dca_add(ticker, current_price, position, 3, 0.25)
-
-            # MA/RSI 전략 기반 청산 (5분봉)
-            if position.strategy in ("moving_average", "rsi"):
-                ohlcv_5min = await upbit.get_ohlcv(ticker, interval="minutes/5", count=300)
-                sell = self._check_strategy_sell(ohlcv_5min, position.strategy)
-                if sell is not None and sell.is_sell:
-                    await self._execute_upbit_sell(ticker, position, "STRATEGY_SELL", current_price)
             return
 
         # ── 포지션 없음: 매수 신호 탐색 (5분봉) ──
