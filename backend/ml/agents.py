@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from lightgbm import LGBMClassifier
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
@@ -76,28 +77,29 @@ FEATURE_SETS: dict[str, list[str]] = {
 # lookahead: 3=단기(15분), 5=중기(25분), 8=장기(40분) — 앙상블 분산 극대화
 
 AGENT_CONFIGS: list[tuple] = [
-    # ── 코인 AI01~AI10 ── lookahead 3/5/8 순환으로 시간 지평 다양화
-    ("AI01",  5, 0.001, 0.55, "all",      "coin",  3),  # 단기 공격형
-    ("AI02",  5, 0.001, 0.62, "momentum", "coin",  5),
-    ("AI03",  5, 0.002, 0.55, "trend",    "coin",  8),  # 장기 추세형
-    ("AI04",  5, 0.002, 0.60, "volume",   "coin",  3),
-    ("AI05",  5, 0.003, 0.58, "all",      "coin",  5),
-    ("AI06",  5, 0.003, 0.65, "momentum", "coin",  8),
-    ("AI07",  5, 0.004, 0.60, "trend",    "coin",  3),
-    ("AI08",  5, 0.002, 0.60, "volume",   "coin",  5),
-    ("AI09",  5, 0.005, 0.62, "all",      "coin",  8),
-    ("AI10",  5, 0.003, 0.58, "trend",    "coin",  5),  # AI07 추세전략과 다른 lookahead
-    # ── 주식 AI11~AI20 ── 동일 구조
-    ("AI11",  5, 0.001, 0.55, "all",      "stock", 3),
-    ("AI12",  5, 0.001, 0.62, "trend",    "stock", 5),
-    ("AI13",  5, 0.002, 0.55, "momentum", "stock", 8),
-    ("AI14",  5, 0.002, 0.60, "volume",   "stock", 3),
-    ("AI15",  5, 0.003, 0.58, "all",      "stock", 5),
-    ("AI16",  5, 0.003, 0.65, "trend",    "stock", 8),
-    ("AI17",  5, 0.004, 0.60, "momentum", "stock", 3),
-    ("AI18",  5, 0.004, 0.68, "volume",   "stock", 5),
-    ("AI19",  5, 0.005, 0.62, "all",      "stock", 8),
-    ("AI20",  5, 0.005, 0.70, "trend",    "stock", 3),
+    # (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market, lookahead, model_type)
+    # 코인 홀수 → LightGBM / 짝수 → XGBoost (앙상블 다양성 극대화)
+    ("AI01",  5, 0.001, 0.55, "all",      "coin",  3, "lgbm"),  # 단기 공격형
+    ("AI02",  5, 0.001, 0.62, "momentum", "coin",  5, "xgb"),
+    ("AI03",  5, 0.002, 0.55, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
+    ("AI04",  5, 0.002, 0.60, "volume",   "coin",  3, "xgb"),
+    ("AI05",  5, 0.003, 0.58, "all",      "coin",  5, "lgbm"),
+    ("AI06",  5, 0.003, 0.65, "momentum", "coin",  8, "xgb"),
+    ("AI07",  5, 0.004, 0.60, "trend",    "coin",  3, "lgbm"),
+    ("AI08",  5, 0.002, 0.60, "volume",   "coin",  5, "xgb"),
+    ("AI09",  5, 0.005, 0.62, "all",      "coin",  8, "lgbm"),
+    ("AI10",  5, 0.003, 0.58, "trend",    "coin",  5, "xgb"),
+    # 주식 홀수 → LightGBM / 짝수 → XGBoost
+    ("AI11",  5, 0.001, 0.55, "all",      "stock", 3, "lgbm"),
+    ("AI12",  5, 0.001, 0.62, "trend",    "stock", 5, "xgb"),
+    ("AI13",  5, 0.002, 0.55, "momentum", "stock", 8, "lgbm"),
+    ("AI14",  5, 0.002, 0.60, "volume",   "stock", 3, "xgb"),
+    ("AI15",  5, 0.003, 0.58, "all",      "stock", 5, "lgbm"),
+    ("AI16",  5, 0.003, 0.65, "trend",    "stock", 8, "xgb"),
+    ("AI17",  5, 0.004, 0.60, "momentum", "stock", 3, "lgbm"),
+    ("AI18",  5, 0.004, 0.68, "volume",   "stock", 5, "xgb"),
+    ("AI19",  5, 0.005, 0.62, "all",      "stock", 8, "lgbm"),
+    ("AI20",  5, 0.005, 0.70, "trend",    "stock", 3, "xgb"),
 ]
 
 
@@ -133,8 +135,9 @@ class SimAgent:
         label_threshold: float,
         buy_threshold: float,
         feature_set: str,
-        market: str = "coin",  # "coin" | "stock"
-        lookahead: int = 5,    # 레이블링 시 몇 봉 앞 수익 기준 (3=15분/5=25분/8=40분)
+        market: str = "coin",   # "coin" | "stock"
+        lookahead: int = 5,     # 레이블링 시 몇 봉 앞 수익 기준 (3=15분/5=25분/8=40분)
+        model_type: str = "xgb",  # "xgb" | "lgbm"
     ) -> None:
         self.agent_id = agent_id
         self.interval_min = interval_min
@@ -143,14 +146,15 @@ class SimAgent:
         self.feature_set = feature_set
         self.market = market
         self.lookahead = lookahead
+        self.model_type = model_type
         self.feature_names = FEATURE_SETS[feature_set]
 
         self._balance = INITIAL_CAPITAL
         self._positions: dict[str, AgentPosition] = {}
-        self._model: XGBClassifier | None = None
+        self._model: XGBClassifier | LGBMClassifier | None = None
         self._scaler: StandardScaler | None = None
         self._trained_at: str | None = None
-        self._model_path = MODEL_DIR / f"xgb_agent_{agent_id}.pkl"
+        self._model_path = MODEL_DIR / f"{model_type}_agent_{agent_id}.pkl"
 
         self.total_trades = 0
         self.win_trades = 0
@@ -395,21 +399,37 @@ class SimAgent:
             n_pos = int((y_train == 1).sum())
             scale_pos = n_neg / n_pos if n_pos > 0 else 1.0
 
-            clf = XGBClassifier(
-                n_estimators=200,
-                max_depth=3,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                min_child_weight=5,
-                gamma=0.1,
-                reg_alpha=0.1,
-                reg_lambda=2.0,
-                scale_pos_weight=scale_pos,  # buy/sell 불균형 자동 보정
-                eval_metric="logloss",
-                random_state=42,
-                n_jobs=-1,
-            )
+            if self.model_type == "lgbm":
+                clf = LGBMClassifier(
+                    n_estimators=200,
+                    max_depth=3,
+                    learning_rate=0.05,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    min_child_samples=20,
+                    reg_alpha=0.1,
+                    reg_lambda=2.0,
+                    scale_pos_weight=scale_pos,
+                    random_state=42,
+                    n_jobs=-1,
+                    verbose=-1,
+                )
+            else:
+                clf = XGBClassifier(
+                    n_estimators=200,
+                    max_depth=3,
+                    learning_rate=0.05,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    min_child_weight=5,
+                    gamma=0.1,
+                    reg_alpha=0.1,
+                    reg_lambda=2.0,
+                    scale_pos_weight=scale_pos,
+                    eval_metric="logloss",
+                    random_state=42,
+                    n_jobs=-1,
+                )
             clf.fit(X_train_s, y_train, sample_weight=weights, verbose=False)
 
             # Walk-Forward 검증 (50% 미만 = 랜덤보다 못함 → 학습 실패 처리)
