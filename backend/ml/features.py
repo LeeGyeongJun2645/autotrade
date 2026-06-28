@@ -427,10 +427,10 @@ def compute_features(
     # ── 이치모쿠 클라우드 ─────────────────────────────────────────────
     try:
         _ichi   = trend.IchimokuIndicator(high, low, window1=9, window2=26, window3=52)
-        _span_a = _ichi.ichimoku_a()
-        _span_b = _ichi.ichimoku_b()
-        _tenkan = _ichi.ichimoku_conversion_line()
-        _kijun  = _ichi.ichimoku_base_line()
+        _span_a = _ichi.ichimoku_a().ffill().bfill()
+        _span_b = _ichi.ichimoku_b().ffill().bfill()
+        _tenkan = _ichi.ichimoku_conversion_line().ffill().bfill()
+        _kijun  = _ichi.ichimoku_base_line().ffill().bfill()
         _cloud_top = pd.concat([_span_a, _span_b], axis=1).max(axis=1)
         df["ichi_above_cloud"]       = (close > _cloud_top).astype(float)
         df["ichi_cloud_green"]       = (_span_a > _span_b).astype(float)
