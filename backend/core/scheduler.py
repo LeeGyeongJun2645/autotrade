@@ -1118,7 +1118,8 @@ class TradingScheduler:
 
             # 보유 시간 계산
             try:
-                held_min = (datetime.now() - datetime.fromisoformat(pos.entered_at)).total_seconds() / 60
+                now_kst  = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+                held_min = (now_kst - datetime.fromisoformat(pos.entered_at)).total_seconds() / 60
             except Exception:
                 held_min = 0
 

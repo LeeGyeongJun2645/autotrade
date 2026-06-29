@@ -179,8 +179,8 @@ function BacktestPanel() {
             <ResultCard label="총 거래" value={`${result.trade_count}회`} />
             <ResultCard
               label="승률"
-              value={`${result.win_rate.toFixed(1)}%`}
-              color={result.win_rate >= 50 ? 'text-green-400' : 'text-red-400'}
+              value={result.win_rate != null ? `${result.win_rate.toFixed(1)}%` : '—'}
+              color={result.win_rate != null && result.win_rate >= 50 ? 'text-green-400' : 'text-red-400'}
             />
             <ResultCard label="손익비" value={`${result.win_count}W / ${result.loss_count}L`} />
           </div>
@@ -210,7 +210,7 @@ function TradeLogPanel() {
   const fetchTrades = useCallback(async () => {
     try {
       const data = await api.get('/trades?limit=50')
-      setTrades(data)
+      setTrades(data || [])
     } catch {
       // 무시
     } finally {

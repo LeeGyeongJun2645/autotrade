@@ -121,7 +121,7 @@ function TradeRow({ t }) {
 // ── 포지션 카드 ──────────────────────────────────────────────────
 function PosCard({ ticker, pos, isCoin }) {
   const pnl      = pos.unrealized_pnl_pct ?? 0
-  const invested = pos.entry_price * pos.qty   // 투자원금
+  const invested = (pos.entry_price ?? 0) * (pos.qty ?? 0)
   const curVal   = pos.current_value ?? invested
 
   return (

@@ -168,6 +168,7 @@ function CandleChart({ ticker, interval, positions, mlSignal }) {
       chartRef.current.remove()
       chartRef.current = null
     }
+    if (!containerRef.current) return
     containerRef.current.innerHTML = ''
 
     try {

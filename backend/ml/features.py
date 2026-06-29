@@ -201,9 +201,9 @@ def compute_features(
     bb             = volatility.BollingerBands(close, window=20, window_dev=2)
     df["bb_pband"] = bb.bollinger_pband()
     atr            = volatility.AverageTrueRange(high, low, close, window=14).average_true_range()
-    df["atr_pct"]  = atr / close
+    df["atr_pct"]  = atr / close.replace(0, np.nan)
     df["mass_index"]  = trend.MassIndex(high, low, window_fast=9, window_slow=25).mass_index()
-    df["hl_range_20"] = (high.rolling(20).max() - low.rolling(20).min()) / close
+    df["hl_range_20"] = (high.rolling(20).max() - low.rolling(20).min()) / close.replace(0, np.nan)
 
     # BB폭 지표 (regime & squeeze에 공유)
     _bb_wband    = bb.bollinger_wband()          # (상단-하단)/중간선

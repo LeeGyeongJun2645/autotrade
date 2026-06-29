@@ -418,18 +418,24 @@ async def get_agents():
 
 
 @app.get("/agents/{agent_id}/trades", tags=["Agents"])
-async def get_agent_trades(agent_id: str, limit: int = 50):
+async def get_agent_trades(
+    agent_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+):
     """특정 에이전트 가상 거래 기록 조회."""
-    from backend.db.database import connect_db
-    import aiosqlite
-    async with connect_db() as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM agent_trades WHERE agent_id=? ORDER BY id DESC LIMIT ?",
-            (agent_id.upper(), min(limit, 200)),
-        )
-        rows = await cursor.fetchall()
-    return [dict(r) for r in rows]
+    try:
+        from backend.db.database import connect_db
+        import aiosqlite
+        async with connect_db() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM agent_trades WHERE agent_id=? ORDER BY id DESC LIMIT ?",
+                (agent_id.upper(), limit),
+            )
+            rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 # ── SSE 실시간 스트리밍 ──────────────────────────────────────────

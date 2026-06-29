@@ -305,6 +305,9 @@ class SimAgent:
                 index=_ohlcv_dates,
             )
             close = close_all.reindex(feat_df.index).reset_index(drop=True)
+            if close.isna().any():
+                logger.warning("[%s] close reindex NaN 발생 — 날짜 불일치. 학습 스킵.", self.agent_id)
+                return False
             feat_df = feat_df.reset_index(drop=True)
 
             # ── 트리플 배리어 레이블링 ────────────────────────────────
@@ -639,7 +642,7 @@ class SimAgent:
 
     def restore_from_db(self, stats: dict, positions: list[dict], trades: list[dict]) -> None:
         """서버 재시작 시 DB에서 상태 복구."""
-        self._balance      = stats.get("current_balance", INITIAL_CAPITAL)
+        self._balance      = float(stats.get("current_balance") or INITIAL_CAPITAL)
         self.total_trades  = stats.get("total_trades", 0)
         self.win_trades    = stats.get("win_trades", 0)
         self.is_champion   = bool(stats.get("is_champion", 0))

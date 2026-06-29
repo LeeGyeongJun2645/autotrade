@@ -150,6 +150,8 @@ async def get_open_interest_hist(symbol: str = "BTCUSDT", period: str = "5m", li
             )
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, list):
+                raise ValueError(f"OI API 오류 응답: {data}")
             _OI_CACHE[cache_key] = (data, now)
             return data
     except Exception as e:
@@ -178,6 +180,8 @@ async def get_taker_ratio_hist(symbol: str = "BTCUSDT", period: str = "5m", limi
             )
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, list):
+                raise ValueError(f"Taker API 오류 응답: {data}")
             _TAKER_CACHE[cache_key] = (data, now)
             return data
     except Exception as e:
