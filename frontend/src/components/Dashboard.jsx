@@ -195,7 +195,6 @@ export default function Dashboard({ sse }) {
               </thead>
               <tbody>
                 {posEntries.map(([symbol, pos]) => {
-                  const profitRate = (pos.highest_price - pos.entry_price) / pos.entry_price
                   return (
                     <tr key={symbol} className="border-b border-gray-700/50 hover:bg-gray-700/30 transition-colors">
                       <td className="px-4 py-3 font-mono font-semibold text-white">{symbol}</td>

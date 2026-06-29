@@ -4,6 +4,7 @@ KIS 키 미설정 시 코인(Upbit)만 리포트.
 KIS 키 설정 시 주식 + 코인 종합 리포트.
 """
 
+import asyncio
 import logging
 from dataclasses import asdict
 from datetime import datetime
@@ -53,7 +54,7 @@ async def _report_upbit(tickers: list[str]) -> str:
             results = []
             strategies_to_run = ["moving_average", "rsi"]  # 코인은 VB 제외
             for strat in strategies_to_run:
-                r = asdict(run_backtest(ohlcv, strat, 10_000_000, is_crypto=True))
+                r = asdict(await asyncio.to_thread(run_backtest, ohlcv, strat, 10_000_000, True))
                 results.append({"strategy": strat, **r})
 
             best = _best_strategy(results)
@@ -76,7 +77,7 @@ async def _report_kis(symbols: list[tuple[str, str]]) -> str:
             ohlcv = await kis.get_daily_ohlcv(code, count=120)
             results = []
             for strat in STRATEGIES:
-                r = asdict(run_backtest(ohlcv, strat, 10_000_000, is_crypto=False))
+                r = asdict(await asyncio.to_thread(run_backtest, ohlcv, strat, 10_000_000, False))
                 results.append({"strategy": strat, **r})
 
             best = _best_strategy(results)

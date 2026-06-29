@@ -551,21 +551,21 @@ class TradingScheduler:
                 return
 
             await kis.place_buy_order(symbol, add_qty)
-            # 주문 체결 직후 stage 갱신 — DB 기록 실패 시 재발주 방지
-            dca["stage"] = next_stage
-            dca["bought_qty"] = int(dca.get("bought_qty", 0)) + add_qty
-
-            total_cost = position.entry_price * position.qty + current_price * add_qty
-            new_qty = position.qty + add_qty
-            new_avg = total_cost / new_qty
-            position.entry_price = new_avg
-            position.qty = new_qty
-            position.stop_loss_price = new_avg * (1 + settings.stop_loss_rate)
-            position.take_profit_price = new_avg * (1 + settings.take_profit_rate)
-            # 평균단가 낮아졌으므로 trailing stop 기준 재설정 (이익 구간 진입 전 조기청산 방지)
-            position.highest_price = new_avg
-            position.trailing_stop_price = new_avg * (1 - settings.trailing_stop_rate)
+            # 주문 체결 직후 — 락 안에서 원자적으로 포지션 갱신
             async with self._lock:
+                if symbol not in self._positions:
+                    return
+                dca["stage"] = next_stage
+                dca["bought_qty"] = int(dca.get("bought_qty", 0)) + add_qty
+                total_cost = position.entry_price * position.qty + current_price * add_qty
+                new_qty = position.qty + add_qty
+                new_avg = total_cost / new_qty
+                position.entry_price = new_avg
+                position.qty = new_qty
+                position.stop_loss_price = new_avg * (1 + settings.stop_loss_rate)
+                position.take_profit_price = new_avg * (1 + settings.take_profit_rate)
+                position.highest_price = new_avg
+                position.trailing_stop_price = new_avg * (1 - settings.trailing_stop_rate)
                 self._positions[symbol] = position
             await upsert_position(symbol, "KIS", position)
             await insert_trade(symbol, "KIS", "BUY", float(add_qty), current_price, position.strategy, f"DCA {next_stage}차")
@@ -664,8 +664,14 @@ class TradingScheduler:
                 _rsi = self._quick_rsi(_upbit_pos_ohlcv)
                 _oversold = _rsi < 40
                 if dca["stage"] == 1 and drop <= -0.015 and _oversold:
+                    async with self._lock:
+                        if ticker not in self._positions:
+                            return
                     await self._execute_upbit_dca_add(ticker, current_price, position, 2, 0.35)
                 elif dca["stage"] == 2 and drop <= -0.030 and _oversold:
+                    async with self._lock:
+                        if ticker not in self._positions:
+                            return
                     await self._execute_upbit_dca_add(ticker, current_price, position, 3, 0.25)
             return
 
@@ -788,22 +794,20 @@ class TradingScheduler:
 
             await upbit.place_buy_order(ticker, add_krw)
             add_qty = add_krw / current_price
-            # 주문 체결 직후 stage 갱신 — DB 기록 실패 시 재발주 방지
-            dca["stage"] = next_stage
-
-            # 평균 단가·수량 갱신
-            total_cost = position.entry_price * position.qty + current_price * add_qty
-            new_qty    = position.qty + add_qty
-            new_avg    = total_cost / new_qty
-            position.entry_price        = new_avg
-            position.qty                = new_qty
-            position.stop_loss_price    = new_avg * (1 + settings.stop_loss_rate)
-            position.take_profit_price  = new_avg * (1 + settings.take_profit_rate)
-            # 평균단가 낮아졌으므로 trailing stop 기준 재설정 (이익 구간 진입 전 조기청산 방지)
-            position.highest_price       = new_avg
-            position.trailing_stop_price = new_avg * (1 - settings.trailing_stop_rate)
-
+            # 주문 체결 직후 — 락 안에서 원자적으로 포지션 갱신
             async with self._lock:
+                if ticker not in self._positions:
+                    return
+                dca["stage"] = next_stage
+                total_cost = position.entry_price * position.qty + current_price * add_qty
+                new_qty    = position.qty + add_qty
+                new_avg    = total_cost / new_qty
+                position.entry_price        = new_avg
+                position.qty                = new_qty
+                position.stop_loss_price    = new_avg * (1 + settings.stop_loss_rate)
+                position.take_profit_price  = new_avg * (1 + settings.take_profit_rate)
+                position.highest_price       = new_avg
+                position.trailing_stop_price = new_avg * (1 - settings.trailing_stop_rate)
                 self._positions[ticker] = position
             await upsert_position(ticker, "UPBIT", position)
             await insert_trade(ticker, "UPBIT", "BUY", add_qty, current_price, position.strategy, f"DCA {next_stage}차")
@@ -1096,7 +1100,10 @@ class TradingScheduler:
                 except Exception:
                     logger.exception("[Agent][%s] 틱 처리 실패", agent.agent_id)
 
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception:
+                logger.exception("[Agent] DB commit 실패 — 이번 틱 데이터 롤백됨")
 
         from backend.ml.agents import refresh_champion_flags
         refresh_champion_flags()

@@ -442,6 +442,7 @@ async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200)
             "FID_INPUT_ISCD": symbol,
             "FID_INPUT_HOUR_1": time_str,
             "FID_PW_DATA_INCU_YN": "Y",
+            "FID_HOUR_CLS_CODE": str(interval_min),
         }
         try:
             data = await _kis_request(

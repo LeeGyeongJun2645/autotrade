@@ -490,9 +490,9 @@ def compute_features(
 
     # ── 일별 피봇 포인트 (전일 H/L/C 기준) ──────────────────────────
     try:
-        _ph = high.resample("1D").max().shift(1).reindex(df.index, method="ffill")
-        _pl = low.resample("1D").min().shift(1).reindex(df.index, method="ffill")
-        _pc = close.resample("1D").last().shift(1).reindex(df.index, method="ffill")
+        _ph = high.resample("1D", offset="9h").max().shift(1).reindex(df.index, method="ffill")
+        _pl = low.resample("1D", offset="9h").min().shift(1).reindex(df.index, method="ffill")
+        _pc = close.resample("1D", offset="9h").last().shift(1).reindex(df.index, method="ffill")
         _pp = (_ph + _pl + _pc) / 3
         _r1 = 2 * _pp - _pl
         _s1 = 2 * _pp - _ph
