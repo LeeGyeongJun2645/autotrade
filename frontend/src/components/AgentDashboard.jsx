@@ -298,8 +298,17 @@ function AgentDetail({ agent }) {
             <table className="w-full">
               <thead className="sticky top-0 bg-gray-800 border-b border-gray-700">
                 <tr className="text-gray-400 text-xs">
-                  {['종목', '구분', '체결가', '투자금', '손익금액', '수익률', '매도 후 잔액', '시각'].map(h => (
-                    <th key={h} className="text-left px-2 py-2 font-medium whitespace-nowrap">{h}</th>
+                  {[
+                    ['종목', 'text-left'],
+                    ['구분', 'text-left'],
+                    ['체결가', 'text-right'],
+                    ['투자금', 'text-right'],
+                    ['손익금액', 'text-right'],
+                    ['수익률', 'text-right'],
+                    ['매도 후 잔액', 'text-right'],
+                    ['시각', 'text-left'],
+                  ].map(([h, align]) => (
+                    <th key={h} className={`${align} px-2 py-2 font-medium whitespace-nowrap`}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -601,19 +610,25 @@ function MarketSection({ agents, market, selected, onSelect }) {
 
 // ── 메인 ──────────────────────────────────────────────────────────
 export default function AgentDashboard({ agents }) {
-  const [selected, setSelected] = useState(null)
+  const [selected,     setSelected]     = useState(null)
+  const [activeMarket, setActiveMarket] = useState('coin')
 
   const coinAgents    = agents.filter(a => a.market === 'coin')
   const stockAgents   = agents.filter(a => a.market === 'stock')
   const selectedAgent = agents.find(a => a.agent_id === selected)
   const handleClick   = id => setSelected(selected === id ? null : id)
 
-  const totalTrades   = agents.reduce((s, a) => s + a.total_trades, 0)
-  const activeAgents  = agents.filter(a => a.total_trades > 0)
-  const bestTotal     = activeAgents.length
+  const totalTrades  = agents.reduce((s, a) => s + a.total_trades, 0)
+  const activeAgents = agents.filter(a => a.total_trades > 0)
+  const bestTotal    = activeAgents.length
     ? Math.max(...activeAgents.map(a => a.total_value ?? a.balance))
     : INITIAL
-  const champions     = agents.filter(a => a.is_champion)
+  const champions    = agents.filter(a => a.is_champion)
+
+  const TAB = [
+    { key: 'coin',  label: '암호화폐',  sub: 'AI01~AI10 · 24/7',     color: 'text-yellow-300', activeBg: 'border-yellow-400 text-yellow-300', agents: coinAgents },
+    { key: 'stock', label: '주식',      sub: 'AI11~AI20 · 09:00~15:30', color: 'text-blue-300',   activeBg: 'border-blue-400 text-blue-300',   agents: stockAgents },
+  ]
 
   return (
     <div className="space-y-6">
@@ -630,9 +645,7 @@ export default function AgentDashboard({ agents }) {
           <div className="bg-gray-700/50 rounded-lg p-3">
             <p className="text-xs text-gray-400">총 에이전트</p>
             <p className="text-2xl font-bold text-white">{agents.length}</p>
-            <p className="text-xs text-gray-500">
-              코인 10 + 주식 10 · 활성 {activeAgents.length}개
-            </p>
+            <p className="text-xs text-gray-500">코인 10 + 주식 10 · 활성 {activeAgents.length}개</p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-3">
             <p className="text-xs text-gray-400">총 가상 거래</p>
@@ -658,40 +671,56 @@ export default function AgentDashboard({ agents }) {
         </div>
       </div>
 
+      {/* 탭 */}
+      <div className="flex gap-1 border-b border-gray-700">
+        {TAB.map(t => {
+          const active = activeMarket === t.key
+          const tradeCount = t.agents.reduce((s, a) => s + a.total_trades, 0)
+          return (
+            <button
+              key={t.key}
+              onClick={() => { setActiveMarket(t.key); setSelected(null) }}
+              className={`px-5 py-3 text-sm font-semibold border-b-2 transition-all flex items-center gap-2
+                ${active
+                  ? t.activeBg
+                  : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+            >
+              {t.label}
+              <span className="text-xs font-normal opacity-70">{t.sub}</span>
+              <span className={`text-xs px-1.5 py-0.5 rounded font-mono
+                ${active
+                  ? t.key === 'coin' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-blue-900/50 text-blue-300'
+                  : 'bg-gray-700 text-gray-400'}`}>
+                {tradeCount}회
+              </span>
+            </button>
+          )
+        })}
+      </div>
+
       {/* 선택된 에이전트 상세 */}
       {selectedAgent && <AgentDetail agent={selectedAgent} />}
 
-      {/* 암호화폐 섹션 */}
-      <div>
-        <div className="flex items-center gap-3 mb-3">
-          <span className="text-lg font-bold text-yellow-300">암호화폐 경쟁</span>
-          <span className="text-xs bg-yellow-900/60 text-yellow-300 px-2 py-0.5 rounded">코인 24/7</span>
-          <span className="text-xs text-gray-500">업비트 거래대금 상위 50개 · 5분봉 · AI01~AI10</span>
+      {/* 선택된 마켓 섹션 */}
+      {activeMarket === 'coin' ? (
+        <div>
+          <div className="flex items-center gap-3 mb-3">
+            <span className="text-lg font-bold text-yellow-300">암호화폐 경쟁</span>
+            <span className="text-xs bg-yellow-900/60 text-yellow-300 px-2 py-0.5 rounded">코인 24/7</span>
+            <span className="text-xs text-gray-500">업비트 거래대금 상위 50개 · 5분봉 · AI01~AI10</span>
+          </div>
+          <MarketSection agents={coinAgents} market="coin" selected={selected} onSelect={handleClick} />
         </div>
-        <MarketSection
-          agents={coinAgents}
-          market="coin"
-          selected={selected}
-          onSelect={handleClick}
-        />
-      </div>
-
-      {/* 주식 섹션 */}
-      <div>
-        <div className="flex items-center gap-3 mb-3">
-          <span className="text-lg font-bold text-blue-300">주식 경쟁</span>
-          <span className="text-xs bg-blue-900/60 text-blue-300 px-2 py-0.5 rounded">장중 09:00~15:30</span>
-          <span className="text-xs text-gray-500">
-            KIS 거래량 상위 50개 · 5분봉 · AI11~AI20 · 코인과 동일 구조
-          </span>
+      ) : (
+        <div>
+          <div className="flex items-center gap-3 mb-3">
+            <span className="text-lg font-bold text-blue-300">주식 경쟁</span>
+            <span className="text-xs bg-blue-900/60 text-blue-300 px-2 py-0.5 rounded">장중 09:00~15:30</span>
+            <span className="text-xs text-gray-500">KIS 거래량 상위 50개 · 5분봉 · AI11~AI20</span>
+          </div>
+          <MarketSection agents={stockAgents} market="stock" selected={selected} onSelect={handleClick} />
         </div>
-        <MarketSection
-          agents={stockAgents}
-          market="stock"
-          selected={selected}
-          onSelect={handleClick}
-        />
-      </div>
+      )}
 
     </div>
   )
