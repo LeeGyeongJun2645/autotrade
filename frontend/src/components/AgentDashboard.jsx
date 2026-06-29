@@ -329,7 +329,7 @@ function AgentDetail({ agent }) {
 function ChampionCard({ agent, onClick, selected, market }) {
   const isCoin   = market === 'coin'
   const posCount = Object.keys(agent.positions ?? {}).length
-  const totalVal = agent.total_value ?? agent.balance
+  const totalVal = agent.total_value ?? agent.balance ?? INITIAL
   const pnlAmt   = totalVal - INITIAL
 
   return (
@@ -397,11 +397,11 @@ function AgentCard({ agent, onClick, selected }) {
   const isCoin   = agent.market === 'coin'
   const posEnt   = Object.entries(agent.positions ?? {})
   const noTrades = agent.total_trades === 0
-  const totalVal = agent.total_value ?? agent.balance
+  const totalVal = agent.total_value ?? agent.balance ?? INITIAL
   const pnlAmt   = totalVal - INITIAL
 
   // 보유 포지션 투자 원금 (고정값 — 시장가와 무관)
-  const invested = posEnt.reduce((s, [, pos]) => s + pos.entry_price * pos.qty, 0)
+  const invested = posEnt.reduce((s, [, pos]) => s + (pos.entry_price ?? 0) * (pos.qty ?? 0), 0)
   const posVal   = agent.position_value ?? 0
   const unrealized = posVal - invested  // 미실현 손익
 

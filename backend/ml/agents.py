@@ -494,7 +494,7 @@ class SimAgent:
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
             # ADX 레짐 필터 — 횡보장(ADX<20)은 예측 신뢰도 낮으므로 스킵
-            if full_df["adx_14"].iloc[-1] < 20:
+            if "adx_14" not in full_df.columns or full_df["adx_14"].iloc[-1] < 20:
                 return "hold", 0.5
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:

@@ -154,7 +154,9 @@ async def get_price(symbol: str) -> dict[str, Any]:
         params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": symbol},
         force_live=True,
     )
-    out = data["output"]
+    out = data.get("output") or {}
+    if not out:
+        raise ValueError(f"[KIS] 주가 응답에 output 없음: {data.get('msg1', '—')}")
     return {
         "symbol": symbol,
         "current_price": int(out["stck_prpr"]),
@@ -545,7 +547,7 @@ async def place_buy_order(
         "ORD_UNPR": str(price),
     }
     data = await _kis_request("POST", "/uapi/domestic-stock/v1/trading/order-cash", tr_id=tr_id, body=body)
-    out = data["output"]
+    out = data.get("output") or {}
     logger.info("[매수] %s %d주 @ %d원 | 주문번호: %s", symbol, qty, price, out.get("ODNO"))
     return {"order_no": out.get("ODNO", ""), "order_time": out.get("ORD_TMD", "")}
 
@@ -580,6 +582,6 @@ async def place_sell_order(
         "ORD_UNPR": str(price),
     }
     data = await _kis_request("POST", "/uapi/domestic-stock/v1/trading/order-cash", tr_id=tr_id, body=body)
-    out = data["output"]
+    out = data.get("output") or {}
     logger.info("[매도] %s %d주 @ %d원 | 주문번호: %s", symbol, qty, price, out.get("ODNO"))
     return {"order_no": out.get("ODNO", ""), "order_time": out.get("ORD_TMD", "")}

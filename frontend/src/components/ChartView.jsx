@@ -261,7 +261,7 @@ function CandleChart({ ticker, interval, positions, mlSignal }) {
     } finally {
       setLoading(false)
     }
-  }, [ticker, interval, mlSignal]) // mlSignal 로드 완료 시 마커 반영
+  }, [ticker, interval]) // mlSignal은 마커만 추가하므로 deps 제외 — 루프 방지
 
   useEffect(() => {
     buildChart()
@@ -308,7 +308,7 @@ function CandleChart({ ticker, interval, positions, mlSignal }) {
 // ── 메인 컴포넌트 ─────────────────────────────────────────────────
 export default function ChartView({ sse }) {
   const [ticker, setTicker] = useState('KRW-BTC')
-  const [interval, setInterval] = useState('days')
+  const [interval, setChartInterval] = useState('days')
   const [mlSignal, setMlSignal] = useState(null)
   const { simLogs, connected, positions } = sse
 
@@ -341,7 +341,7 @@ export default function ChartView({ sse }) {
         {INTERVALS.map((iv) => (
           <button
             key={iv.value}
-            onClick={() => setInterval(iv.value)}
+            onClick={() => setChartInterval(iv.value)}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${interval === iv.value ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'}`}
           >
             {iv.label}

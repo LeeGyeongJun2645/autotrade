@@ -278,7 +278,7 @@ async def get_ohlcv(
 
             # 다음 페이지: 마지막 캔들의 시간 기준
             oldest = data[-1]["candle_date_time_utc"]
-            if oldest == to_param:  # 진전 없음 → 무한루프 방지
+            if oldest[:19] == to_param[:19]:  # 진전 없음 → 무한루프 방지 (suffix 불일치 방어)
                 break
             # Upbit API는 timezone suffix 필요 (없으면 KST로 해석될 수 있음)
             to_param = oldest if oldest.endswith(("Z", "+00:00")) else oldest + "+00:00"

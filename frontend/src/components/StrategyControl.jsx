@@ -72,7 +72,7 @@ export default function StrategyControl() {
         api.get('/symbols'),
       ])
       setStatus(s)
-      setSymbols(sym)
+      setSymbols({ kis: sym?.kis ?? [], upbit: sym?.upbit ?? [] })
     } catch (e) {
       setMsg({ type: 'error', text: e.message })
     }

@@ -96,9 +96,9 @@ CREATE TABLE IF NOT EXISTS agent_stats (
 async def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
-        # 멀티 커넥션 잠금 해결: WAL 모드 + 5초 대기
-        await db.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout을 WAL 전환 전에 설정해야 전환 자체의 SQLITE_BUSY도 처리됨
         await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.execute(_CREATE_TRADES)
         await db.execute(_CREATE_POSITIONS)
         await db.execute(_CREATE_AGENT_TRADES)

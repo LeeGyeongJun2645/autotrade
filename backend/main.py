@@ -34,7 +34,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from backend.api import kis, telegram, upbit
@@ -119,10 +119,10 @@ class TickerRequest(BaseModel):
 
 class BacktestRequest(BaseModel):
     strategy: Literal["volatility_breakout", "moving_average", "rsi"]
-    symbol: str | None = None   # KIS 종목코드 (주식 백테스트)
-    ticker: str | None = None   # 업비트 티커 (코인 백테스트)
-    count: int = 120            # OHLCV 봉 수 (MA: 최소 61, RSI: 최소 15)
-    initial_cash: float = 10_000_000
+    symbol: str | None = None
+    ticker: str | None = None
+    count: int = Field(default=120, ge=1, le=2000)
+    initial_cash: float = Field(default=10_000_000, gt=0)
 
 
 # ── 헬스 체크 ────────────────────────────────────────────────────
@@ -340,7 +340,7 @@ async def get_kis_chart(symbol: str, count: int = 100):
 
 
 @app.get("/simlog", tags=["Chart"])
-async def get_simlog(n: int = 100):
+async def get_simlog(n: int = Query(default=100, ge=1, le=500)):
     """시뮬레이션 로그 최신 n개 조회."""
     return sim_log.get_logs(n)
 

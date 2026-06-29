@@ -162,9 +162,9 @@ def compute_features(
     ma5  = trend.SMAIndicator(close, window=5).sma_indicator()
     ma20 = trend.SMAIndicator(close, window=20).sma_indicator()
     ma60 = trend.SMAIndicator(close, window=60).sma_indicator()
-    df["ma5_ratio"]       = close / ma5 - 1
-    df["ma20_ratio"]      = close / ma20 - 1
-    df["ma60_ratio"]      = close / ma60 - 1
+    df["ma5_ratio"]       = close / ma5.replace(0, np.nan)  - 1
+    df["ma20_ratio"]      = close / ma20.replace(0, np.nan) - 1
+    df["ma60_ratio"]      = close / ma60.replace(0, np.nan) - 1
     df["ma5_cross_ma20"]  = (ma5 > ma20).astype(float)
     df["ma20_cross_ma60"] = (ma20 > ma60).astype(float)
 

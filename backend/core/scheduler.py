@@ -551,6 +551,9 @@ class TradingScheduler:
                 return
 
             await kis.place_buy_order(symbol, add_qty)
+            # 주문 체결 직후 stage 갱신 — DB 기록 실패 시 재발주 방지
+            dca["stage"] = next_stage
+            dca["bought_qty"] = int(dca.get("bought_qty", 0)) + add_qty
 
             total_cost = position.entry_price * position.qty + current_price * add_qty
             new_qty = position.qty + add_qty
@@ -566,8 +569,6 @@ class TradingScheduler:
                 self._positions[symbol] = position
             await upsert_position(symbol, "KIS", position)
             await insert_trade(symbol, "KIS", "BUY", float(add_qty), current_price, position.strategy, f"DCA {next_stage}차")
-            dca["stage"] = next_stage
-            dca["bought_qty"] = int(dca.get("bought_qty", 0)) + add_qty
             sim_log.push(symbol, f"DCA {next_stage}차 {add_qty}주 추가매수 @ {current_price:,.0f}원 | 평균단가 {new_avg:,.0f}원", "BUY")
             logger.info("[KIS DCA %d차] %s %d주 @ %,.0f원 | 평균단가 %,.0f원", next_stage, symbol, add_qty, current_price, new_avg)
             await telegram.notify_buy(symbol, float(add_qty), current_price, position.strategy, f"DCA {next_stage}차 추가매수")
@@ -787,6 +788,8 @@ class TradingScheduler:
 
             await upbit.place_buy_order(ticker, add_krw)
             add_qty = add_krw / current_price
+            # 주문 체결 직후 stage 갱신 — DB 기록 실패 시 재발주 방지
+            dca["stage"] = next_stage
 
             # 평균 단가·수량 갱신
             total_cost = position.entry_price * position.qty + current_price * add_qty
@@ -804,8 +807,6 @@ class TradingScheduler:
                 self._positions[ticker] = position
             await upsert_position(ticker, "UPBIT", position)
             await insert_trade(ticker, "UPBIT", "BUY", add_qty, current_price, position.strategy, f"DCA {next_stage}차")
-
-            dca["stage"] = next_stage
             sim_log.push(ticker, f"DCA {next_stage}차 {add_qty:.6f} @ {current_price:,.0f}원 | 평균단가 {new_avg:,.0f}원", "BUY")
             await telegram.notify_buy(ticker, add_qty, current_price, position.strategy, f"DCA {next_stage}차 추가매수 | 평균단가 {new_avg:,.0f}원", is_crypto=True)
         except Exception:
