@@ -5,9 +5,11 @@
 """
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -220,7 +222,17 @@ async def get_daily_ohlcv(symbol: str, count: int = 30) -> list[dict[str, Any]]:
 
 _VOLUME_RANK_CACHE: tuple[list[str], float] | None = None
 _VOLUME_RANK_TTL = 300.0  # 5분 캐시
-_STOCK_NAMES: dict[str, str] = {}  # code → 한글 종목명 캐시
+_STOCK_NAMES_FILE = Path(__file__).parent.parent.parent / "data" / "stock_names.json"
+
+def _load_stock_names() -> dict[str, str]:
+    try:
+        if _STOCK_NAMES_FILE.exists():
+            return json.loads(_STOCK_NAMES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+_STOCK_NAMES: dict[str, str] = _load_stock_names()  # code → 한글 종목명 (재시작 후에도 유지)
 
 
 async def get_volume_rank(n: int = 50) -> list[str]:
@@ -254,13 +266,21 @@ async def get_volume_rank(n: int = 50) -> list[str]:
             force_live=True,
         )
         symbols = []
+        updated = False
         for row in data.get("output", []):
             code = row.get("mksc_shrn_iscd", "")
             name = row.get("hts_kor_isnm", "")
             if code:
                 symbols.append(code)
-                if name:
+                if name and _STOCK_NAMES.get(code) != name:
                     _STOCK_NAMES[code] = name
+                    updated = True
+        if updated:
+            try:
+                _STOCK_NAMES_FILE.parent.mkdir(parents=True, exist_ok=True)
+                _STOCK_NAMES_FILE.write_text(json.dumps(_STOCK_NAMES, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
         _VOLUME_RANK_CACHE = (symbols, now)
         logger.debug("[KIS] 거래량 상위 %d개: %s", n, symbols[:n])
         return symbols[:n]
