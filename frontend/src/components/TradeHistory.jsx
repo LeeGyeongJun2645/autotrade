@@ -165,13 +165,13 @@ function BacktestPanel() {
             />
             <ResultCard
               label="최대 낙폭"
-              value={`-${result.max_drawdown_pct.toFixed(2)}%`}
+              value={result.max_drawdown_pct != null ? `-${result.max_drawdown_pct.toFixed(2)}%` : '—'}
               color="text-red-400"
             />
             <ResultCard
               label="샤프 비율"
-              value={result.sharpe_ratio.toFixed(3)}
-              color={result.sharpe_ratio >= 1 ? 'text-green-400' : 'text-yellow-400'}
+              value={result.sharpe_ratio != null ? result.sharpe_ratio.toFixed(3) : '—'}
+              color={(result.sharpe_ratio ?? 0) >= 1 ? 'text-green-400' : 'text-yellow-400'}
             />
           </div>
 
@@ -257,8 +257,8 @@ function TradeLogPanel() {
               </tr>
             </thead>
             <tbody>
-              {trades.map((t) => (
-                <tr key={t.id} className="border-b border-gray-700/50 hover:bg-gray-700/30 transition-colors">
+              {trades.map((t, idx) => (
+                <tr key={t.id ?? `${t.created_at}-${t.symbol}-${idx}`} className="border-b border-gray-700/50 hover:bg-gray-700/30 transition-colors">
                   <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
                     {t.created_at?.slice(0, 16).replace('T', ' ')}
                   </td>

@@ -406,7 +406,7 @@ async def place_sell_order(ticker: str, volume: float) -> dict[str, Any]:
     body = {
         "market": ticker,
         "side": "ask",
-        "volume": str(volume),
+        "volume": f"{volume:.8f}",
         "ord_type": "market",
     }
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:

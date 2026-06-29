@@ -183,7 +183,7 @@ def compute_features(
 
     # ── VWAP (20봉 롤링) ─────────────────────────────────────────
     typical_price = (high + low + close) / 3
-    vwap_20       = (typical_price * vol).rolling(20).sum() / vol.rolling(20).sum()
+    vwap_20       = (typical_price * vol).rolling(20).sum() / vol.rolling(20).sum().replace(0, np.nan)
     df["vwap_ratio"] = close / vwap_20 - 1
     df["vwap_cross"] = (close > vwap_20).astype(float)
 
@@ -212,8 +212,8 @@ def compute_features(
 
     # ── 거래량 ────────────────────────────────────────────────────
     vol_ma20          = vol.rolling(20).mean()
-    df["vol_ratio"]   = vol / vol_ma20
-    df["vol_surge"]   = vol / vol.rolling(5).mean()   # 5봉 평균 대비 급증 비율
+    df["vol_ratio"]   = vol / vol_ma20.replace(0, np.nan)
+    df["vol_surge"]   = vol / vol.rolling(5).mean().replace(0, np.nan)
     df["vol_surge_flag"] = (df["vol_surge"] >= 3).astype(float)  # 3배 이상 = 급증
 
     obv               = volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()

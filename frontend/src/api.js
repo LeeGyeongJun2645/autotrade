@@ -6,9 +6,13 @@ async function req(method, path, body) {
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   })
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.detail ?? res.statusText)
-  return data
+  if (!res.ok) {
+    let detail = res.statusText
+    try { const err = await res.json(); detail = err.detail ?? detail } catch {}
+    throw new Error(detail)
+  }
+  if (res.status === 204) return null
+  return res.json()
 }
 
 export const api = {

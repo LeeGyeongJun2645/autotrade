@@ -210,7 +210,7 @@ export default function Dashboard({ sse }) {
                       <td className="px-4 py-3 font-mono">{fmt(Math.round(pos.entry_price))}원</td>
                       <td className="px-4 py-3 font-mono text-red-400">{fmt(Math.round(pos.stop_loss_price))}원</td>
                       <td className="px-4 py-3 font-mono text-green-400">{fmt(Math.round(pos.take_profit_price))}원</td>
-                      <td className="px-4 py-3 text-gray-400 text-xs">{pos.opened_at?.slice(0, 16).replace('T', ' ')}</td>
+                      <td className="px-4 py-3 text-gray-400 text-xs">{pos.opened_at?.slice(0, 16)?.replace('T', ' ')}</td>
                     </tr>
                   )
                 })}

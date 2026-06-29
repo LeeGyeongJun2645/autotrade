@@ -287,19 +287,22 @@ class SimAgent:
                 oi_hist=oi_hist,
                 taker_hist=taker_hist,
             )
-            _full_dt_index = feat_df.index  # DatetimeIndex 전체 보존 (필터 전)
+            # ADX 필터를 열 선택 전에 캡처 (feature_set 에 adx_14 없는 에이전트도 동일 필터 적용)
+            _adx_mask = feat_df["adx_14"] >= 20 if "adx_14" in feat_df.columns else None
             feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
-            # ADX 레짐 필터 — predict()와 동일 조건으로 횡보장 샘플 제외 (train-serve skew 방지)
-            if "adx_14" in feat_df.columns:
-                feat_df = feat_df[feat_df["adx_14"] >= 20]
+            if _adx_mask is not None:
+                feat_df = feat_df[_adx_mask.reindex(feat_df.index, fill_value=False)]
             if len(feat_df) < 50:
                 return False
 
-            # close_all을 DatetimeIndex로 구성 → reindex 로 레이블 기반 정렬
-            # (iloc에 DatetimeIndex를 전달하면 나노초 정수로 해석되어 IndexError 발생)
+            # close_all: ohlcv_list 전체(N_raw)를 DatetimeIndex로 구성
+            # compute_features 내부 dropna 때문에 feat_df.index (N_feat) < len(ohlcv_list) (N_raw)
+            # → _full_dt_index = feat_df.index 를 그대로 Series index로 쓰면 길이 불일치 ValueError
+            # ohlcv_list 날짜 기반 DatetimeIndex(N_raw)로 close_all 구성 후 reindex로 정렬
+            _ohlcv_dates = pd.to_datetime([str(c["date"])[:19] for c in reversed(ohlcv_list)])
             close_all = pd.Series(
                 [float(c["close"]) for c in reversed(ohlcv_list)],
-                index=_full_dt_index,
+                index=_ohlcv_dates,
             )
             close = close_all.reindex(feat_df.index).reset_index(drop=True)
             feat_df = feat_df.reset_index(drop=True)

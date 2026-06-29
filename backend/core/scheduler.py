@@ -501,12 +501,14 @@ class TradingScheduler:
         reason: str,
         current_price: float,
     ) -> None:
+        _saved_dca: dict | None = None
         try:
             # 이중 매도 방지: 락 아래서 포지션 + DCA 상태 원자적 제거
             async with self._lock:
                 if symbol not in self._positions:
                     logger.warning("[KIS][%s] 매도 중복 차단 (이미 청산됨)", symbol)
                     return
+                _saved_dca = self._dca_state.get(symbol)
                 self._positions.pop(symbol)
                 self._dca_state.pop(symbol, None)
 
@@ -523,6 +525,12 @@ class TradingScheduler:
             await telegram.notify_sell(symbol, float(qty), current_price, profit_rate, reason)
             await delete_position(symbol)
         except Exception:
+            # 주문 실패 시 포지션 복구 (거래소에 여전히 보유 중)
+            async with self._lock:
+                if symbol not in self._positions:
+                    self._positions[symbol] = position
+                    if _saved_dca is not None:
+                        self._dca_state[symbol] = _saved_dca
             logger.exception("[KIS][%s] 매도 실행 중 예외", symbol)
 
     async def _execute_kis_dca_add(
@@ -810,12 +818,14 @@ class TradingScheduler:
         reason: str,
         current_price: float,
     ) -> None:
+        _saved_dca_upbit: dict | None = None
         try:
             # 이중 매도 방지: 락 아래서 포지션 + DCA 상태 원자적 제거
             async with self._lock:
                 if ticker not in self._positions:
                     logger.warning("[Upbit][%s] 매도 중복 차단 (이미 청산됨)", ticker)
                     return
+                _saved_dca_upbit = self._dca_state.get(ticker)
                 self._positions.pop(ticker)
                 self._dca_state.pop(ticker, None)
 
@@ -831,6 +841,12 @@ class TradingScheduler:
             await telegram.notify_sell(ticker, position.qty, current_price, profit_rate, reason, is_crypto=True)
             await delete_position(ticker)
         except Exception:
+            # 주문 실패 시 포지션 복구 (거래소에 여전히 보유 중)
+            async with self._lock:
+                if ticker not in self._positions:
+                    self._positions[ticker] = position
+                    if _saved_dca_upbit is not None:
+                        self._dca_state[ticker] = _saved_dca_upbit
             logger.exception("[Upbit][%s] 매도 실행 중 예외", ticker)
 
 

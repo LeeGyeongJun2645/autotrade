@@ -174,7 +174,7 @@ function AgentDetail({ agent }) {
   const [loading,  setLoading]  = useState(false)
   const isCoin   = agent.market === 'coin'
   const posEnt   = Object.entries(agent.positions ?? {})
-  const totalVal = agent.total_value ?? agent.balance
+  const totalVal = agent.total_value ?? agent.balance ?? INITIAL
   const pnlAmt   = totalVal - INITIAL
 
   const loadTrades = async () => {

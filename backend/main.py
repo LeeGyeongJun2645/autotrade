@@ -30,7 +30,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -314,9 +314,16 @@ async def trigger_daily_report():
 
 # ── 차트 데이터 ──────────────────────────────────────────────────
 
+_UPBIT_INTERVALS = {
+    "minutes/1", "minutes/3", "minutes/5", "minutes/10", "minutes/15",
+    "minutes/30", "minutes/60", "minutes/240", "days", "weeks", "months",
+}
+
 @app.get("/chart/upbit/{ticker}", tags=["Chart"])
 async def get_upbit_chart(ticker: str, interval: str = "days", count: int = 100):
     """업비트 OHLCV 차트 데이터 조회."""
+    if interval not in _UPBIT_INTERVALS:
+        raise HTTPException(status_code=400, detail=f"허용되지 않는 interval: {interval}")
     try:
         return await upbit.get_ohlcv(ticker, interval=interval, count=min(count, 200))
     except Exception as e:
@@ -341,7 +348,10 @@ async def get_simlog(n: int = 100):
 # ── 거래 기록 ────────────────────────────────────────────────────
 
 @app.get("/trades", tags=["Trades"])
-async def get_trade_history(limit: int = 50, offset: int = 0):
+async def get_trade_history(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
     """거래 실행 이력 조회 (최신순).
 
     Args:
