@@ -79,28 +79,29 @@ FEATURE_SETS: dict[str, list[str]] = {
 
 AGENT_CONFIGS: list[tuple] = [
     # (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market, lookahead, model_type)
+    # label_threshold = 트리플배리어 TP/SL 기준 (ATR×1.5 실거래 손절 범위에 맞게 0.005~0.015 조정)
     # 코인 홀수 → LightGBM / 짝수 → XGBoost (앙상블 다양성 극대화)
-    ("AI01",  5, 0.001, 0.55, "all",      "coin",  3, "lgbm"),  # 단기 공격형
-    ("AI02",  5, 0.001, 0.62, "momentum", "coin",  5, "xgb"),
-    ("AI03",  5, 0.002, 0.55, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
-    ("AI04",  5, 0.002, 0.60, "volume",   "coin",  3, "xgb"),
-    ("AI05",  5, 0.003, 0.58, "all",      "coin",  5, "lgbm"),
-    ("AI06",  5, 0.003, 0.65, "momentum", "coin",  8, "xgb"),
-    ("AI07",  5, 0.004, 0.60, "trend",    "coin",  3, "lgbm"),
-    ("AI08",  5, 0.002, 0.60, "volume",   "coin",  5, "xgb"),
-    ("AI09",  5, 0.005, 0.62, "all",      "coin",  8, "lgbm"),
-    ("AI10",  5, 0.003, 0.58, "trend",    "coin",  5, "xgb"),
+    ("AI01",  5, 0.006, 0.58, "all",      "coin",  3, "lgbm"),  # 단기 공격형
+    ("AI02",  5, 0.007, 0.63, "momentum", "coin",  5, "xgb"),
+    ("AI03",  5, 0.008, 0.58, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
+    ("AI04",  5, 0.007, 0.62, "volume",   "coin",  3, "xgb"),
+    ("AI05",  5, 0.010, 0.60, "all",      "coin",  5, "lgbm"),
+    ("AI06",  5, 0.008, 0.65, "momentum", "coin",  8, "xgb"),
+    ("AI07",  5, 0.010, 0.62, "trend",    "coin",  3, "lgbm"),
+    ("AI08",  5, 0.007, 0.62, "volume",   "coin",  5, "xgb"),
+    ("AI09",  5, 0.012, 0.65, "all",      "coin",  8, "lgbm"),
+    ("AI10",  5, 0.008, 0.60, "trend",    "coin",  5, "xgb"),
     # 주식 홀수 → LightGBM / 짝수 → XGBoost
-    ("AI11",  5, 0.001, 0.55, "all",      "stock", 3, "lgbm"),
-    ("AI12",  5, 0.001, 0.62, "trend",    "stock", 5, "xgb"),
-    ("AI13",  5, 0.002, 0.55, "momentum", "stock", 8, "lgbm"),
-    ("AI14",  5, 0.002, 0.60, "volume",   "stock", 3, "xgb"),
-    ("AI15",  5, 0.003, 0.58, "all",      "stock", 5, "lgbm"),
-    ("AI16",  5, 0.003, 0.65, "trend",    "stock", 8, "xgb"),
-    ("AI17",  5, 0.004, 0.60, "momentum", "stock", 3, "lgbm"),
-    ("AI18",  5, 0.004, 0.68, "volume",   "stock", 5, "xgb"),
-    ("AI19",  5, 0.005, 0.62, "all",      "stock", 8, "lgbm"),
-    ("AI20",  5, 0.005, 0.70, "trend",    "stock", 3, "xgb"),
+    ("AI11",  5, 0.006, 0.58, "all",      "stock", 3, "lgbm"),
+    ("AI12",  5, 0.007, 0.63, "trend",    "stock", 5, "xgb"),
+    ("AI13",  5, 0.008, 0.58, "momentum", "stock", 8, "lgbm"),
+    ("AI14",  5, 0.007, 0.62, "volume",   "stock", 3, "xgb"),
+    ("AI15",  5, 0.010, 0.60, "all",      "stock", 5, "lgbm"),
+    ("AI16",  5, 0.008, 0.65, "trend",    "stock", 8, "xgb"),
+    ("AI17",  5, 0.010, 0.62, "momentum", "stock", 3, "lgbm"),
+    ("AI18",  5, 0.010, 0.68, "volume",   "stock", 5, "xgb"),
+    ("AI19",  5, 0.012, 0.65, "all",      "stock", 8, "lgbm"),
+    ("AI20",  5, 0.012, 0.70, "trend",    "stock", 3, "xgb"),
 ]
 
 

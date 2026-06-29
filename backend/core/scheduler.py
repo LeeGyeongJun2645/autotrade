@@ -1108,10 +1108,10 @@ class TradingScheduler:
         atr_pct = agent._last_atr_pct
         if atr_pct > 0.001:
             STOP_LOSS   = -(atr_pct * 1.5)          # ATR × 1.5 손절
-            tp_base     = atr_pct * 2.0              # ATR × 2.0 기준 익절
+            tp_base     = atr_pct * 3.0              # ATR × 3.0 익절 (2:1 R:R → 손절 대비 2배 이상)
         else:
             STOP_LOSS   = -0.03
-            tp_base     = 0.05
+            tp_base     = 0.06
 
         # ── 보유 포지션 익절/손절 우선 체크 ─────────────────────────
         if symbol in agent._positions:
@@ -1142,20 +1142,24 @@ class TradingScheduler:
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
-            # 시간 경과 하향 ROI: ATR 기준으로 스케일, 오래 묶일수록 익절 기준 낮춤
-            if held_min < 30:
-                take_profit = tp_base
-            elif held_min < 60:
-                take_profit = max(tp_base * 0.6, 0.015)
+            # 최소 보유 15분: 정상 변동성 내 노이즈 손절 방지
+            if held_min < 15 and unreal > STOP_LOSS * 1.5:
+                pass  # 아직 손절 트리거 안 함 (극단적 급락 제외)
             else:
-                take_profit = max(tp_base * 0.3, 0.01)
+                # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤
+                if held_min < 30:
+                    take_profit = tp_base
+                elif held_min < 90:
+                    take_profit = max(tp_base * 0.7, 0.015)
+                else:
+                    take_profit = max(tp_base * 0.4, 0.012)
 
-            if unreal >= take_profit:
-                signal = "sell"
-                sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
-            elif unreal <= STOP_LOSS:
-                signal = "sell"
-                sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
+                if unreal >= take_profit:
+                    signal = "sell"
+                    sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
+                elif unreal <= STOP_LOSS:
+                    signal = "sell"
+                    sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
 
         if signal == "buy":
             # 코인: 매크로 이벤트 발표 ±2시간은 변동성 폭발 위험 → 신규 매수 차단
