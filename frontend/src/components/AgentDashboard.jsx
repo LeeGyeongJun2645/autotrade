@@ -39,6 +39,7 @@ function ReturnBadge({ pct, size = 'sm' }) {
 }
 
 function WinBadge({ rate, wins = null, total = null, size = 'sm' }) {
+  if (rate == null) return <span className="text-gray-600 text-xs">—</span>
   const color = rate >= 60 ? 'text-green-400' : rate >= 50 ? 'text-yellow-400' : 'text-red-400'
   const sz    = size === 'lg' ? 'text-2xl' : 'text-sm'
   return (
@@ -224,8 +225,8 @@ function AgentDetail({ agent }) {
       <div className="grid grid-cols-4 gap-2">
         {[
           ['인터벌', '5분봉'],
-          ['레이블 기준', `+${(agent.label_threshold * 100).toFixed(1)}%`],
-          ['매수 임계값', `${(agent.buy_threshold * 100).toFixed(0)}%`],
+          ['레이블 기준', agent.label_threshold != null ? `+${(agent.label_threshold * 100).toFixed(1)}%` : '—'],
+          ['매수 임계값', agent.buy_threshold != null ? `${(agent.buy_threshold * 100).toFixed(0)}%` : '—'],
           ['챔피언 선정', '총자산 기준'],
         ].map(([k, v]) => (
           <div key={k} className="bg-gray-700/50 rounded-lg p-3">
@@ -290,7 +291,7 @@ function AgentDetail({ agent }) {
         {trades.length === 0 ? (
           <div className="text-center py-6 text-gray-600 text-sm border border-gray-700/50 rounded-lg">
             {agent.total_trades === 0
-              ? `신호 대기 중 — 매수 임계값 ${(agent.buy_threshold * 100).toFixed(0)}% 이상 신호 없음 (ADX 레짐 필터 적용 중)`
+              ? `신호 대기 중 — 매수 임계값 ${agent.buy_threshold != null ? (agent.buy_threshold * 100).toFixed(0) : '?'}% 이상 신호 없음 (ADX 레짐 필터 적용 중)`
               : '기록 없음'}
           </div>
         ) : (
@@ -313,7 +314,7 @@ function AgentDetail({ agent }) {
                 </tr>
               </thead>
               <tbody>
-                {trades.map((t, i) => <TradeRow key={i} t={t} />)}
+                {trades.map((t) => <TradeRow key={`${t.id ?? t.traded_at}-${t.ticker}`} t={t} />)}
               </tbody>
             </table>
           </div>
@@ -383,7 +384,7 @@ function ChampionCard({ agent, onClick, selected, market }) {
       </div>
 
       <div className="flex items-center gap-4 text-xs text-gray-600">
-        <span>레이블 +{(agent.label_threshold * 100).toFixed(1)}% · 임계 {(agent.buy_threshold * 100).toFixed(0)}%</span>
+        <span>레이블 +{agent.label_threshold != null ? (agent.label_threshold * 100).toFixed(1) : '?'}% · 임계 {agent.buy_threshold != null ? (agent.buy_threshold * 100).toFixed(0) : '?'}%</span>
         {agent.trained_at && <span>최근 학습: {agent.trained_at.slice(5, 16)}</span>}
       </div>
     </div>
@@ -438,7 +439,7 @@ function AgentCard({ agent, onClick, selected }) {
       </p>
 
       <div className="text-xs text-gray-600 mb-2">
-        레이블 +{(agent.label_threshold * 100).toFixed(1)}% · 임계 {(agent.buy_threshold * 100).toFixed(0)}%
+        레이블 +{agent.label_threshold != null ? (agent.label_threshold * 100).toFixed(1) : '?'}% · 임계 {agent.buy_threshold != null ? (agent.buy_threshold * 100).toFixed(0) : '?'}%
       </div>
 
       {noTrades ? (

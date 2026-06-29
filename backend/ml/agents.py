@@ -224,7 +224,7 @@ class SimAgent:
         if len(sell_trades) < 5:
             return max(self.win_rate, 0.1)
         mean_r = float(np.mean(sell_trades))
-        std_r  = float(np.std(sell_trades))
+        std_r  = float(np.std(sell_trades, ddof=1))
         if std_r < 1e-9:
             return max(mean_r * 10 + 0.5, 0.1)
         sharpe = mean_r / std_r
@@ -288,15 +288,17 @@ class SimAgent:
                 taker_hist=taker_hist,
             )
             feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
+            # ADX 레짐 필터 — predict()와 동일 조건으로 횡보장 샘플 제외 (train-serve skew 방지)
+            if "adx_14" in feat_df.columns:
+                feat_df = feat_df[feat_df["adx_14"] >= 20]
             if len(feat_df) < 50:
                 return False
 
-            # feat_df와 동일한 인덱스 기반으로 close 추출 (인덱스 불일치 방지)
+            # dropna 후 살아남은 원본 인덱스를 기준으로 close 추출 (중간 행 제거 시 불일치 방지)
+            feat_df_orig_idx = feat_df.index
+            close_all = pd.Series([float(c["close"]) for c in reversed(ohlcv_list)])
+            close = close_all.iloc[feat_df_orig_idx].reset_index(drop=True)
             feat_df = feat_df.reset_index(drop=True)
-            close_vals = [float(c["close"]) for c in reversed(ohlcv_list)]
-            close = pd.Series(close_vals)
-            n = len(feat_df)
-            close = close.iloc[-n:].reset_index(drop=True)
 
             # ── 트리플 배리어 레이블링 ────────────────────────────────
             # 익절(TP) 또는 손절(SL) 배리어 먼저 터치한 쪽으로 레이블 결정
@@ -590,7 +592,7 @@ class SimAgent:
         self._balance -= amount
         now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         self._positions[ticker] = AgentPosition(ticker, price, qty, now)
-        trade = AgentTrade(self.agent_id, ticker, "BUY", price, qty, None, None, self._balance, now)
+        trade = AgentTrade(self.agent_id, ticker, "BUY", price, qty, price, None, self._balance, now)
         self._push_recent(trade)
         return trade
 

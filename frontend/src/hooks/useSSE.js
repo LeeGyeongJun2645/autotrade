@@ -18,19 +18,19 @@ export function useSSE() {
     }
 
     es.addEventListener('positions', (e) => {
-      try { setPositions(JSON.parse(e.data)) } catch {}
+      try { setPositions(JSON.parse(e.data)) } catch (err) { console.warn('[SSE] positions 파싱 실패:', err) }
     })
 
     es.addEventListener('simlog', (e) => {
-      try { setSimLogs(JSON.parse(e.data)) } catch {}
+      try { setSimLogs(JSON.parse(e.data)) } catch (err) { console.warn('[SSE] simlog 파싱 실패:', err) }
     })
 
     es.addEventListener('mlsignal', (e) => {
-      try { setMlSignals(JSON.parse(e.data)) } catch {}
+      try { setMlSignals(JSON.parse(e.data)) } catch (err) { console.warn('[SSE] mlsignal 파싱 실패:', err) }
     })
 
     es.addEventListener('agents', (e) => {
-      try { setAgents(JSON.parse(e.data)) } catch {}
+      try { setAgents(JSON.parse(e.data)) } catch (err) { console.warn('[SSE] agents 파싱 실패:', err) }
     })
 
     es.onerror = () => {

@@ -75,6 +75,8 @@ class TradingScheduler:
         # DCA 분할매수 상태: {symbol: {"stage": 1~3, "total_budget": float}}
         # stage 1=1차완료, 2=2차완료, 3=3차완료(전량매수)
         self._dca_state: dict[str, dict] = {}
+        # 매수 진행 중 심볼 추적 (TOCTOU 중복매수 방지: 주문 후 포지션 등록 전 간격 보호)
+        self._pending_buys: set[str] = set()
 
     # ── 종목 관리 ─────────────────────────────────────────────────
 
@@ -120,11 +122,11 @@ class TradingScheduler:
     async def _restore_agent_stats(self) -> None:
         """서버 재시작 시 DB에서 에이전트 상태 복구 (잔액·거래수·is_active·buy_threshold)."""
         from backend.ml.agents import AGENTS
-        from backend.db.database import DB_PATH
+        from backend.db.database import connect_db
         import aiosqlite
 
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with connect_db() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute("SELECT * FROM agent_stats") as cur:
                     stats_rows = {r["agent_id"]: dict(r) async for r in cur}
@@ -137,7 +139,7 @@ class TradingScheduler:
                         pos_rows.setdefault(r["agent_id"], []).append(dict(r))
 
                 async with db.execute(
-                    "SELECT * FROM agent_trades ORDER BY traded_at DESC"
+                    "SELECT * FROM agent_trades ORDER BY traded_at DESC LIMIT 1000"
                 ) as cur:
                     trade_rows: dict[str, list] = {}
                     async for r in cur:
@@ -167,7 +169,7 @@ class TradingScheduler:
             if settings.upbit_access_key:
                 bal = await upbit.get_balance()
                 holdings = {
-                    h["currency"]: float(h.get("balance", 0))
+                    h["ticker"]: float(h.get("balance", 0))
                     for h in bal.get("holdings", [])
                 }
                 async with self._lock:
@@ -436,55 +438,59 @@ class TradingScheduler:
         strategy_name: str,
     ) -> None:
         try:
-            # TOCTOU 방지: 주문 전 포지션 재확인 (락 안에서)
+            # TOCTOU 방지: 포지션 체크 + pending 마킹을 동일 락 안에서 원자적으로
             async with self._lock:
-                if symbol in self._positions:
-                    logger.warning("[KIS][%s] 중복매수 차단 (포지션 이미 존재)", symbol)
+                if symbol in self._positions or symbol in self._pending_buys:
+                    logger.warning("[KIS][%s] 중복매수 차단 (포지션 이미 존재 또는 주문 진행 중)", symbol)
+                    return
+                self._pending_buys.add(symbol)
+
+            try:
+                balance = await kis.get_balance()
+                cash = float(balance["cash"])
+                total_qty = int(RiskManager.calculate_qty(cash, current_price))
+                qty = max(1, int(total_qty * 0.40))  # DCA 1차: 총 수량의 40%
+
+                ok, reason = RiskManager.validate_order(cash, current_price, float(qty))
+                if not ok:
+                    logger.warning("[KIS][%s] 매수 불가: %s", symbol, reason)
                     return
 
-            balance = await kis.get_balance()
-            cash = float(balance["cash"])
-            total_qty = int(RiskManager.calculate_qty(cash, current_price))
-            qty = max(1, int(total_qty * 0.40))  # DCA 1차: 총 수량의 40%
+                await kis.place_buy_order(symbol, qty)
+                self._dca_state[symbol] = {"stage": 1, "total_qty": total_qty, "bought_qty": qty}
 
-            ok, reason = RiskManager.validate_order(cash, current_price, float(qty))
-            if not ok:
-                logger.warning("[KIS][%s] 매수 불가: %s", symbol, reason)
-                return
+                # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
+                sl_rate = tp_rate = None
+                if self._use_atr_risk:
+                    from backend.ml.agents import AGENTS
+                    atr_vals = [a._last_atr_pct for a in AGENTS.values() if a.market == "stock" and a._last_atr_pct > 0.001]
+                    if atr_vals:
+                        atr = sum(atr_vals) / len(atr_vals)
+                        sl_rate = -(atr * 1.5)
+                        tp_rate = atr * 2.0
 
-            await kis.place_buy_order(symbol, qty)
-            self._dca_state[symbol] = {"stage": 1, "total_qty": total_qty, "bought_qty": qty}
+                position = RiskManager.open_position(
+                    symbol=symbol,
+                    entry_price=current_price,
+                    qty=float(qty),
+                    strategy=strategy_name,
+                    is_crypto=False,
+                    stop_loss_rate=sl_rate,
+                    take_profit_rate=tp_rate,
+                )
+                async with self._lock:
+                    self._positions[symbol] = position
+                await upsert_position(symbol, "KIS", position)
+                await insert_trade(symbol, "KIS", "BUY", float(qty), current_price, strategy_name, signal.reason)
+                sim_log.push(symbol, f"매수 체결 {qty}주 @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
 
-            # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
-            sl_rate = tp_rate = None
-            if self._use_atr_risk:
-                from backend.ml.agents import AGENTS
-                atr_vals = [a._last_atr_pct for a in AGENTS.values() if a.market == "stock" and a._last_atr_pct > 0.001]
-                if atr_vals:
-                    atr = sum(atr_vals) / len(atr_vals)
-                    sl_rate = -(atr * 1.5)
-                    tp_rate = atr * 2.0
-
-            position = RiskManager.open_position(
-                symbol=symbol,
-                entry_price=current_price,
-                qty=float(qty),
-                strategy=strategy_name,
-                is_crypto=False,
-                stop_loss_rate=sl_rate,
-                take_profit_rate=tp_rate,
-            )
-            async with self._lock:
-                self._positions[symbol] = position
-            await upsert_position(symbol, "KIS", position)
-            await insert_trade(symbol, "KIS", "BUY", float(qty), current_price, strategy_name, signal.reason)
-            sim_log.push(symbol, f"매수 체결 {qty}주 @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
-
-            logger.info(
-                "[KIS 매수] %s %d주 @ %,.0f원 | 전략: %s | %s",
-                symbol, qty, current_price, strategy_name, signal.reason,
-            )
-            await telegram.notify_buy(symbol, float(qty), current_price, strategy_name, signal.reason)
+                logger.info(
+                    "[KIS 매수] %s %d주 @ %,.0f원 | 전략: %s | %s",
+                    symbol, qty, current_price, strategy_name, signal.reason,
+                )
+                await telegram.notify_buy(symbol, float(qty), current_price, strategy_name, signal.reason)
+            finally:
+                self._pending_buys.discard(symbol)
         except Exception:
             logger.exception("[KIS][%s] 매수 실행 중 예외", symbol)
 
@@ -496,7 +502,15 @@ class TradingScheduler:
         current_price: float,
     ) -> None:
         try:
-            qty = int(position.qty)
+            # 이중 매도 방지: 락 아래서 포지션 먼저 제거 (kis_tick + kis_eod 동시 실행 시)
+            async with self._lock:
+                if symbol not in self._positions:
+                    logger.warning("[KIS][%s] 매도 중복 차단 (이미 청산됨)", symbol)
+                    return
+                self._positions.pop(symbol)
+            self._dca_state.pop(symbol, None)
+
+            qty = max(1, round(position.qty))
             await kis.place_sell_order(symbol, qty)
 
             profit_rate = (current_price - position.entry_price) / position.entry_price
@@ -507,10 +521,6 @@ class TradingScheduler:
             await insert_trade(symbol, "KIS", "SELL", float(qty), current_price, position.strategy, reason, profit_rate)
             sim_log.push(symbol, f"매도 체결 {qty}주 @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(symbol, float(qty), current_price, profit_rate, reason)
-
-            async with self._lock:
-                self._positions.pop(symbol, None)
-            self._dca_state.pop(symbol, None)
             await delete_position(symbol)
         except Exception:
             logger.exception("[KIS][%s] 매도 실행 중 예외", symbol)
@@ -541,6 +551,9 @@ class TradingScheduler:
             position.qty = new_qty
             position.stop_loss_price = new_avg * (1 + settings.stop_loss_rate)
             position.take_profit_price = new_avg * (1 + settings.take_profit_rate)
+            # 평균단가 낮아졌으므로 trailing stop 기준 재설정 (이익 구간 진입 전 조기청산 방지)
+            position.highest_price = new_avg
+            position.trailing_stop_price = new_avg * (1 - settings.trailing_stop_rate)
             async with self._lock:
                 self._positions[symbol] = position
             await upsert_position(symbol, "KIS", position)
@@ -688,57 +701,61 @@ class TradingScheduler:
         strategy_name: str,
     ) -> None:
         try:
-            # TOCTOU 방지: 주문 전 포지션 재확인 (락 안에서)
+            # TOCTOU 방지: 포지션 체크 + pending 마킹을 동일 락 안에서 원자적으로
             async with self._lock:
-                if ticker in self._positions:
-                    logger.warning("[Upbit][%s] 중복매수 차단 (포지션 이미 존재)", ticker)
+                if ticker in self._positions or ticker in self._pending_buys:
+                    logger.warning("[Upbit][%s] 중복매수 차단 (포지션 이미 존재 또는 주문 진행 중)", ticker)
+                    return
+                self._pending_buys.add(ticker)
+
+            try:
+                balance = await upbit.get_balance()
+                krw = float(balance["krw"])
+                total_budget = krw * settings.max_position_ratio
+                amount_krw = total_budget * 0.40  # DCA 1차: 총 예산의 40%
+
+                if amount_krw < 5_000:
+                    logger.warning("[Upbit][%s] 매수 불가: 잔액 부족 (%.0f원)", ticker, krw)
                     return
 
-            balance = await upbit.get_balance()
-            krw = float(balance["krw"])
-            total_budget = krw * settings.max_position_ratio
-            amount_krw = total_budget * 0.40  # DCA 1차: 총 예산의 40%
+                await upbit.place_buy_order(ticker, amount_krw)
 
-            if amount_krw < 5_000:
-                logger.warning("[Upbit][%s] 매수 불가: 잔액 부족 (%.0f원)", ticker, krw)
-                return
+                # qty는 추정값 (실제 체결 수량은 주문 체결 후 확정됨)
+                qty = amount_krw / current_price
+                self._dca_state[ticker] = {"stage": 1, "total_budget": total_budget}
 
-            await upbit.place_buy_order(ticker, amount_krw)
+                # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
+                sl_rate = tp_rate = None
+                if self._use_atr_risk:
+                    from backend.ml.agents import AGENTS
+                    atr_vals = [a._last_atr_pct for a in AGENTS.values() if a.market == "coin" and a._last_atr_pct > 0.001]
+                    if atr_vals:
+                        atr = sum(atr_vals) / len(atr_vals)
+                        sl_rate = -(atr * 1.5)
+                        tp_rate = atr * 2.0
 
-            # qty는 추정값 (실제 체결 수량은 주문 체결 후 확정됨)
-            qty = amount_krw / current_price
-            self._dca_state[ticker] = {"stage": 1, "total_budget": total_budget}
+                position = RiskManager.open_position(
+                    symbol=ticker,
+                    entry_price=current_price,
+                    qty=qty,
+                    strategy=strategy_name,
+                    is_crypto=True,
+                    stop_loss_rate=sl_rate,
+                    take_profit_rate=tp_rate,
+                )
+                async with self._lock:
+                    self._positions[ticker] = position
+                await upsert_position(ticker, "UPBIT", position)
+                await insert_trade(ticker, "UPBIT", "BUY", qty, current_price, strategy_name, signal.reason)
+                sim_log.push(ticker, f"매수 체결 {qty:.6f} @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
 
-            # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
-            sl_rate = tp_rate = None
-            if self._use_atr_risk:
-                from backend.ml.agents import AGENTS
-                atr_vals = [a._last_atr_pct for a in AGENTS.values() if a.market == "coin" and a._last_atr_pct > 0.001]
-                if atr_vals:
-                    atr = sum(atr_vals) / len(atr_vals)
-                    sl_rate = -(atr * 1.5)
-                    tp_rate = atr * 2.0
-
-            position = RiskManager.open_position(
-                symbol=ticker,
-                entry_price=current_price,
-                qty=qty,
-                strategy=strategy_name,
-                is_crypto=True,
-                stop_loss_rate=sl_rate,
-                take_profit_rate=tp_rate,
-            )
-            async with self._lock:
-                self._positions[ticker] = position
-            await upsert_position(ticker, "UPBIT", position)
-            await insert_trade(ticker, "UPBIT", "BUY", qty, current_price, strategy_name, signal.reason)
-            sim_log.push(ticker, f"매수 체결 {qty:.6f} @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
-
-            logger.info(
-                "[Upbit 매수] %s %.8f @ %.0f원 | 전략: %s | %s",
-                ticker, qty, current_price, strategy_name, signal.reason,
-            )
-            await telegram.notify_buy(ticker, qty, current_price, strategy_name, signal.reason, is_crypto=True)
+                logger.info(
+                    "[Upbit 매수] %s %.8f @ %.0f원 | 전략: %s | %s",
+                    ticker, qty, current_price, strategy_name, signal.reason,
+                )
+                await telegram.notify_buy(ticker, qty, current_price, strategy_name, signal.reason, is_crypto=True)
+            finally:
+                self._pending_buys.discard(ticker)
         except Exception:
             logger.exception("[Upbit][%s] 매수 실행 중 예외", ticker)
 
@@ -770,6 +787,9 @@ class TradingScheduler:
             position.qty                = new_qty
             position.stop_loss_price    = new_avg * (1 + settings.stop_loss_rate)
             position.take_profit_price  = new_avg * (1 + settings.take_profit_rate)
+            # 평균단가 낮아졌으므로 trailing stop 기준 재설정 (이익 구간 진입 전 조기청산 방지)
+            position.highest_price       = new_avg
+            position.trailing_stop_price = new_avg * (1 - settings.trailing_stop_rate)
 
             async with self._lock:
                 self._positions[ticker] = position
@@ -790,6 +810,14 @@ class TradingScheduler:
         current_price: float,
     ) -> None:
         try:
+            # 이중 매도 방지: 락 아래서 포지션 먼저 제거
+            async with self._lock:
+                if ticker not in self._positions:
+                    logger.warning("[Upbit][%s] 매도 중복 차단 (이미 청산됨)", ticker)
+                    return
+                self._positions.pop(ticker)
+            self._dca_state.pop(ticker, None)
+
             await upbit.place_sell_order(ticker, position.qty)
 
             profit_rate = (current_price - position.entry_price) / position.entry_price
@@ -800,10 +828,6 @@ class TradingScheduler:
             await insert_trade(ticker, "UPBIT", "SELL", position.qty, current_price, position.strategy, reason, profit_rate)
             sim_log.push(ticker, f"매도 체결 {position.qty:.6f} @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(ticker, position.qty, current_price, profit_rate, reason, is_crypto=True)
-
-            async with self._lock:
-                self._positions.pop(ticker, None)
-            self._dca_state.pop(ticker, None)
             await delete_position(ticker)
         except Exception:
             logger.exception("[Upbit][%s] 매도 실행 중 예외", ticker)
@@ -825,7 +849,7 @@ class TradingScheduler:
         from backend.api import upbit as _upbit
         from backend.api import kis as _kis
         from backend.ml.agents import AGENTS
-        from backend.db.database import DB_PATH
+        from backend.db.database import connect_db
         import aiosqlite
 
         now = datetime.now(KST)
@@ -948,7 +972,7 @@ class TradingScheduler:
         if _fresh_btc:
             self._btc_ohlcv_cache = _fresh_btc
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with connect_db() as db:
             for agent in AGENTS.values():
                 try:
                     if agent.market == "coin":
@@ -1226,9 +1250,9 @@ class TradingScheduler:
 
         # ── 에이전트 거래 결과 조회 (수익/손실 패턴 흡수용) ─────────
         import aiosqlite
-        from backend.db.database import DB_PATH
+        from backend.db.database import connect_db
         agent_trade_results: dict[str, list[dict]] = {}
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with connect_db() as db:
             db.row_factory = aiosqlite.Row
             for agent in AGENTS.values():
                 async with db.execute(
@@ -1260,7 +1284,7 @@ class TradingScheduler:
                     logger.info(
                         "[Retrain][%s] 거래 결과 %d건 로드 (수익: %d건)",
                         agent.agent_id, len(rows),
-                        sum(1 for r in rows if (r["profit_rate"] or 0) > 0),
+                        sum(1 for r in rows if float(r["profit_rate"] or 0) > 0),
                     )
 
         # ── 에이전트별 재학습 ────────────────────────────────────
@@ -1317,13 +1341,13 @@ class TradingScheduler:
         수익률 > +5%: 임계값/활성 상태 정상 복구
         """
         from backend.ml.agents import AGENTS, AGENT_CONFIGS
-        from backend.db.database import DB_PATH
+        from backend.db.database import connect_db
         import aiosqlite
 
         default_thresholds = {cfg[0]: cfg[3] for cfg in AGENT_CONFIGS}
         adjustments: list[str] = []
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with connect_db() as db:
             for agent in AGENTS.values():
                 if agent.total_trades < 20:
                     continue  # 거래 수 부족 → 판단 보류

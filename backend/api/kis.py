@@ -197,7 +197,7 @@ async def get_daily_ohlcv(symbol: str, count: int = 30) -> list[dict[str, Any]]:
         },
         force_live=True,
     )
-    rows = data.get("output2", [])[:count]
+    rows = (data.get("output2") or [])[:count]
     return [
         {
             "date": r["stck_bsop_date"],
@@ -417,7 +417,7 @@ async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200)
             logger.warning("[KIS] %s 분봉 조회 실패: %s", symbol, e)
             break
 
-        rows = data.get("output2", [])
+        rows = data.get("output2") or []
         if not rows:
             break
 
@@ -489,8 +489,8 @@ async def get_balance() -> dict[str, Any]:
             "CTX_AREA_NK100": "",
         },
     )
-    output1 = data.get("output1", [])
-    output2 = data.get("output2", [{}])[0]
+    output1 = data.get("output1") or []
+    output2 = (data.get("output2") or [{}])[0]
 
     holdings = [
         {

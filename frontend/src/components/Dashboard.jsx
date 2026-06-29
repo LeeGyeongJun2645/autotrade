@@ -55,9 +55,9 @@ function MLSignalRow({ symbol, data }) {
       <td className="px-4 py-2">
         <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${b.cls}`}>{b.label}</span>
       </td>
-      <td className="px-4 py-2 font-mono text-sm">{(data.buy_prob * 100).toFixed(1)}%</td>
-      <td className={`px-4 py-2 font-mono text-sm ${data.news_score > 0.05 ? 'text-green-400' : data.news_score < -0.05 ? 'text-red-400' : 'text-gray-400'}`}>
-        {data.news_score > 0 ? '+' : ''}{data.news_score.toFixed(3)}
+      <td className="px-4 py-2 font-mono text-sm">{data.buy_prob != null ? `${(data.buy_prob * 100).toFixed(1)}%` : '—'}</td>
+      <td className={`px-4 py-2 font-mono text-sm ${(data.news_score ?? 0) > 0.05 ? 'text-green-400' : (data.news_score ?? 0) < -0.05 ? 'text-red-400' : 'text-gray-400'}`}>
+        {data.news_score != null ? `${data.news_score > 0 ? '+' : ''}${data.news_score.toFixed(3)}` : '—'}
       </td>
       <td className={`px-4 py-2 text-xs ${fg ? fg.cls : 'text-gray-600'}`}>
         {fg ? fg.text : '—'}

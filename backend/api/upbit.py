@@ -252,9 +252,12 @@ async def get_ohlcv(
     url = f"{_BASE}/candles/{interval}"
     result: list[dict] = []
     to_param: str | None = None
+    max_pages = max(1, (count + 199) // 200) + 1  # 필요 페이지 수 + 여유 1
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        while len(result) < count:
+        for _ in range(max_pages):
+            if len(result) >= count:
+                break
             fetch = min(200, count - len(result))
             params: dict = {"market": ticker, "count": fetch}
             if to_param:
@@ -275,7 +278,9 @@ async def get_ohlcv(
 
             # 다음 페이지: 마지막 캔들의 시간 기준
             oldest = data[-1]["candle_date_time_utc"]
-            to_param = oldest  # 이 시각 이전 캔들 조회
+            if oldest == to_param:  # 진전 없음 → 무한루프 방지
+                break
+            to_param = oldest
 
     if not result:
         raise ValueError(f"캔들 데이터 없음: {ticker} / {interval}")

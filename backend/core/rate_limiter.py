@@ -23,17 +23,19 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        """호출 허용 슬롯이 생길 때까지 대기 후 진입."""
-        async with self._lock:
-            now = time.monotonic()
-            self._calls = [t for t in self._calls if now - t < self._period]
+        """호출 허용 슬롯이 생길 때까지 대기 후 진입.
 
-            if len(self._calls) >= self._max_calls:
-                sleep_for = self._period - (now - self._calls[0])
-                if sleep_for > 0:
-                    await asyncio.sleep(sleep_for)
-                # sleep 후 재-prune: 여러 건이 동시에 만료됐을 수 있음
+        Lock 외부에서 sleep: sleep 동안 다른 요청이 lock을 획득할 수 있어
+        직렬 대기 없이 각자 대기 후 슬롯을 공정하게 획득.
+        """
+        while True:
+            async with self._lock:
                 now = time.monotonic()
                 self._calls = [t for t in self._calls if now - t < self._period]
-
-            self._calls.append(time.monotonic())
+                if len(self._calls) < self._max_calls:
+                    self._calls.append(time.monotonic())
+                    return
+                sleep_for = self._period - (now - self._calls[0])
+            # Lock 해제 후 sleep — 다른 코루틴이 lock 획득 가능
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)

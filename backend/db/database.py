@@ -7,6 +7,7 @@
 """
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
@@ -103,14 +104,39 @@ async def init_db() -> None:
         await db.execute(_CREATE_AGENT_TRADES)
         await db.execute(_CREATE_AGENT_POSITIONS)
         await db.execute(_CREATE_AGENT_STATS)
-        # 기존 DB migration: is_active 컬럼 없으면 추가
-        try:
-            await db.execute("ALTER TABLE agent_stats ADD COLUMN is_active INTEGER DEFAULT 1")
-        except Exception:
-            pass  # 이미 존재하면 무시
+        # 기존 DB migration: 누락 컬럼 추가 (OperationalError = 이미 존재, 그 외는 재발생)
+        _migrations = [
+            "ALTER TABLE agent_stats ADD COLUMN is_active       INTEGER DEFAULT 1",
+            "ALTER TABLE agent_stats ADD COLUMN label_threshold REAL    DEFAULT 0.02",
+            "ALTER TABLE agent_stats ADD COLUMN buy_threshold   REAL    DEFAULT 0.55",
+            "ALTER TABLE agent_stats ADD COLUMN feature_set     TEXT    DEFAULT 'all'",
+            "ALTER TABLE agent_stats ADD COLUMN is_champion     INTEGER DEFAULT 0",
+            "ALTER TABLE agent_trades ADD COLUMN entry_price    REAL",
+        ]
+        for sql in _migrations:
+            try:
+                await db.execute(sql)
+            except aiosqlite.OperationalError:
+                pass  # 컬럼이 이미 존재하면 무시
+        # 조회 성능용 인덱스 (IF NOT EXISTS로 멱등)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_trades_agent ON agent_trades(agent_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_trades_ticker ON agent_trades(ticker)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_trades_at ON agent_trades(traded_at)")
         await db.commit()
     logger.info("DB 초기화 완료: %s", DB_PATH)
 
 
 def get_db_path() -> Path:
     return DB_PATH
+
+
+@asynccontextmanager
+async def connect_db():
+    """busy_timeout=5000 이 적용된 DB 연결 컨텍스트 매니저.
+
+    WAL 모드는 init_db() 에서 DB 파일에 영구 적용되므로 재설정 불필요.
+    busy_timeout 은 커넥션별 설정이므로 매번 적용해야 한다.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA busy_timeout=5000")
+        yield db

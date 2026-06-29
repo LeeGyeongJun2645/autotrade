@@ -8,10 +8,8 @@ import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 
-import aiosqlite
-
 from backend.core.risk_manager import Position
-from backend.db.database import get_db_path
+from backend.db.database import connect_db
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +42,7 @@ async def insert_trade(
     profit_rate: float | None = None,
 ) -> None:
     try:
-        async with aiosqlite.connect(get_db_path()) as db:
+        async with connect_db() as db:
             await db.execute(
                 """INSERT INTO trades (symbol, exchange, side, qty, price, strategy, reason, profit_rate)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -57,7 +55,7 @@ async def insert_trade(
 
 async def get_trades(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
     try:
-        async with aiosqlite.connect(get_db_path()) as db:
+        async with connect_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM trades ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -75,7 +73,7 @@ async def get_trades(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
 
 async def upsert_position(symbol: str, exchange: str, pos: Position) -> None:
     try:
-        async with aiosqlite.connect(get_db_path()) as db:
+        async with connect_db() as db:
             await db.execute(
                 """INSERT INTO positions
                        (symbol, exchange, entry_price, qty, stop_loss_price, take_profit_price,
@@ -112,7 +110,7 @@ async def upsert_position(symbol: str, exchange: str, pos: Position) -> None:
 
 async def delete_position(symbol: str) -> None:
     try:
-        async with aiosqlite.connect(get_db_path()) as db:
+        async with connect_db() as db:
             await db.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
             await db.commit()
     except Exception:
@@ -122,7 +120,7 @@ async def delete_position(symbol: str) -> None:
 async def load_all_positions() -> dict[str, tuple[str, Position]]:
     """DB에서 포지션 전체 복구. 반환: {symbol: (exchange, Position)}"""
     try:
-        async with aiosqlite.connect(get_db_path()) as db:
+        async with connect_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM positions")
             rows = await cursor.fetchall()

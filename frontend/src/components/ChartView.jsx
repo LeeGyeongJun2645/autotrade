@@ -151,6 +151,7 @@ function MLSignalCard({ ticker, onLoad }) {
 function CandleChart({ ticker, interval, positions, mlSignal }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
+  const roRef = useRef(null)
   const [loading, setLoading] = useState(false)
   const [info, setInfo] = useState(null)
   const posRef = useRef(positions)
@@ -237,13 +238,14 @@ function CandleChart({ ticker, interval, positions, mlSignal }) {
       chart.timeScale().fitContent()
       chartRef.current = chart
 
-      // 반응형
+      // 반응형 (roRef에 저장해 클린업 시 disconnect)
       const ro = new ResizeObserver(() => {
         if (containerRef.current && chartRef.current) {
           chartRef.current.applyOptions({ width: containerRef.current.clientWidth })
         }
       })
       ro.observe(containerRef.current)
+      roRef.current = ro
 
       // 현재가 정보
       if (candles.length >= 2) {
@@ -261,6 +263,8 @@ function CandleChart({ ticker, interval, positions, mlSignal }) {
   useEffect(() => {
     buildChart()
     return () => {
+      roRef.current?.disconnect()
+      roRef.current = null
       chartRef.current?.remove()
       chartRef.current = null
     }

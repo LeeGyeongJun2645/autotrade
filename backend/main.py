@@ -410,9 +410,9 @@ async def get_agents():
 @app.get("/agents/{agent_id}/trades", tags=["Agents"])
 async def get_agent_trades(agent_id: str, limit: int = 50):
     """특정 에이전트 가상 거래 기록 조회."""
-    from backend.db.database import DB_PATH
+    from backend.db.database import connect_db
     import aiosqlite
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect_db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM agent_trades WHERE agent_id=? ORDER BY id DESC LIMIT ?",
