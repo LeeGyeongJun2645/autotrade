@@ -165,6 +165,8 @@ class TradingScheduler:
     async def _validate_positions(self) -> None:
         """거래소 실잔고와 DB 포지션 비교 — 불일치 포지션(좀비) 자동 제거."""
         zombies: list[str] = []
+
+        # 업비트 코인 좀비 검증
         try:
             if settings.upbit_access_key:
                 bal = await upbit.get_balance()
@@ -182,6 +184,21 @@ class TradingScheduler:
                             zombies.append(symbol)
         except Exception:
             logger.warning("[좀비검증] 업비트 잔고 조회 실패, 건너뜀")
+
+        # KIS 주식 좀비 검증
+        try:
+            if settings.kis_app_key and settings.kis_app_key != "test":
+                kis_bal = await kis.get_balance()
+                kis_holdings = {h["symbol"]: int(h.get("qty", 0)) for h in kis_bal.get("holdings", [])}
+                async with self._lock:
+                    for symbol, pos in list(self._positions.items()):
+                        if symbol.startswith("KRW-"):
+                            continue
+                        actual_qty = kis_holdings.get(symbol, 0)
+                        if actual_qty < pos.qty * 0.9:  # 10% 이상 차이 → 좀비
+                            zombies.append(symbol)
+        except Exception:
+            logger.warning("[좀비검증] KIS 잔고 조회 실패, 건너뜀")
 
         for symbol in zombies:
             logger.warning("[좀비포지션] %s DB에 있으나 실잔고 없음 → 제거", symbol)
@@ -1119,7 +1136,7 @@ class TradingScheduler:
                     logger.exception("[Agent][%s] 틱 처리 실패", agent.agent_id)
 
             try:
-                await db.commit()
+                await asyncio.shield(db.commit())
             except Exception:
                 logger.exception("[Agent] DB commit 실패 — 이번 틱 데이터 롤백됨")
 

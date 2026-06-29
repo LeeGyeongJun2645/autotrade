@@ -37,5 +37,4 @@ class RateLimiter:
                     return
                 sleep_for = self._period - (now - self._calls[0])
             # Lock 해제 후 sleep — 다른 코루틴이 lock 획득 가능
-            if sleep_for > 0:
-                await asyncio.sleep(sleep_for)
+            await asyncio.sleep(max(0.001, sleep_for))

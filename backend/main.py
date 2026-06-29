@@ -464,29 +464,33 @@ async def stream(request: Request):
             if await request.is_disconnected():
                 break
 
-            positions = scheduler.get_positions()
-            yield {
-                "event": "positions",
-                "data": json.dumps(
-                    {s: asdict(p) for s, p in positions.items()},
-                    ensure_ascii=False,
-                ),
-            }
+            try:
+                positions = scheduler.get_positions()
+                yield {
+                    "event": "positions",
+                    "data": json.dumps(
+                        {s: asdict(p) for s, p in positions.items()},
+                        ensure_ascii=False,
+                    ),
+                }
 
-            yield {
-                "event": "simlog",
-                "data": json.dumps(sim_log.get_logs(50), ensure_ascii=False),
-            }
+                yield {
+                    "event": "simlog",
+                    "data": json.dumps(sim_log.get_logs(50), ensure_ascii=False),
+                }
 
-            yield {
-                "event": "mlsignal",
-                "data": json.dumps(scheduler.get_ml_signals(), ensure_ascii=False),
-            }
+                yield {
+                    "event": "mlsignal",
+                    "data": json.dumps(scheduler.get_ml_signals(), ensure_ascii=False),
+                }
 
-            yield {
-                "event": "agents",
-                "data": json.dumps(scheduler.get_agents_snapshot(), ensure_ascii=False),
-            }
+                yield {
+                    "event": "agents",
+                    "data": json.dumps(scheduler.get_agents_snapshot(), ensure_ascii=False),
+                }
+            except Exception:
+                import logging as _log
+                _log.getLogger(__name__).exception("[SSE] 이벤트 직렬화 오류")
 
             await asyncio.sleep(5)
 
