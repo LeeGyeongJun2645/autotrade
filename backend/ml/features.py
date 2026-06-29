@@ -194,8 +194,9 @@ def compute_features(
         (_tp_av * df["volume"]).groupby(_date_grp).cumsum()
         / df["volume"].groupby(_date_grp).cumsum().replace(0, np.nan)
     )
-    df["anchored_vwap_ratio"] = (close / _avwap.fillna(close) - 1)
-    df["anchored_vwap_cross"] = (close > _avwap).astype(float)
+    _avwap_filled = _avwap.fillna(close)
+    df["anchored_vwap_ratio"] = (close / _avwap_filled - 1)
+    df["anchored_vwap_cross"] = (close > _avwap_filled).astype(float)
 
     # ── 변동성 ────────────────────────────────────────────────────
     bb             = volatility.BollingerBands(close, window=20, window_dev=2)
@@ -426,9 +427,12 @@ def compute_features(
             _oi = _oi.set_index("ts").sort_index()
             _oi_val        = _oi["sumOpenInterest"].astype(float).reindex(df.index, method="ffill")
             df["oi_change_pct"]  = _oi_val.pct_change(5).fillna(0.0)
-            _oi_rising     = _oi_val.pct_change(5) > 0
-            _price_rising  = close.pct_change(5) > 0
-            df["oi_price_diverge"] = (_oi_rising != _price_rising).astype(float)
+            _oi_pct        = _oi_val.pct_change(5)
+            _price_pct     = close.pct_change(5)
+            _oi_rising     = _oi_pct > 0
+            _price_rising  = _price_pct > 0
+            _both_valid    = _oi_pct.notna() & _price_pct.notna()
+            df["oi_price_diverge"] = ((_oi_rising != _price_rising) & _both_valid).astype(float)
         except Exception:
             df["oi_change_pct"]    = 0.0
             df["oi_price_diverge"] = 0.0
@@ -494,7 +498,7 @@ def compute_features(
         _s1 = 2 * _pp - _ph
         df["dist_to_pp"] = (close / _pp.replace(0, np.nan) - 1).fillna(0.0)
         df["dist_to_r1"] = (_r1 / close.replace(0, np.nan) - 1).fillna(0.0)
-        df["dist_to_s1"] = (close / _s1.replace(0, np.nan) - 1).fillna(0.0)
+        df["dist_to_s1"] = (close / _s1.where(_s1 > 0, np.nan) - 1).fillna(0.0)
         df["above_pp"]   = (close > _pp).astype(float)
     except Exception:
         df["dist_to_pp"] = 0.0

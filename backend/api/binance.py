@@ -94,6 +94,8 @@ async def get_funding_rate(symbol: str = "BTCUSDT") -> float:
             )
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, list):
+                raise ValueError(f"FundingRate API 오류: {data}")
             rate = float(data[0]["fundingRate"]) if data else 0.0
             _FUNDING_CACHE[symbol] = (rate, now)
             return rate
@@ -122,6 +124,8 @@ async def get_historical_funding_rates(symbol: str = "BTCUSDT", limit: int = 50)
             )
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, list):
+                raise ValueError(f"펀딩비히스토리 API 오류: {data}")
             _HIST_FUNDING_CACHE[cache_key] = (data, now)
             return data
     except Exception as e:

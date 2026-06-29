@@ -200,17 +200,20 @@ async def get_daily_ohlcv(symbol: str, count: int = 30) -> list[dict[str, Any]]:
         force_live=True,
     )
     rows = (data.get("output2") or [])[:count]
-    return [
-        {
-            "date": r["stck_bsop_date"],
-            "open": int(r["stck_oprc"]),
-            "high": int(r["stck_hgpr"]),
-            "low": int(r["stck_lwpr"]),
-            "close": int(r["stck_clpr"]),
-            "volume": int(r["acml_vol"]),
-        }
-        for r in rows
-    ]
+    result = []
+    for r in rows:
+        try:
+            result.append({
+                "date":   r["stck_bsop_date"],
+                "open":   int(r["stck_oprc"]),
+                "high":   int(r["stck_hgpr"]),
+                "low":    int(r["stck_lwpr"]),
+                "close":  int(r["stck_clpr"]),
+                "volume": int(r["acml_vol"]),
+            })
+        except (KeyError, ValueError):
+            continue
+    return result
 
 
 # ── 거래량 순위 조회 ─────────────────────────────────────────────

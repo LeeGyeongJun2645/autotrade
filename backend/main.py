@@ -282,6 +282,8 @@ async def backtest(body: BacktestRequest):
     """
     if not body.symbol and not body.ticker:
         raise HTTPException(status_code=400, detail="symbol(KIS) 또는 ticker(Upbit) 중 하나를 입력하세요.")
+    if body.symbol and body.ticker:
+        raise HTTPException(status_code=400, detail="symbol과 ticker를 동시에 지정할 수 없습니다.")
 
     try:
         if body.symbol:
@@ -320,18 +322,22 @@ _UPBIT_INTERVALS = {
 }
 
 @app.get("/chart/upbit/{ticker}", tags=["Chart"])
-async def get_upbit_chart(ticker: str, interval: str = "days", count: int = 100):
+async def get_upbit_chart(
+    ticker: str,
+    interval: str = "days",
+    count: int = Query(default=100, ge=1, le=200),
+):
     """업비트 OHLCV 차트 데이터 조회."""
     if interval not in _UPBIT_INTERVALS:
         raise HTTPException(status_code=400, detail=f"허용되지 않는 interval: {interval}")
     try:
-        return await upbit.get_ohlcv(ticker, interval=interval, count=min(count, 200))
+        return await upbit.get_ohlcv(ticker, interval=interval, count=count)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 @app.get("/chart/kis/{symbol}", tags=["Chart"])
-async def get_kis_chart(symbol: str, count: int = 100):
+async def get_kis_chart(symbol: str, count: int = Query(default=100, ge=1, le=200)):
     """KIS 일봉 OHLCV 차트 데이터 조회."""
     try:
         return await kis.get_daily_ohlcv(symbol, count=min(count, 200))
@@ -433,7 +439,7 @@ async def get_agent_trades(
                 (agent_id.upper(), limit),
             )
             rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+            return [dict(r) for r in rows]
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
 
