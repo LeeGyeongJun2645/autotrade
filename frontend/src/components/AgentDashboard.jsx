@@ -569,10 +569,10 @@ function SectionSummary({ agents, market }) {
 
 // ── 마켓 섹션 ─────────────────────────────────────────────────────
 function MarketSection({ agents, market, selected, onSelect }) {
-  const isCoin   = market === 'coin'
-  const champion = agents.find(a => a.is_champion)
-  const rest     = agents.filter(a => !a.is_champion)
-  const selectedNonChampion = rest.find(a => a.agent_id === selected)
+  const isCoin       = market === 'coin'
+  const champion     = agents.find(a => a.is_champion)
+  const rest         = agents.filter(a => !a.is_champion)
+  const selectedAgent = agents.find(a => a.agent_id === selected)
 
   if (agents.length === 0) {
     return (
@@ -586,16 +586,15 @@ function MarketSection({ agents, market, selected, onSelect }) {
     <>
       <SectionSummary agents={agents} market={market} />
 
-      {/* 챔피언: 카드 + 상세(포지션·거래기록) 항상 펼침 */}
+      {/* 챔피언 카드 (클릭 시 상세 토글) */}
       {champion ? (
-        <div className="mb-4 space-y-2">
+        <div className="mb-4">
           <ChampionCard
             agent={champion}
             market={market}
-            selected={false}
-            onClick={() => {}}
+            selected={selected === champion.agent_id}
+            onClick={() => onSelect(champion.agent_id)}
           />
-          <AgentDetail agent={champion} />
         </div>
       ) : (
         <div className={`mb-4 rounded-2xl border-2 border-dashed p-4 text-center text-sm
@@ -606,7 +605,14 @@ function MarketSection({ agents, market, selected, onSelect }) {
         </div>
       )}
 
-      {/* 나머지 에이전트 카드 (클릭 시 상세 펼침) */}
+      {/* 선택된 에이전트 상세 — 카드 그리드 위에 표시 */}
+      {selectedAgent && (
+        <div className="mb-4">
+          <AgentDetail agent={selectedAgent} />
+        </div>
+      )}
+
+      {/* 나머지 에이전트 카드 */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 items-start">
         {rest.map(agent => (
           <AgentCard
@@ -617,13 +623,6 @@ function MarketSection({ agents, market, selected, onSelect }) {
           />
         ))}
       </div>
-
-      {/* 선택된 비챔피언 에이전트 상세 */}
-      {selectedNonChampion && (
-        <div className="mt-3">
-          <AgentDetail agent={selectedNonChampion} />
-        </div>
-      )}
     </>
   )
 }
