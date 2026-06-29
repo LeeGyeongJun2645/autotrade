@@ -431,7 +431,10 @@ class SimAgent:
                     random_state=42,
                     n_jobs=-1,
                 )
-            clf.fit(X_train_s, y_train, sample_weight=weights, verbose=False)
+            fit_kwargs: dict = {"sample_weight": weights}
+            if self.model_type != "lgbm":
+                fit_kwargs["verbose"] = False
+            clf.fit(X_train_s, y_train, **fit_kwargs)
 
             # Walk-Forward 검증 (50% 미만 = 랜덤보다 못함 → 학습 실패 처리)
             if X_val is not None and len(X_val) > 0:
