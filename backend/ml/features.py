@@ -133,6 +133,8 @@ def compute_features(
     Returns:
         FEATURE_NAMES 컬럼만 가진 DataFrame (NaN 행 제거됨)
     """
+    if not ohlcv_list:
+        return pd.DataFrame(columns=FEATURE_NAMES)
     df = pd.DataFrame(list(reversed(ohlcv_list)))
     df["date"] = pd.to_datetime(df["date"].astype(str).str[:19])
     df = df.set_index("date").sort_index()

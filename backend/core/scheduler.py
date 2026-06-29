@@ -502,6 +502,7 @@ class TradingScheduler:
         current_price: float,
     ) -> None:
         _saved_dca: dict | None = None
+        _order_placed = False
         try:
             # 이중 매도 방지: 락 아래서 포지션 + DCA 상태 원자적 제거
             async with self._lock:
@@ -514,6 +515,7 @@ class TradingScheduler:
 
             qty = max(1, round(position.qty))
             await kis.place_sell_order(symbol, qty)
+            _order_placed = True  # 이 시점부터 복구 불가
 
             profit_rate = (current_price - position.entry_price) / position.entry_price
             logger.info(
@@ -523,14 +525,21 @@ class TradingScheduler:
             await insert_trade(symbol, "KIS", "SELL", float(qty), current_price, position.strategy, reason, profit_rate)
             sim_log.push(symbol, f"매도 체결 {qty}주 @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(symbol, float(qty), current_price, profit_rate, reason)
-            await delete_position(symbol)
+            try:
+                await delete_position(symbol)
+            except Exception:
+                logger.exception("[KIS][%s] DB position 삭제 실패 — 다음 재시작 시 좀비 포지션 정리됨", symbol)
         except Exception:
-            # 주문 실패 시 포지션 복구 (거래소에 여전히 보유 중)
-            async with self._lock:
-                if symbol not in self._positions:
-                    self._positions[symbol] = position
-                    if _saved_dca is not None:
-                        self._dca_state[symbol] = _saved_dca
+            if not _order_placed:
+                # 주문 자체가 실패 → 포지션 복구
+                async with self._lock:
+                    if symbol not in self._positions:
+                        self._positions[symbol] = position
+                        if _saved_dca is not None:
+                            self._dca_state[symbol] = _saved_dca
+            else:
+                # 주문 체결 후 DB 기록 실패 → 복구 안 함 (재매도 방지)
+                logger.error("[KIS][%s] 매도 체결됐으나 DB 기록 실패 — 수동 확인 필요", symbol)
             logger.exception("[KIS][%s] 매도 실행 중 예외", symbol)
 
     async def _execute_kis_dca_add(
@@ -824,6 +833,7 @@ class TradingScheduler:
         current_price: float,
     ) -> None:
         _saved_dca_upbit: dict | None = None
+        _order_placed = False
         try:
             # 이중 매도 방지: 락 아래서 포지션 + DCA 상태 원자적 제거
             async with self._lock:
@@ -835,6 +845,7 @@ class TradingScheduler:
                 self._dca_state.pop(ticker, None)
 
             await upbit.place_sell_order(ticker, position.qty)
+            _order_placed = True  # 이 시점부터 복구 불가
 
             profit_rate = (current_price - position.entry_price) / position.entry_price
             logger.info(
@@ -844,14 +855,21 @@ class TradingScheduler:
             await insert_trade(ticker, "UPBIT", "SELL", position.qty, current_price, position.strategy, reason, profit_rate)
             sim_log.push(ticker, f"매도 체결 {position.qty:.6f} @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(ticker, position.qty, current_price, profit_rate, reason, is_crypto=True)
-            await delete_position(ticker)
+            try:
+                await delete_position(ticker)
+            except Exception:
+                logger.exception("[Upbit][%s] DB position 삭제 실패 — 다음 재시작 시 좀비 포지션 정리됨", ticker)
         except Exception:
-            # 주문 실패 시 포지션 복구 (거래소에 여전히 보유 중)
-            async with self._lock:
-                if ticker not in self._positions:
-                    self._positions[ticker] = position
-                    if _saved_dca_upbit is not None:
-                        self._dca_state[ticker] = _saved_dca_upbit
+            if not _order_placed:
+                # 주문 자체가 실패 → 포지션 복구
+                async with self._lock:
+                    if ticker not in self._positions:
+                        self._positions[ticker] = position
+                        if _saved_dca_upbit is not None:
+                            self._dca_state[ticker] = _saved_dca_upbit
+            else:
+                # 주문 체결 후 DB 기록 실패 → 복구 안 함 (재매도 방지)
+                logger.error("[Upbit][%s] 매도 체결됐으나 DB 기록 실패 — 수동 확인 필요", ticker)
             logger.exception("[Upbit][%s] 매도 실행 중 예외", ticker)
 
 

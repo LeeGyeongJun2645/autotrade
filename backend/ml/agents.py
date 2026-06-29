@@ -733,6 +733,8 @@ async def predict_ensemble(
     가중치 = 승률 × (1 + 총수익률).
     지금 잘하는 전략이 자동으로 발언권이 커져서 장세에 자동 적응.
     """
+    if not ohlcv_list:
+        return "hold", 0.5
     candidates = [
         a for a in AGENTS.values()
         if a.market == market and a._model is not None
