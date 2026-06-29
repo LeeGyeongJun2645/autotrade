@@ -280,7 +280,8 @@ async def get_ohlcv(
             oldest = data[-1]["candle_date_time_utc"]
             if oldest == to_param:  # 진전 없음 → 무한루프 방지
                 break
-            to_param = oldest
+            # Upbit API는 timezone suffix 필요 (없으면 KST로 해석될 수 있음)
+            to_param = oldest if oldest.endswith(("Z", "+00:00")) else oldest + "+00:00"
 
     if not result:
         raise ValueError(f"캔들 데이터 없음: {ticker} / {interval}")

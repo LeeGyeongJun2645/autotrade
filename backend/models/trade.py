@@ -8,6 +8,8 @@ import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import aiosqlite
+
 from backend.core.risk_manager import Position
 from backend.db.database import connect_db
 

@@ -115,7 +115,7 @@ function MLSignalCard({ ticker, onLoad }) {
               <span className="text-xs text-gray-400">
                 매수 확률 <span className="font-mono text-white">{(signal.buy_prob * 100).toFixed(1)}%</span>
               </span>
-              {signal.news_score !== 0 && (
+              {signal.news_score != null && signal.news_score !== 0 && (
                 <span className="text-xs text-gray-400">
                   뉴스 <span className={`font-mono ${signal.news_score > 0 ? 'text-green-400' : 'text-red-400'}`}>
                     {signal.news_score > 0 ? '+' : ''}{signal.news_score.toFixed(2)}
@@ -161,7 +161,9 @@ function CandleChart({ ticker, interval, positions, mlSignal }) {
     if (!containerRef.current) return
     setLoading(true)
 
-    // 기존 차트 완전 제거
+    // 기존 차트·ResizeObserver 완전 제거
+    roRef.current?.disconnect()
+    roRef.current = null
     if (chartRef.current) {
       chartRef.current.remove()
       chartRef.current = null

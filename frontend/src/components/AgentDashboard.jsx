@@ -29,6 +29,7 @@ const label = a => `${a.agent_id}(${FEAT_KR[a.feature_set] ?? a.feature_set})`
 
 // ── 공통 배지 ────────────────────────────────────────────────────
 function ReturnBadge({ pct, size = 'sm' }) {
+  if (pct == null) return <span className="text-gray-600 text-xs">—</span>
   const pos = pct >= 0
   const sz  = size === 'lg' ? 'text-xl' : 'text-sm'
   return (
@@ -146,7 +147,7 @@ function PosCard({ ticker, pos, isCoin }) {
       <div className="flex justify-between text-gray-400">
         <span>수량</span>
         <span className="font-mono text-gray-200">
-          {pos.qty < 1 ? pos.qty.toFixed(6) : fmt(pos.qty)}
+          {(pos.qty ?? 0) < 1 ? (pos.qty ?? 0).toFixed(6) : fmt(pos.qty ?? 0)}
         </span>
       </div>
       {/* 투자금액 */}

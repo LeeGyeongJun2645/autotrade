@@ -287,6 +287,7 @@ class SimAgent:
                 oi_hist=oi_hist,
                 taker_hist=taker_hist,
             )
+            _full_dt_index = feat_df.index  # DatetimeIndex 전체 보존 (필터 전)
             feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
             # ADX 레짐 필터 — predict()와 동일 조건으로 횡보장 샘플 제외 (train-serve skew 방지)
             if "adx_14" in feat_df.columns:
@@ -294,10 +295,13 @@ class SimAgent:
             if len(feat_df) < 50:
                 return False
 
-            # dropna 후 살아남은 원본 인덱스를 기준으로 close 추출 (중간 행 제거 시 불일치 방지)
-            feat_df_orig_idx = feat_df.index
-            close_all = pd.Series([float(c["close"]) for c in reversed(ohlcv_list)])
-            close = close_all.iloc[feat_df_orig_idx].reset_index(drop=True)
+            # close_all을 DatetimeIndex로 구성 → reindex 로 레이블 기반 정렬
+            # (iloc에 DatetimeIndex를 전달하면 나노초 정수로 해석되어 IndexError 발생)
+            close_all = pd.Series(
+                [float(c["close"]) for c in reversed(ohlcv_list)],
+                index=_full_dt_index,
+            )
+            close = close_all.reindex(feat_df.index).reset_index(drop=True)
             feat_df = feat_df.reset_index(drop=True)
 
             # ── 트리플 배리어 레이블링 ────────────────────────────────
@@ -373,7 +377,7 @@ class SimAgent:
                     n_train = len(X_train)
                     for tr in trade_results:
                         try:
-                            buy_dt = pd.Timestamp(tr["buy_at"]).round("5min").value
+                            buy_dt = pd.Timestamp(tr["buy_at"]).round("5min").to_datetime64()
                             idx = int(np.searchsorted(ohlcv_dates_arr, buy_dt))
                             if idx >= n_train:
                                 continue

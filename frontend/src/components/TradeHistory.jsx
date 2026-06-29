@@ -62,7 +62,7 @@ function BacktestPanel() {
     }
   }
 
-  const fmtPct = (v, sign = true) => `${sign && v > 0 ? '+' : ''}${v.toFixed(2)}%`
+  const fmtPct = (v, sign = true) => v == null ? '—' : `${sign && v > 0 ? '+' : ''}${v.toFixed(2)}%`
   const fmtKrw = (v) => `${Number(v).toLocaleString('ko-KR')}원`
 
   return (
@@ -275,7 +275,7 @@ function TradeLogPanel() {
                     {t.strategy?.replace('_', ' ') ?? '—'}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">
-                    {t.exchange === 'UPBIT' ? t.qty.toFixed(6) : `${t.qty}주`}
+                    {t.exchange === 'UPBIT' ? (t.qty ?? 0).toFixed(6) : `${t.qty ?? 0}주`}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">{fmt(Math.round(t.price))}원</td>
                   <td className={`px-4 py-3 font-mono text-xs ${t.profit_rate == null ? 'text-gray-500' : t.profit_rate >= 0 ? 'text-green-400' : 'text-red-400'}`}>

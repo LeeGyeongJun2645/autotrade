@@ -496,14 +496,14 @@ async def get_balance() -> dict[str, Any]:
         {
             "symbol": h["pdno"],
             "name": h["prdt_name"],
-            "qty": int(h["hldg_qty"]),
-            "avg_price": int(float(h["pchs_avg_pric"])),
-            "current_price": int(h["prpr"]),
-            "eval_profit_loss": int(h["evlu_pfls_amt"]),
-            "profit_rate": float(h["evlu_pfls_rt"]),
+            "qty": int(float(h.get("hldg_qty") or 0)),
+            "avg_price": int(float(h.get("pchs_avg_pric") or 0)),
+            "current_price": int(float(h.get("prpr") or 0)),
+            "eval_profit_loss": int(float(h.get("evlu_pfls_amt") or 0)),
+            "profit_rate": float(h.get("evlu_pfls_rt") or 0),
         }
         for h in output1
-        if int(h.get("hldg_qty", 0)) > 0
+        if int(float(h.get("hldg_qty") or 0)) > 0
     ]
 
     return {

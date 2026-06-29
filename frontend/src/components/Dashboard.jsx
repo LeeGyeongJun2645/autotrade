@@ -201,11 +201,11 @@ export default function Dashboard({ sse }) {
                       <td className="px-4 py-3 font-mono font-semibold text-white">{symbol}</td>
                       <td className="px-4 py-3">
                         <span className="bg-indigo-900/60 text-indigo-300 text-xs px-2 py-0.5 rounded">
-                          {pos.strategy.replace('_', ' ')}
+                          {(pos.strategy ?? '—').replace('_', ' ')}
                         </span>
                       </td>
                       <td className="px-4 py-3 font-mono">
-                        {pos.is_crypto ? pos.qty.toFixed(8) : `${pos.qty}주`}
+                        {pos.is_crypto ? (pos.qty ?? 0).toFixed(8) : `${pos.qty ?? 0}주`}
                       </td>
                       <td className="px-4 py-3 font-mono">{fmt(Math.round(pos.entry_price))}원</td>
                       <td className="px-4 py-3 font-mono text-red-400">{fmt(Math.round(pos.stop_loss_price))}원</td>

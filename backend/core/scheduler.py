@@ -502,13 +502,13 @@ class TradingScheduler:
         current_price: float,
     ) -> None:
         try:
-            # 이중 매도 방지: 락 아래서 포지션 먼저 제거 (kis_tick + kis_eod 동시 실행 시)
+            # 이중 매도 방지: 락 아래서 포지션 + DCA 상태 원자적 제거
             async with self._lock:
                 if symbol not in self._positions:
                     logger.warning("[KIS][%s] 매도 중복 차단 (이미 청산됨)", symbol)
                     return
                 self._positions.pop(symbol)
-            self._dca_state.pop(symbol, None)
+                self._dca_state.pop(symbol, None)
 
             qty = max(1, round(position.qty))
             await kis.place_sell_order(symbol, qty)
@@ -625,7 +625,8 @@ class TradingScheduler:
                     _funding = await get_funding_rate("BTCUSDT")
                     _recent_oi = [float(d["sumOpenInterest"]) for d in self._btc_oi_hist[-6:]]
                     if len(_recent_oi) >= 2:
-                        _oi_chg = (_recent_oi[-1] - _recent_oi[0]) / (_recent_oi[0] or 1)
+                        _oi_base = _recent_oi[0]
+                        _oi_chg = (_recent_oi[-1] - _oi_base) / _oi_base if _oi_base > 0 else 0.0
                         if _oi_chg > 0.03 and _funding > 0.003:
                             sim_log.push(ticker, f"OI 급등({_oi_chg:.1%}) + 고펀딩비({_funding:.4f}) → 강제청산", "SELL")
                             await self._execute_upbit_sell(ticker, position, "OI_EXTREME_LONG_FLUSH", current_price)
@@ -810,13 +811,13 @@ class TradingScheduler:
         current_price: float,
     ) -> None:
         try:
-            # 이중 매도 방지: 락 아래서 포지션 먼저 제거
+            # 이중 매도 방지: 락 아래서 포지션 + DCA 상태 원자적 제거
             async with self._lock:
                 if ticker not in self._positions:
                     logger.warning("[Upbit][%s] 매도 중복 차단 (이미 청산됨)", ticker)
                     return
                 self._positions.pop(ticker)
-            self._dca_state.pop(ticker, None)
+                self._dca_state.pop(ticker, None)
 
             await upbit.place_sell_order(ticker, position.qty)
 
