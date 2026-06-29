@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { api } from '../api.js'
 
 // ── 상수 ────────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ function StrategyInfo({ featureSet }) {
 }
 
 // ── 거래 행 ──────────────────────────────────────────────────────
-function TradeRow({ t }) {
+function TradeRow({ t, stockNames = {} }) {
   const isBuy  = t.action === 'BUY'
   const pr     = t.profit_rate != null ? t.profit_rate * 100 : null
   const invest = isBuy
@@ -77,8 +77,10 @@ function TradeRow({ t }) {
 
   return (
     <tr className="border-b border-gray-700/40 text-xs hover:bg-gray-700/20">
-      <td className="px-2 py-1.5 font-mono font-semibold text-gray-200">
-        {t.ticker?.replace('KRW-', '')}
+      <td className="px-2 py-1.5 font-semibold text-gray-200">
+        {stockNames[t.ticker]
+          ? <><span>{stockNames[t.ticker]}</span><span className="text-gray-600 ml-1 font-normal">{t.ticker}</span></>
+          : <span className="font-mono">{t.ticker?.replace('KRW-', '')}</span>}
       </td>
       <td className="px-2 py-1.5">
         <span className={`font-semibold ${isBuy ? 'text-green-400' : 'text-red-400'}`}>
@@ -169,7 +171,7 @@ function PosCard({ ticker, pos, isCoin }) {
 }
 
 // ── 에이전트 상세 패널 ────────────────────────────────────────────
-function AgentDetail({ agent }) {
+function AgentDetail({ agent, stockNames = {} }) {
   const [dbTrades, setDbTrades] = useState(null)
   const [loading,  setLoading]  = useState(false)
   const isCoin   = agent.market === 'coin'
@@ -315,7 +317,7 @@ function AgentDetail({ agent }) {
                 </tr>
               </thead>
               <tbody>
-                {trades.map((t) => <TradeRow key={`${t.id ?? t.traded_at}-${t.ticker}`} t={t} />)}
+                {trades.map((t) => <TradeRow key={`${t.id ?? t.traded_at}-${t.ticker}`} t={t} stockNames={stockNames} />)}
               </tbody>
             </table>
           </div>
@@ -568,7 +570,7 @@ function SectionSummary({ agents, market }) {
 }
 
 // ── 마켓 섹션 ─────────────────────────────────────────────────────
-function MarketSection({ agents, market, selected, onSelect }) {
+function MarketSection({ agents, market, selected, onSelect, stockNames }) {
   const isCoin       = market === 'coin'
   const champion     = agents.find(a => a.is_champion)
   const rest         = agents.filter(a => !a.is_champion)
@@ -608,7 +610,7 @@ function MarketSection({ agents, market, selected, onSelect }) {
       {/* 선택된 에이전트 상세 — 카드 그리드 위에 표시 */}
       {selectedAgent && (
         <div className="mb-4">
-          <AgentDetail agent={selectedAgent} />
+          <AgentDetail agent={selectedAgent} stockNames={stockNames} />
         </div>
       )}
 
@@ -629,7 +631,12 @@ function MarketSection({ agents, market, selected, onSelect }) {
 
 // ── 메인 ──────────────────────────────────────────────────────────
 export default function AgentDashboard({ agents }) {
-  const [selected, setSelected] = useState(null)
+  const [selected,    setSelected]    = useState(null)
+  const [stockNames,  setStockNames]  = useState({})
+
+  useEffect(() => {
+    api.get('/stock-names').then(setStockNames).catch(() => {})
+  }, [])
 
   const coinAgents    = agents.filter(a => a.market === 'coin')
   const stockAgents   = agents.filter(a => a.market === 'stock')
@@ -694,7 +701,7 @@ export default function AgentDashboard({ agents }) {
             {coinAgents.reduce((s, a) => s + a.total_trades, 0)}회
           </span>
         </div>
-        <MarketSection agents={coinAgents} market="coin" selected={selected} onSelect={handleClick} />
+        <MarketSection agents={coinAgents} market="coin" selected={selected} onSelect={handleClick} stockNames={stockNames} />
       </div>
 
       {/* 구분선 */}
@@ -710,7 +717,7 @@ export default function AgentDashboard({ agents }) {
             {stockAgents.reduce((s, a) => s + a.total_trades, 0)}회
           </span>
         </div>
-        <MarketSection agents={stockAgents} market="stock" selected={selected} onSelect={handleClick} />
+        <MarketSection agents={stockAgents} market="stock" selected={selected} onSelect={handleClick} stockNames={stockNames} />
       </div>
 
     </div>

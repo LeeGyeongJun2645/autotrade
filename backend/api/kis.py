@@ -220,6 +220,7 @@ async def get_daily_ohlcv(symbol: str, count: int = 30) -> list[dict[str, Any]]:
 
 _VOLUME_RANK_CACHE: tuple[list[str], float] | None = None
 _VOLUME_RANK_TTL = 300.0  # 5분 캐시
+_STOCK_NAMES: dict[str, str] = {}  # code → 한글 종목명 캐시
 
 
 async def get_volume_rank(n: int = 50) -> list[str]:
@@ -252,7 +253,14 @@ async def get_volume_rank(n: int = 50) -> list[str]:
             },
             force_live=True,
         )
-        symbols = [row["mksc_shrn_iscd"] for row in data.get("output", []) if row.get("mksc_shrn_iscd")]
+        symbols = []
+        for row in data.get("output", []):
+            code = row.get("mksc_shrn_iscd", "")
+            name = row.get("hts_kor_isnm", "")
+            if code:
+                symbols.append(code)
+                if name:
+                    _STOCK_NAMES[code] = name
         _VOLUME_RANK_CACHE = (symbols, now)
         logger.debug("[KIS] 거래량 상위 %d개: %s", n, symbols[:n])
         return symbols[:n]
@@ -261,6 +269,11 @@ async def get_volume_rank(n: int = 50) -> list[str]:
         if _VOLUME_RANK_CACHE:
             return _VOLUME_RANK_CACHE[0][:n]
         return []
+
+
+def get_stock_names() -> dict[str, str]:
+    """캐시된 종목코드 → 한글 종목명 매핑 반환."""
+    return dict(_STOCK_NAMES)
 
 
 # ── 호가창 조회 ──────────────────────────────────────────────────

@@ -161,6 +161,12 @@ async def get_upbit_balance():
 
 # ── 현재가 조회 ──────────────────────────────────────────────────
 
+@app.get("/stock-names", tags=["Price"])
+async def stock_names():
+    """KIS 거래량 상위 종목의 종목코드 → 한글 종목명 매핑 반환."""
+    return kis.get_stock_names()
+
+
 @app.get("/price/kis/{symbol}", tags=["Price"])
 async def get_kis_price(symbol: str):
     """KIS 국내 주식 현재가 조회.
