@@ -518,16 +518,19 @@ function AgentCard({ agent, onClick, selected }) {
 
 // ── 섹션 요약 ─────────────────────────────────────────────────────
 function SectionSummary({ agents, market }) {
-  const active   = agents.filter(a => a.total_trades > 0)
-  const bestVal  = active.length
+  const active    = agents.filter(a => a.total_trades > 0)
+  const bestVal   = active.length
     ? Math.max(...active.map(a => a.total_value ?? a.balance))
     : INITIAL
-  const total    = agents.reduce((s, a) => s + a.total_trades, 0)
-  const champ    = agents.find(a => a.is_champion)
-  const isCoin   = market === 'coin'
+  const champ     = agents.find(a => a.is_champion)
+  const isCoin    = market === 'coin'
+
+  // total_trades = 매도 완료 건수, 미청산 포지션 = 매수 후 미매도
+  const totalSells = agents.reduce((s, a) => s + a.total_trades, 0)
+  const totalBuys  = agents.reduce((s, a) => s + a.total_trades + Object.keys(a.positions ?? {}).length, 0)
 
   return (
-    <div className={`grid grid-cols-4 gap-3 mb-4 p-3 rounded-lg
+    <div className={`grid grid-cols-5 gap-3 mb-4 p-3 rounded-lg
       ${isCoin
         ? 'bg-yellow-900/10 border border-yellow-800/30'
         : 'bg-blue-900/10 border border-blue-800/30'}`}>
@@ -539,8 +542,12 @@ function SectionSummary({ agents, market }) {
         </p>
       </div>
       <div>
-        <p className="text-xs text-gray-500">총 거래</p>
-        <p className="font-bold text-white">{total}회</p>
+        <p className="text-xs text-gray-500">총 매수</p>
+        <p className="font-bold text-green-400">{totalBuys}건</p>
+      </div>
+      <div>
+        <p className="text-xs text-gray-500">총 매도</p>
+        <p className="font-bold text-red-400">{totalSells}건</p>
       </div>
       <div>
         <p className="text-xs text-gray-500">최고 총평가액</p>
