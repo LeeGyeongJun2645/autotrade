@@ -223,7 +223,6 @@ async def get_volume_rank(n: int = 50) -> list[str]:
     장 중에만 의미있는 데이터를 반환. 장 마감 후에는 캐시된 값 사용.
     """
     global _VOLUME_RANK_CACHE
-    import time
     now = time.time()
     if _VOLUME_RANK_CACHE and now - _VOLUME_RANK_CACHE[1] < _VOLUME_RANK_TTL:
         return _VOLUME_RANK_CACHE[0][:n]

@@ -686,7 +686,7 @@ export default function AgentDashboard({ agents }) {
           return (
             <button
               key={t.key}
-              onClick={() => { setActiveMarket(t.key); setSelected(null) }}
+              onClick={() => { if (activeMarket !== t.key) { setActiveMarket(t.key); setSelected(null) } }}
               className={`px-5 py-3 text-sm font-semibold border-b-2 transition-all flex items-center gap-2
                 ${active
                   ? t.activeBg
