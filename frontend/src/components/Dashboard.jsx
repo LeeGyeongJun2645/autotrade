@@ -71,6 +71,7 @@ export default function Dashboard({ sse }) {
   const { positions, mlSignals, connected, error } = sse
   const [kisBalance, setKisBalance] = useState(null)
   const [upbitBalance, setUpbitBalance] = useState(null)
+  const [upbitError, setUpbitError] = useState(null)
   const [loading, setLoading] = useState(true)
 
   const fetchBalances = useCallback(async () => {
@@ -83,8 +84,9 @@ export default function Dashboard({ sse }) {
     try {
       const upbit = await api.get('/balance/upbit')
       setUpbitBalance(upbit)
-    } catch {
-      // Upbit 키 미설정 시 무시
+      setUpbitError(null)
+    } catch (e) {
+      setUpbitError(e?.message || 'API 오류')
     }
     setLoading(false)
   }, [])
@@ -135,7 +137,7 @@ export default function Dashboard({ sse }) {
               ))}
             </>
           ) : (
-            <p className="text-gray-500 text-sm">Upbit API 키 미설정</p>
+            <p className="text-gray-500 text-sm">{upbitError ?? 'Upbit API 키 미설정'}</p>
           )}
         </BalanceCard>
       </div>

@@ -404,7 +404,7 @@ function AgentCard({ agent, onClick, selected }) {
   return (
     <div
       onClick={onClick}
-      className={`rounded-xl p-3 border cursor-pointer transition-all
+      className={`rounded-xl p-3 border cursor-pointer transition-all flex flex-col
         ${noTrades
           ? 'bg-gray-800/40 border-gray-700/40'
           : 'bg-gray-800 border-gray-700 hover:border-gray-500'}
@@ -585,7 +585,7 @@ function MarketSection({ agents, market, selected, onSelect }) {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 items-start">
         {rest.map(agent => (
           <AgentCard
             key={agent.agent_id}

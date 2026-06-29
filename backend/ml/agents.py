@@ -13,6 +13,7 @@ import pickle
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -442,7 +443,7 @@ class SimAgent:
 
             self._model = clf
             self._scaler = scaler
-            self._trained_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
             self.save_model()
             logger.info("[%s] 모델 학습 완료 (%d샘플)", self.agent_id, len(X))
             return True
@@ -584,7 +585,7 @@ class SimAgent:
         qty = amount / actual_price
         price = actual_price  # 이하 price 변수를 실제 체결가로 통일
         self._balance -= amount
-        now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         self._positions[ticker] = AgentPosition(ticker, price, qty, now)
         trade = AgentTrade(self.agent_id, ticker, "BUY", price, qty, None, None, self._balance, now)
         self._push_recent(trade)
@@ -600,7 +601,7 @@ class SimAgent:
         self.total_trades += 1
         if profit_rate > 0:
             self.win_trades += 1
-        now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         trade = AgentTrade(self.agent_id, ticker, "SELL", price, pos.qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
         self._push_recent(trade)
         return trade

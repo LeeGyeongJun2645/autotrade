@@ -29,9 +29,14 @@ _rate_limiter = RateLimiter(max_calls=settings.kis_rate_limit_per_sec, period=1.
 
 
 class KISTokenManager:
-    """Access Token 발급 및 자동 갱신 담당."""
+    """Access Token 발급 및 자동 갱신 담당.
 
-    def __init__(self) -> None:
+    base_url: 토큰 발급 서버 URL (None이면 settings.kis_base_url 사용)
+    시세/조회 API 전용으로 live 서버 토큰을 별도 관리하기 위해 base_url 파라미터 추가.
+    """
+
+    def __init__(self, base_url: str | None = None) -> None:
+        self._base_url = base_url  # None → 런타임에 settings.kis_base_url 사용
         self._token: str | None = None
         self._expires_at: datetime = datetime.min
         self._lock = asyncio.Lock()
@@ -53,7 +58,8 @@ class KISTokenManager:
 
     async def _issue_token(self) -> None:
         """KIS OAuth2 토큰 발급 API 호출."""
-        url = f"{settings.kis_base_url}/oauth2/tokenP"
+        base = self._base_url if self._base_url is not None else settings.kis_base_url
+        url = f"{base}/oauth2/tokenP"
         payload = {
             "grant_type": "client_credentials",
             "appkey": settings.kis_app_key,
@@ -68,10 +74,13 @@ class KISTokenManager:
         # KIS 토큰 유효시간: 86400초(24시간)
         expires_in = int(data.get("expires_in", 86400))
         self._expires_at = datetime.now() + timedelta(seconds=expires_in)
-        logger.info("KIS 토큰 발급 완료. 만료: %s", self._expires_at.strftime("%Y-%m-%d %H:%M"))
+        logger.info("KIS 토큰 발급 완료 (%s). 만료: %s", base, self._expires_at.strftime("%Y-%m-%d %H:%M"))
 
 
+# 주문/잔고용: PAPER 모드에서는 paper 서버 토큰, LIVE 모드에서는 live 서버 토큰
 _token_manager = KISTokenManager()
+# 시세/조회용: 항상 실전 서버 토큰 (모의투자 서버는 시세 조회 API 미지원)
+_live_token_manager = KISTokenManager(base_url=settings.kis_base_url_live)
 
 
 async def _kis_request(
@@ -81,14 +90,16 @@ async def _kis_request(
     tr_id: str,
     params: dict | None = None,
     body: dict | None = None,
+    force_live: bool = False,
 ) -> dict[str, Any]:
     """KIS API 공통 요청 헬퍼.
 
     Rate Limiter → 토큰 주입 → 헤더 구성 → HTTP 호출 순서로 실행.
+    force_live=True: 시세/조회 API — PAPER 모드에서도 실전 서버 사용 (모의투자 서버 미지원)
     """
     await _rate_limiter.acquire()
 
-    token = await _token_manager.get_token()
+    token = await (_live_token_manager if force_live else _token_manager).get_token()
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
@@ -97,7 +108,8 @@ async def _kis_request(
         "tr_id": tr_id,
         "custtype": "P",
     }
-    url = f"{settings.kis_base_url}{path}"
+    base = settings.kis_base_url_live if force_live else settings.kis_base_url
+    url = f"{base}{path}"
 
     async with httpx.AsyncClient(timeout=10) as client:
         if method == "GET":
@@ -140,6 +152,7 @@ async def get_price(symbol: str) -> dict[str, Any]:
         "/uapi/domestic-stock/v1/quotations/inquire-price",
         tr_id=tr_id,
         params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": symbol},
+        force_live=True,
     )
     out = data["output"]
     return {
@@ -182,6 +195,7 @@ async def get_daily_ohlcv(symbol: str, count: int = 30) -> list[dict[str, Any]]:
             "fid_input_date_1": start.strftime("%Y%m%d"),
             "fid_input_date_2": today.strftime("%Y%m%d"),
         },
+        force_live=True,
     )
     rows = data.get("output2", [])[:count]
     return [
@@ -232,6 +246,7 @@ async def get_volume_rank(n: int = 50) -> list[str]:
                 "FID_VOL_CNT": "",
                 "FID_INPUT_DATE_1": "",
             },
+            force_live=True,
         )
         symbols = [row["mksc_shrn_iscd"] for row in data.get("output", []) if row.get("mksc_shrn_iscd")]
         _VOLUME_RANK_CACHE = (symbols, now)
@@ -283,6 +298,7 @@ async def get_orderbook_kis(symbol: str) -> dict:
                 "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_INPUT_ISCD": symbol,
             },
+            force_live=True,
         )
         out = data.get("output1", {})
 
@@ -340,6 +356,7 @@ async def get_investor_trend(symbol: str) -> dict:
                 "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_INPUT_ISCD": symbol,
             },
+            force_live=True,
         )
         rows = data.get("output", [])
         if not rows:
@@ -395,6 +412,7 @@ async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200)
                 "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
                 tr_id="FHKST03010200",
                 params=params,
+                force_live=True,
             )
         except Exception as e:
             logger.warning("[KIS] %s 분봉 조회 실패: %s", symbol, e)
