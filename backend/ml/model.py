@@ -86,6 +86,7 @@ async def _get_fear_greed() -> float:
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             resp = await client.get("https://api.alternative.me/fng/?limit=1")
+            resp.raise_for_status()
             data = resp.json()["data"][0]
             raw = float(data["value"])  # 0~100
             normalized = (raw - 50) / 50  # -1~+1
@@ -164,7 +165,8 @@ class XGBSignalModel:
         close = close.iloc[-n:].reset_index(drop=True)
 
         next_close = close.shift(-1)
-        label = ((next_close / close - 1) >= LABEL_THRESHOLD).astype(int)
+        safe_close = close.replace(0, float("nan"))
+        label = ((next_close / safe_close - 1) >= LABEL_THRESHOLD).fillna(False).astype(int)
         feat_df = feat_df.iloc[:-1]
         label = label.iloc[:-1]
         min_len = min(len(feat_df), len(label))
@@ -265,6 +267,9 @@ class XGBSignalModel:
         if feat_df.empty:
             raise ValueError(f"{self.ticker}: Feature 계산 실패")
 
+        missing_cols = [c for c in FEATURE_NAMES if c not in feat_df.columns]
+        if missing_cols:
+            raise ValueError(f"{self.ticker}: Feature 컬럼 {len(missing_cols)}개 누락")
         X_last = feat_df.iloc[[-1]][FEATURE_NAMES].values
         X_scaled = self._scaler.transform(X_last)  # type: ignore[union-attr]
         buy_prob = float(self._model.predict_proba(X_scaled)[0, 1])  # type: ignore[union-attr]

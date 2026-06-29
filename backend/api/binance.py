@@ -202,7 +202,7 @@ async def get_kimchi_premium(upbit_krw_price: float, binance_symbol: str = "BTCU
     양수: 한국 시장이 해외보다 비쌈 → 과열 가능성
     음수: 한국 시장이 저렴 → 저평가 가능성
     """
-    cache_key = f"{binance_symbol}:{int(upbit_krw_price)}"
+    cache_key = binance_symbol
     now = time.time()
     if cache_key in _KIMCHI_CACHE:
         premium, ts = _KIMCHI_CACHE[cache_key]

@@ -265,6 +265,8 @@ def run_backtest(
         )
     if not ohlcv_list:
         raise ValueError("OHLCV 데이터가 비어있습니다.")
+    if initial_cash <= 0:
+        raise ValueError("initial_cash 는 양수여야 합니다.")
 
     cerebro = bt.Cerebro(stdstats=False)
     cerebro.adddata(_ohlcv_to_feed(ohlcv_list))
@@ -313,7 +315,8 @@ def _build_result(
     max_dd = dd.get("max", {}).get("drawdown", 0.0)
 
     sharpe_raw = strat.analyzers.sharpe.get_analysis().get("sharperatio") or 0.0
-    sharpe = 0.0 if sharpe_raw != sharpe_raw else float(sharpe_raw)  # NaN → 0
+    _sr = float(sharpe_raw)
+    sharpe = 0.0 if (_sr != _sr or math.isinf(_sr)) else _sr  # NaN/inf → 0
 
     return BacktestResult(
         strategy=strategy_name,
