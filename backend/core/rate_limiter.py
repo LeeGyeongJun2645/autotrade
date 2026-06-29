@@ -33,7 +33,7 @@ class RateLimiter:
                 now = time.monotonic()
                 self._calls = [t for t in self._calls if now - t < self._period]
                 if len(self._calls) < self._max_calls:
-                    self._calls.append(time.monotonic())
+                    self._calls.append(now)
                     return
                 sleep_for = self._period - (now - self._calls[0])
             # Lock 해제 후 sleep — 다른 코루틴이 lock 획득 가능

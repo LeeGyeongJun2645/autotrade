@@ -484,7 +484,7 @@ class SimAgent:
         try:
             full_df = compute_features(
                 ohlcv_list,
-                funding_rates=self._cached_funding_rates or None,
+                funding_rates=self._cached_funding_rates if self._cached_funding_rates else None,
                 btc_ohlcv=btc_ohlcv,
                 kospi_ohlcv=kospi_ohlcv,
                 oi_hist=oi_hist or (self._cached_oi_hist or None),

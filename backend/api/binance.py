@@ -96,7 +96,7 @@ async def get_funding_rate(symbol: str = "BTCUSDT") -> float:
             data = resp.json()
             if not isinstance(data, list):
                 raise ValueError(f"FundingRate API 오류: {data}")
-            rate = float(data[0]["fundingRate"]) if data else 0.0
+            rate = float(data[0].get("fundingRate") or 0) if data else 0.0
             _FUNDING_CACHE[symbol] = (rate, now)
             return rate
     except Exception as e:

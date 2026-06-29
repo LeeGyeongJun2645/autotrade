@@ -216,7 +216,7 @@ def compute_features(
     # ── 거래량 ────────────────────────────────────────────────────
     vol_ma20          = vol.rolling(20).mean()
     df["vol_ratio"]   = vol / vol_ma20.replace(0, np.nan)
-    df["vol_surge"]   = vol / vol.rolling(5).mean().replace(0, np.nan)
+    df["vol_surge"]   = (vol / vol.rolling(5).mean().replace(0, np.nan)).fillna(1.0)
     df["vol_surge_flag"] = (df["vol_surge"] >= 3).astype(float)  # 3배 이상 = 급증
 
     obv               = volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()
@@ -300,7 +300,7 @@ def compute_features(
         import warnings
         from hmmlearn import hmm as _hmm_lib
         _ret_arr  = close.pct_change().fillna(0).values.reshape(-1, 1)
-        _vol_arr  = close.pct_change().rolling(5).std().bfill().fillna(0).values.reshape(-1, 1)
+        _vol_arr  = close.pct_change().rolling(5).std().fillna(0).values.reshape(-1, 1)
         _hmm_X    = np.concatenate([_ret_arr, _vol_arr], axis=1)
         if len(_hmm_X) >= 60:
             with warnings.catch_warnings():
@@ -477,10 +477,10 @@ def compute_features(
     # ── 이치모쿠 클라우드 ─────────────────────────────────────────────
     try:
         _ichi   = trend.IchimokuIndicator(high, low, window1=9, window2=26, window3=52)
-        _span_a = _ichi.ichimoku_a().ffill().bfill()
-        _span_b = _ichi.ichimoku_b().ffill().bfill()
-        _tenkan = _ichi.ichimoku_conversion_line().ffill().bfill()
-        _kijun  = _ichi.ichimoku_base_line().ffill().bfill()
+        _span_a = _ichi.ichimoku_a().ffill().fillna(close)
+        _span_b = _ichi.ichimoku_b().ffill().fillna(close)
+        _tenkan = _ichi.ichimoku_conversion_line().ffill().fillna(close)
+        _kijun  = _ichi.ichimoku_base_line().ffill().fillna(close)
         _cloud_top = pd.concat([_span_a, _span_b], axis=1).max(axis=1)
         df["ichi_above_cloud"]       = (close > _cloud_top).astype(float)
         df["ichi_cloud_green"]       = (_span_a > _span_b).astype(float)

@@ -127,7 +127,7 @@ def _google_news_url(query: str) -> str:
 
 # ── LLM 감성 분석 (OpenAI GPT-4o-mini) ──────────────────────────
 
-async def _llm_sentiment(titles: list[str], symbol: str) -> float:
+async def _llm_sentiment(titles: list[str], symbol: str) -> float | None:
     """GPT-4o-mini로 뉴스 헤드라인 감성 분석. -1.0 ~ +1.0 반환."""
     try:
         from openai import AsyncOpenAI
@@ -157,7 +157,7 @@ async def _llm_sentiment(titles: list[str], symbol: str) -> float:
         return max(-1.0, min(1.0, score))
     except Exception as e:
         logger.warning("[뉴스] LLM 감성 분석 실패, VADER 폴백: %s", e)
-        return None  # type: ignore[return-value]
+        return None
 
 
 # ── VADER 폴백 감성 점수 계산 ────────────────────────────────────

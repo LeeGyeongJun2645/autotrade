@@ -13,6 +13,7 @@
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Literal
 
 from backend.config import settings
@@ -47,7 +48,7 @@ class Position:
     highest_price: float
     trailing_stop_price: float
     strategy: str
-    opened_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    opened_at: str = field(default_factory=lambda: datetime.now(ZoneInfo("Asia/Seoul")).isoformat())
     is_crypto: bool = False
 
     @property

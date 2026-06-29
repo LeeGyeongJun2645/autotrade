@@ -44,6 +44,7 @@ def _ohlcv_to_feed(ohlcv_list: list[dict[str, Any]]) -> bt.feeds.PandasData:
     df = pd.DataFrame(list(reversed(ohlcv_list)))
     df["date"] = pd.to_datetime(df["date"].astype(str).str[:10])
     df = df.set_index("date").sort_index()
+    df = df[~df.index.duplicated(keep="last")]
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     return bt.feeds.PandasData(dataname=df)
 
@@ -122,8 +123,8 @@ class _VBStrategy(_BaseStrategy):
             if prev_range <= 0:
                 return
 
-            # 전일 종가 + 전일 레인지 × K = 당일 목표가 근사치
-            target = self.data.close[-1] + prev_range * self.params.k
+            # 당일 시가 + 전일 레인지 × K = 당일 목표가 (라이브 전략과 동일)
+            target = self.data.open[0] + prev_range * self.params.k
 
             if self.data.high[0] >= target:
                 size = self._calc_size(self.data.close[0])

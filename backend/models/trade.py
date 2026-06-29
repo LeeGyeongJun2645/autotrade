@@ -122,26 +122,25 @@ async def delete_position(symbol: str) -> None:
 async def load_all_positions() -> dict[str, tuple[str, Position]]:
     """DB에서 포지션 전체 복구. 반환: {symbol: (exchange, Position)}"""
     try:
+        result: dict[str, tuple[str, Position]] = {}
         async with connect_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM positions")
             rows = await cursor.fetchall()
-
-        result: dict[str, tuple[str, Position]] = {}
-        for r in rows:
-            pos = Position(
-                symbol=r["symbol"],
-                entry_price=r["entry_price"],
-                qty=r["qty"],
-                stop_loss_price=r["stop_loss_price"],
-                take_profit_price=r["take_profit_price"],
-                highest_price=r["highest_price"],
-                trailing_stop_price=r["trailing_stop_price"],
-                strategy=r["strategy"],
-                opened_at=r["opened_at"],
-                is_crypto=bool(r["is_crypto"]),
-            )
-            result[r["symbol"]] = (r["exchange"], pos)
+            for r in rows:
+                pos = Position(
+                    symbol=r["symbol"],
+                    entry_price=r["entry_price"],
+                    qty=r["qty"],
+                    stop_loss_price=r["stop_loss_price"],
+                    take_profit_price=r["take_profit_price"],
+                    highest_price=r["highest_price"],
+                    trailing_stop_price=r["trailing_stop_price"],
+                    strategy=r["strategy"],
+                    opened_at=r["opened_at"],
+                    is_crypto=bool(r["is_crypto"]),
+                )
+                result[r["symbol"]] = (r["exchange"], pos)
 
         if result:
             logger.info("[DB] 포지션 %d개 복구: %s", len(result), list(result.keys()))

@@ -474,7 +474,6 @@ class TradingScheduler:
                     return
 
                 await kis.place_buy_order(symbol, qty)
-                self._dca_state[symbol] = {"stage": 1, "total_qty": total_qty, "bought_qty": qty}
 
                 # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
                 sl_rate = tp_rate = None
@@ -497,6 +496,7 @@ class TradingScheduler:
                 )
                 async with self._lock:
                     self._positions[symbol] = position
+                    self._dca_state[symbol] = {"stage": 1, "total_qty": total_qty, "bought_qty": qty}
                 await upsert_position(symbol, "KIS", position)
                 await insert_trade(symbol, "KIS", "BUY", float(qty), current_price, strategy_name, signal.reason)
                 sim_log.push(symbol, f"매수 체결 {qty}주 @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
@@ -764,7 +764,6 @@ class TradingScheduler:
 
                 # qty는 추정값 (실제 체결 수량은 주문 체결 후 확정됨)
                 qty = amount_krw / current_price
-                self._dca_state[ticker] = {"stage": 1, "total_budget": total_budget}
 
                 # ATR 기반 동적 손익 (에이전트 검증 완료 후 자동 전환)
                 sl_rate = tp_rate = None
@@ -787,6 +786,7 @@ class TradingScheduler:
                 )
                 async with self._lock:
                     self._positions[ticker] = position
+                    self._dca_state[ticker] = {"stage": 1, "total_budget": total_budget}
                 await upsert_position(ticker, "UPBIT", position)
                 await insert_trade(ticker, "UPBIT", "BUY", qty, current_price, strategy_name, signal.reason)
                 sim_log.push(ticker, f"매수 체결 {qty:.6f} @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
@@ -1136,7 +1136,7 @@ class TradingScheduler:
                     logger.exception("[Agent][%s] 틱 처리 실패", agent.agent_id)
 
             try:
-                await asyncio.shield(db.commit())
+                await db.commit()
             except Exception:
                 logger.exception("[Agent] DB commit 실패 — 이번 틱 데이터 롤백됨")
 
@@ -1159,10 +1159,11 @@ class TradingScheduler:
         if symbol in agent._positions:
             pos = agent._positions[symbol]
 
-            # 보유 시간 계산
+            # 보유 시간 계산 (entered_at 에 tzinfo 있어도 safe하게 naive로 통일)
             try:
                 now_kst  = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
-                held_min = (now_kst - datetime.fromisoformat(pos.entered_at)).total_seconds() / 60
+                entered  = datetime.fromisoformat(pos.entered_at).replace(tzinfo=None)
+                held_min = (now_kst - entered).total_seconds() / 60
             except Exception:
                 held_min = 0
 

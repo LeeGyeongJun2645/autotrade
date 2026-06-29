@@ -161,13 +161,13 @@ async def get_price(symbol: str) -> dict[str, Any]:
         raise ValueError(f"[KIS] 주가 응답에 output 없음: {data.get('msg1', '—')}")
     return {
         "symbol": symbol,
-        "current_price": int(out["stck_prpr"]),
-        "open_price": int(out["stck_oprc"]),
-        "high_price": int(out["stck_hgpr"]),
-        "low_price": int(out["stck_lwpr"]),
-        "prev_close": int(out["stck_sdpr"]),
-        "volume": int(out["acml_vol"]),
-        "change_rate": float(out["prdy_ctrt"]),
+        "current_price": int(out.get("stck_prpr") or 0),
+        "open_price": int(out.get("stck_oprc") or 0),
+        "high_price": int(out.get("stck_hgpr") or 0),
+        "low_price": int(out.get("stck_lwpr") or 0),
+        "prev_close": int(out.get("stck_sdpr") or 0),
+        "volume": int(out.get("acml_vol") or 0),
+        "change_rate": float(out.get("prdy_ctrt") or 0),
     }
 
 
