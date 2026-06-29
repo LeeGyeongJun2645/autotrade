@@ -630,8 +630,7 @@ function MarketSection({ agents, market, selected, onSelect }) {
 
 // ── 메인 ──────────────────────────────────────────────────────────
 export default function AgentDashboard({ agents }) {
-  const [selected,     setSelected]     = useState(null)
-  const [activeMarket, setActiveMarket] = useState('coin')
+  const [selected, setSelected] = useState(null)
 
   const coinAgents    = agents.filter(a => a.market === 'coin')
   const stockAgents   = agents.filter(a => a.market === 'stock')
@@ -645,11 +644,6 @@ export default function AgentDashboard({ agents }) {
     : INITIAL
   const champions    = agents.filter(a => a.is_champion)
 
-  const TAB = [
-    { key: 'coin',  label: '암호화폐',  sub: 'AI01~AI10 · 24/7',     color: 'text-yellow-300', activeBg: 'border-yellow-400 text-yellow-300', agents: coinAgents },
-    { key: 'stock', label: '주식',      sub: 'AI11~AI20 · 09:00~15:30', color: 'text-blue-300',   activeBg: 'border-blue-400 text-blue-300',   agents: stockAgents },
-  ]
-
   return (
     <div className="space-y-6">
 
@@ -658,7 +652,7 @@ export default function AgentDashboard({ agents }) {
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-white text-lg">AI 에이전트 경쟁 현황</h2>
           <span className="text-xs text-gray-500">
-            5분마다 자동 갱신 · 앙상블 게이트 · 매일 03:00 전 에이전트 재학습
+            5분마다 자동 갱신 · 앙상블 게이트 · 매일 18:00 전 에이전트 재학습
           </span>
         </div>
         <div className="grid grid-cols-4 gap-4">
@@ -691,53 +685,34 @@ export default function AgentDashboard({ agents }) {
         </div>
       </div>
 
-      {/* 탭 */}
-      <div className="flex gap-1 border-b border-gray-700">
-        {TAB.map(t => {
-          const active = activeMarket === t.key
-          const tradeCount = t.agents.reduce((s, a) => s + a.total_trades, 0)
-          return (
-            <button
-              key={t.key}
-              onClick={() => { if (activeMarket !== t.key) { setActiveMarket(t.key); setSelected(null) } }}
-              className={`px-5 py-3 text-sm font-semibold border-b-2 transition-all flex items-center gap-2
-                ${active
-                  ? t.activeBg
-                  : 'border-transparent text-gray-500 hover:text-gray-300'}`}
-            >
-              {t.label}
-              <span className="text-xs font-normal opacity-70">{t.sub}</span>
-              <span className={`text-xs px-1.5 py-0.5 rounded font-mono
-                ${active
-                  ? t.key === 'coin' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-blue-900/50 text-blue-300'
-                  : 'bg-gray-700 text-gray-400'}`}>
-                {tradeCount}회
-              </span>
-            </button>
-          )
-        })}
+      {/* 암호화폐 섹션 */}
+      <div>
+        <div className="flex items-center gap-3 mb-3 pb-2 border-b border-yellow-800/40">
+          <span className="text-lg font-bold text-yellow-300">암호화폐 경쟁</span>
+          <span className="text-xs bg-yellow-900/60 text-yellow-300 px-2 py-0.5 rounded">코인 24/7</span>
+          <span className="text-xs text-gray-500">업비트 거래대금 상위 50개 · 5분봉 · AI01~AI10</span>
+          <span className="text-xs bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded font-mono ml-auto">
+            {coinAgents.reduce((s, a) => s + a.total_trades, 0)}회
+          </span>
+        </div>
+        <MarketSection agents={coinAgents} market="coin" selected={selected} onSelect={handleClick} />
       </div>
 
-      {/* 선택된 마켓 섹션 */}
-      {activeMarket === 'coin' ? (
-        <div>
-          <div className="flex items-center gap-3 mb-3">
-            <span className="text-lg font-bold text-yellow-300">암호화폐 경쟁</span>
-            <span className="text-xs bg-yellow-900/60 text-yellow-300 px-2 py-0.5 rounded">코인 24/7</span>
-            <span className="text-xs text-gray-500">업비트 거래대금 상위 50개 · 5분봉 · AI01~AI10</span>
-          </div>
-          <MarketSection agents={coinAgents} market="coin" selected={selected} onSelect={handleClick} />
+      {/* 구분선 */}
+      <div className="border-t border-gray-700" />
+
+      {/* 주식 섹션 */}
+      <div>
+        <div className="flex items-center gap-3 mb-3 pb-2 border-b border-blue-800/40">
+          <span className="text-lg font-bold text-blue-300">주식 경쟁</span>
+          <span className="text-xs bg-blue-900/60 text-blue-300 px-2 py-0.5 rounded">장중 09:00~15:30</span>
+          <span className="text-xs text-gray-500">KIS 거래량 상위 50개 · 5분봉 · AI11~AI20</span>
+          <span className="text-xs bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded font-mono ml-auto">
+            {stockAgents.reduce((s, a) => s + a.total_trades, 0)}회
+          </span>
         </div>
-      ) : (
-        <div>
-          <div className="flex items-center gap-3 mb-3">
-            <span className="text-lg font-bold text-blue-300">주식 경쟁</span>
-            <span className="text-xs bg-blue-900/60 text-blue-300 px-2 py-0.5 rounded">장중 09:00~15:30</span>
-            <span className="text-xs text-gray-500">KIS 거래량 상위 50개 · 5분봉 · AI11~AI20</span>
-          </div>
-          <MarketSection agents={stockAgents} market="stock" selected={selected} onSelect={handleClick} />
-        </div>
-      )}
+        <MarketSection agents={stockAgents} market="stock" selected={selected} onSelect={handleClick} />
+      </div>
 
     </div>
   )
