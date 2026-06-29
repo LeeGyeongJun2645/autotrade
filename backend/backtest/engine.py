@@ -105,8 +105,6 @@ class _VBStrategy(_BaseStrategy):
 
     params = (
         ("k", 0.5),
-        ("stop_loss_rate", -0.02),
-        ("max_position_ratio", 0.20),
     )
 
     def next(self) -> None:
