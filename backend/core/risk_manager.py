@@ -198,6 +198,8 @@ class RiskManager:
         Returns:
             ExitSignal (should_exit, reason, current_price, profit_rate)
         """
+        if position.entry_price == 0:
+            return ExitSignal(should_exit=False, reason="", current_price=current_price, profit_rate=0.0)
         profit_rate = (current_price - position.entry_price) / position.entry_price
 
         # 1. 손절

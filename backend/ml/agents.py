@@ -157,6 +157,7 @@ class SimAgent:
         self._scaler: StandardScaler | None = None
         self._trained_at: str | None = None
         self._model_path = MODEL_DIR / f"{model_type}_agent_{agent_id}.pkl"
+        self._train_lock = asyncio.Lock()   # 동시 재학습 race condition 방지
 
         self.total_trades = 0
         self.win_trades = 0
@@ -498,8 +499,7 @@ class SimAgent:
             # ADX 레짐 필터 — 횡보장(ADX<20) 또는 NaN이면 예측 신뢰도 낮으므로 스킵
             # NaN < 20은 Python에서 False를 반환하므로 isna() 체크 필수
             _adx_val = full_df["adx_14"].iloc[-1] if "adx_14" in full_df.columns else float("nan")
-            import pandas as _pd
-            if _pd.isna(_adx_val) or _adx_val < 20:
+            if pd.isna(_adx_val) or _adx_val < 20:
                 return "hold", 0.5
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:

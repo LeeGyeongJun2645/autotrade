@@ -1072,12 +1072,13 @@ class TradingScheduler:
                                     _btc_train = _btc_ref
                                 _oi_ref    = btc_oi_hist    if btc_oi_hist    else None
                                 _taker_ref = btc_taker_hist if btc_taker_hist else None
-                                trained = await asyncio.to_thread(
-                                    agent.train, train_ohlcv,
-                                    agent._cached_funding_rates or None,
-                                    _btc_train, None,
-                                    _oi_ref, _taker_ref,
-                                )
+                                async with agent._train_lock:
+                                    trained = await asyncio.to_thread(
+                                        agent.train, train_ohlcv,
+                                        agent._cached_funding_rates or None,
+                                        _btc_train, None,
+                                        _oi_ref, _taker_ref,
+                                    )
                                 if not trained:
                                     continue
                             price = coin_prices.get(ticker, 0.0)
@@ -1107,9 +1108,10 @@ class TradingScheduler:
                                 except Exception:
                                     train_ohlcv = ohlcv
                                     _kospi_train = kospi_ohlcv
-                                trained = await asyncio.to_thread(
-                                    agent.train, train_ohlcv, None, None, _kospi_train
-                                )
+                                async with agent._train_lock:
+                                    trained = await asyncio.to_thread(
+                                        agent.train, train_ohlcv, None, None, _kospi_train
+                                    )
                                 if not trained:
                                     continue
                             price = stock_prices.get(symbol, 0.0)
@@ -1382,9 +1384,10 @@ class TradingScheduler:
                 continue
             _trade_res = agent_trade_results.get(agent.agent_id) or None
             try:
-                trained = await asyncio.to_thread(
-                    agent.train, data, fr, _btc_ref, _kospi_ref, _oi_ref, _taker_ref, _trade_res
-                )
+                async with agent._train_lock:
+                    trained = await asyncio.to_thread(
+                        agent.train, data, fr, _btc_ref, _kospi_ref, _oi_ref, _taker_ref, _trade_res
+                    )
                 if trained:
                     success += 1
                     logger.info("[Retrain][%s] 재학습 완료", agent.agent_id)

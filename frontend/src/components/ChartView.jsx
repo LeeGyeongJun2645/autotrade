@@ -174,6 +174,7 @@ function CandleChart({ ticker, interval, positions, mlSignal }) {
     try {
       const isIntraday = interval.startsWith('minutes')
       const data = await api.get(`/chart/upbit/${ticker}?interval=${encodeURIComponent(interval)}&count=150`)
+      if (!Array.isArray(data)) throw new Error('차트 데이터 형식 오류')
       const candles = [...data].reverse().map((d) => ({
         time: toChartTime(d.date, isIntraday),
         open: d.open,
@@ -241,10 +242,15 @@ function CandleChart({ ticker, interval, positions, mlSignal }) {
       chart.timeScale().fitContent()
       chartRef.current = chart
 
-      // 반응형 (roRef에 저장해 클린업 시 disconnect)
+      // 반응형 — lastWidth 추적으로 applyOptions 재진입 무한루프 방지
+      let _lastWidth = containerRef.current.clientWidth
       const ro = new ResizeObserver(() => {
         if (containerRef.current && chartRef.current) {
-          chartRef.current.applyOptions({ width: containerRef.current.clientWidth })
+          const w = containerRef.current.clientWidth
+          if (w !== _lastWidth) {
+            _lastWidth = w
+            chartRef.current.applyOptions({ width: w })
+          }
         }
       })
       ro.observe(containerRef.current)

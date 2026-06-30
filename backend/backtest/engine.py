@@ -42,7 +42,8 @@ def _ohlcv_to_feed(ohlcv_list: list[dict[str, Any]]) -> bt.feeds.PandasData:
     KIS 날짜: 'YYYYMMDD' / Upbit 날짜: 'YYYY-MM-DDTHH:MM:SS' 모두 처리.
     """
     df = pd.DataFrame(list(reversed(ohlcv_list)))
-    df["date"] = pd.to_datetime(df["date"].astype(str).str[:10])
+    # str[:10]으로 자르면 5분봉 등 장중 데이터에서 하루 1봉만 남으므로 전체 파싱
+    df["date"] = pd.to_datetime(df["date"].astype(str))
     df = df.set_index("date").sort_index()
     df = df[~df.index.duplicated(keep="last")]
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
@@ -144,8 +145,6 @@ class _MAStrategy(_BaseStrategy):
     params = (
         ("ma_short", 20),
         ("ma_long", 60),
-        ("stop_loss_rate", -0.02),
-        ("max_position_ratio", 0.20),
     )
 
     def __init__(self) -> None:
@@ -181,8 +180,6 @@ class _RSIStrategy(_BaseStrategy):
         ("rsi_period", 14),
         ("rsi_oversold", 30.0),
         ("rsi_overbought", 70.0),
-        ("stop_loss_rate", -0.02),
-        ("max_position_ratio", 0.20),
     )
 
     def __init__(self) -> None:

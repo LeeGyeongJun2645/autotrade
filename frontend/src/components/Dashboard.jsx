@@ -149,7 +149,7 @@ function PortfolioHistory() {
                     pa == null ? 'text-gray-600'
                     : pa >= 0 ? 'text-green-400' : 'text-red-400'
                   }`}>
-                    {pa != null
+                    {pa != null && pp != null
                       ? `${sign(pa)}${fmt(Math.abs(pa))}원 (${sign(pp)}${pp.toFixed(2)}%)`
                       : '원금 미설정'}
                   </td>

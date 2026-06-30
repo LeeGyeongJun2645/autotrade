@@ -47,7 +47,10 @@ async def get_binance_price(symbol: str = "BTCUSDT") -> float:
                 params={"symbol": symbol},
             )
             resp.raise_for_status()
-            price = float(resp.json()["price"])
+            data = resp.json()
+            if not isinstance(data, dict) or "price" not in data:
+                raise ValueError(f"바이낸스 가격 API 오류: {data}")
+            price = float(data["price"])
             _PRICE_CACHE[symbol] = (price, now)
             return price
     except Exception as e:
@@ -211,7 +214,7 @@ async def get_kimchi_premium(upbit_krw_price: float, binance_symbol: str = "BTCU
     try:
         binance_usd = await get_binance_price(binance_symbol)
         usd_krw     = await get_usd_krw()
-        if binance_usd <= 0 or usd_krw <= 0:
+        if binance_usd <= 0 or usd_krw <= 0 or upbit_krw_price <= 0:
             return 0.0
         krw_equiv = binance_usd * usd_krw
         premium   = (upbit_krw_price / krw_equiv - 1) * 100

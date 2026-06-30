@@ -72,6 +72,8 @@ class KISTokenManager:
             resp.raise_for_status()
             data = resp.json()
 
+        if "access_token" not in data:
+            raise ValueError(f"KIS 토큰 발급 실패: {data.get('msg1') or data}")
         self._token = data["access_token"]
         # KIS 토큰 유효시간: 86400초(24시간)
         expires_in = int(data.get("expires_in", 86400))
