@@ -1552,22 +1552,30 @@ class TradingScheduler:
         wr = all_wins / all_trades * 100 if all_trades else 0
         active = sum(1 for a in agents if a.is_active)
 
+        # 전체 합산 요약
+        pnl_emoji = "📈" if pnl_amt >= 0 else "📉"
         summary = (
-            f"원금: {total_init:,.0f}원  →  현재: {total_now:,.0f}원\n"
-            f"손익: <b>{pnl_amt:+,.0f}원</b> ({pnl_pct:+.2f}%)\n"
-            f"승률: {wr:.1f}%  거래: {all_trades}건  활성: {active}/{len(agents)}"
+            f"총 원금: {total_init:,.0f}원\n"
+            f"총 현재: {total_now:,.0f}원\n"
+            f"{pnl_emoji} 총 손익: <b>{pnl_amt:+,.0f}원 ({pnl_pct:+.2f}%)</b>\n"
+            f"전체 승률: {wr:.1f}%  거래: {all_trades}건  활성: {active}/{len(agents)}"
         )
+
+        # 에이전트별 개별 원금 → 현재가 → 손익
         lines = []
         for a in sorted(agents, key=lambda x: -x.total_return):
             flag = "⛔" if not a.is_active else ("★" if a.is_champion else "·")
             role = self._AGENT_ROLE.get((a.feature_set, a.lookahead), a.feature_set)
-            agent_pnl = (a._balance + a.position_value - initial_capital)
+            cur_val   = a._balance + a.position_value
+            agent_pnl = cur_val - initial_capital
+            agent_pct = agent_pnl / initial_capital * 100 if initial_capital else 0
             lines.append(
-                f"{flag} {a.agent_id}({role}): "
-                f"{a.total_return*100:+.1f}% | {agent_pnl:+,.0f}원 | "
-                f"승률 {a.win_rate*100:.0f}% | {a.total_trades}건"
+                f"{flag} {a.agent_id}({role})\n"
+                f"   원금 {initial_capital:,.0f} → {cur_val:,.0f}원 "
+                f"| <b>{agent_pnl:+,.0f}원({agent_pct:+.1f}%)</b> "
+                f"| 승률 {a.win_rate*100:.0f}% | {a.total_trades}건"
             )
-        return summary + "\n" + "\n".join(lines)
+        return summary + "\n\n" + "\n".join(lines)
 
     async def _send_daily_coin_report(self) -> None:
         """매일 06:00 KST — 코인 AI 현황 + 실제 업비트 잔고 텔레그램 전송."""
