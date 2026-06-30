@@ -1196,17 +1196,23 @@ class TradingScheduler:
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
-            # 최소 보유 15분: 정상 변동성 내 노이즈 손절 방지
-            if held_min < 15 and unreal > STOP_LOSS * 1.5:
-                pass  # 아직 손절 트리거 안 함 (극단적 급락 제외)
+            # 최소 보유 15분: 손절 기준 완화(ATR×2.25), 익절은 정상 적용
+            if held_min < 15:
+                extreme_sl = STOP_LOSS * 1.5  # ATR×2.25 극단적 손실만 즉시 청산
+                if unreal >= tp_base:
+                    signal = "sell"
+                    sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) @ {price:,.0f}원", "SELL")
+                elif unreal <= extreme_sl:
+                    signal = "sell"
+                    sim_log.push(agent.agent_id, f"[급락손절] {symbol} {unreal*100:.1f}% (ATR×2.25={extreme_sl*100:.1f}%) @ {price:,.0f}원", "SELL")
             else:
-                # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤
+                # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤 (floor 없음 — 항상 감소)
                 if held_min < 30:
                     take_profit = tp_base
                 elif held_min < 90:
-                    take_profit = max(tp_base * 0.7, 0.015)
+                    take_profit = tp_base * 0.7   # floor 제거: 저변동성 자산에서 TP 상승 버그 수정
                 else:
-                    take_profit = max(tp_base * 0.4, 0.012)
+                    take_profit = tp_base * 0.4   # floor 제거
 
                 if unreal >= take_profit:
                     signal = "sell"
@@ -1252,10 +1258,10 @@ class TradingScheduler:
                 sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
 
     async def _daily_retrain(self) -> None:
-        """매일 18:00 KST — 전 에이전트 최신 데이터로 재학습.
+        """매일 06:05 KST — 전 에이전트 최신 데이터로 재학습.
 
         코인: BTC·ETH·XRP·SOL 4개 순차 시도, 첫 성공 데이터 사용 (2000봉 = 약 7일치)
-        주식: 삼성전자·SK하이닉스·NAVER 3개 순차 시도 (500봉 = 약 2일치)
+        주식: 삼성전자·SK하이닉스·NAVER 3개 순차 시도 (500봉 = 약 5거래일치)
         에이전트별로 피처셋이 다르므로 같은 데이터로 학습해도 모델이 달라짐.
         """
         from backend.api import upbit as _upbit, kis as _kis
@@ -1463,11 +1469,8 @@ class TradingScheduler:
                     adjustments.append(
                         f"✅ {agent.agent_id}({agent.feature_set}): 재활성화 (수익률 {ret_pct:.1f}%)"
                     )
-                elif ret_pct > 5 and agent.buy_threshold > default_thr + 0.001:
-                    agent.buy_threshold = default_thr
-                    adjustments.append(
-                        f"✅ {agent.agent_id}({agent.feature_set}): 임계값 복구→{default_thr:.2f} (수익률 {ret_pct:.1f}%)"
-                    )
+                # train()이 이미 재학습 후 최적 임계값을 설정했으므로 별도 복구 없음
+                # (이전 elif 블록: ret_pct > 5 → default_thr 복원 → 훈련 최적화값 덮어쓰기 제거)
 
                 await db.execute(
                     "UPDATE agent_stats SET is_active=?, buy_threshold=? WHERE agent_id=?",

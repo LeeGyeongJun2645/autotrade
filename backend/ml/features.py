@@ -117,8 +117,8 @@ FEATURE_NAMES = [
     "ofi_5",        # 5봉 방향성 볼륨 비율 (-1~1, 양수=매수우세)
     "ofi_20",       # 20봉 OFI
     "cvd_ratio",    # 60봉 누적 볼륨 델타 비율
-    # ── Garman-Klass 변동성 ─────────────────────────────────────────
-    "gk_vol",       # OHLC 4가지 활용 변동성 (ATR 대비 7.4배 효율)
+    # ── Yang-Zhang 변동성 (overnight gap 처리, GK 대비 14배 효율) ──────
+    "gk_vol",       # Yang-Zhang vol: open-gap + intraday + Rogers-Satchell 합성
     # ── 멀티타임프레임 수익률 ────────────────────────────────────────
     "mtf_ret_15m",  # 15분 수익률 (3봉)
     "mtf_ret_1h",   # 1시간 수익률 (12봉)
@@ -517,11 +517,17 @@ def compute_features(
     df["ofi_20"]   = (_vol_delta.rolling(20).sum() / _vr20).fillna(0.0)
     df["cvd_ratio"] = (_vol_delta.rolling(60).sum() / _vr60).fillna(0.0)
 
-    # ── Garman-Klass 변동성 (OHLC 4가지 활용, ATR 대비 7.4배 효율) ──
-    _ln_hl = (np.log((high / low.replace(0, np.nan)).clip(lower=1e-9))) ** 2
-    _ln_co = (np.log((close / open_.replace(0, np.nan)).clip(lower=1e-9))) ** 2
+    # ── Yang-Zhang 변동성 (overnight gap 포함, GK 대비 14배 효율) ──
+    # 주식 overnight 갭 + crypto micro-gap 모두 포착 (GK는 연속 시장 가정)
+    _yz_n       = 5
+    _yz_open_r  = np.log((open_ / close.shift(1)).clip(lower=1e-9))
+    _yz_close_r = np.log((close  / open_).clip(lower=1e-9))
+    _rs_yz      = (np.log(high / close.clip(lower=1e-9)) * np.log(high / open_.clip(lower=1e-9)) +
+                   np.log(low  / close.clip(lower=1e-9)) * np.log(low  / open_.clip(lower=1e-9)))
+    _k_yz       = 0.34 / (1.34 + (_yz_n + 1) / (_yz_n - 1))
     df["gk_vol"] = np.sqrt(
-        (0.5 * _ln_hl - (2 * np.log(2) - 1) * _ln_co).clip(lower=0).rolling(14).mean()
+        (_yz_open_r.rolling(_yz_n).var() + _k_yz * _yz_close_r.rolling(_yz_n).var() +
+         (1 - _k_yz) * _rs_yz.rolling(_yz_n).mean()).clip(lower=0)
     ).fillna(0.0)
 
     # ── 멀티타임프레임 수익률 (5분봉 기준, 상위 TF 모멘텀 정렬 감지) ─

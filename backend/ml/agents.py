@@ -100,17 +100,17 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI08",  5, 0.007, 0.62, "volume",   "coin",  5, "xgb"),
     ("AI09",  5, 0.012, 0.65, "all",      "coin",  8, "lgbm"),
     ("AI10",  5, 0.008, 0.60, "trend",    "coin",  5, "xgb"),
-    # 주식 홀수 → LightGBM / 짝수 → XGBoost
+    # 주식 전략 — 전부 LightGBM (histogram-based 분할이 불균형 5분봉 데이터에 더 안정적)
     ("AI11",  5, 0.006, 0.58, "all",      "stock", 3, "lgbm"),
-    ("AI12",  5, 0.007, 0.63, "trend",    "stock", 5, "xgb"),
+    ("AI12",  5, 0.005, 0.60, "trend",    "stock", 5, "lgbm"),  # label 0.7→0.5% (양성레이블 확보)
     ("AI13",  5, 0.008, 0.58, "momentum", "stock", 8, "lgbm"),
-    ("AI14",  5, 0.007, 0.62, "volume",   "stock", 3, "xgb"),
+    ("AI14",  5, 0.005, 0.60, "volume",   "stock", 3, "lgbm"),  # label 0.7→0.5%
     ("AI15",  5, 0.010, 0.60, "all",      "stock", 5, "lgbm"),
-    ("AI16",  5, 0.008, 0.65, "trend",    "stock", 8, "xgb"),
+    ("AI16",  5, 0.005, 0.60, "trend",    "stock", 8, "lgbm"),  # label 0.8→0.5%
     ("AI17",  5, 0.010, 0.62, "momentum", "stock", 3, "lgbm"),
-    ("AI18",  5, 0.010, 0.68, "volume",   "stock", 5, "xgb"),
+    ("AI18",  5, 0.006, 0.60, "volume",   "stock", 5, "lgbm"),  # label 1.0→0.6%
     ("AI19",  5, 0.012, 0.65, "all",      "stock", 8, "lgbm"),
-    ("AI20",  5, 0.012, 0.70, "trend",    "stock", 3, "xgb"),
+    ("AI20",  5, 0.012, 0.60, "trend",    "stock", 3, "lgbm"),  # xgb→lgbm, 임계 0.70→0.60
 ]
 
 
@@ -222,10 +222,10 @@ class SimAgent:
         return max(0.1, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 10~50% 범위
 
     def _sharpe_weight(self) -> float:
-        """최근 거래 수익률 기반 샤프 비율 가중치.
+        """최근 거래 수익률 기반 Sortino 비율 가중치.
 
-        꾸준히 수익 내는 에이전트를 우대. 운으로 한 번 크게 번 에이전트보다
-        안정적으로 조금씩 버는 에이전트가 앙상블에서 더 큰 발언권을 가짐.
+        Sortino = mean_return / downside_deviation (손실분만 분모).
+        Sharpe 대비 손실에 더 가혹한 패널티 → 승률 최대화에 유리.
         거래 5개 미만이면 승률로 폴백.
         """
         sell_trades = [
@@ -234,12 +234,15 @@ class SimAgent:
         ]
         if len(sell_trades) < 5:
             return max(self.win_rate, 0.1)
-        mean_r = float(np.mean(sell_trades))
-        std_r  = float(np.std(sell_trades, ddof=1))
-        if std_r < 1e-9:
+        mean_r    = float(np.mean(sell_trades))
+        neg_rets  = [r for r in sell_trades if r < 0.0]
+        if not neg_rets:
+            return max(mean_r * 10 + 0.5, 0.1)  # 전승: 높은 가중치
+        downside  = float(np.sqrt(np.mean([r ** 2 for r in neg_rets])))
+        if downside < 1e-9:
             return max(mean_r * 10 + 0.5, 0.1)
-        sharpe = mean_r / std_r
-        return max(sharpe + 0.5, 0.1)  # 음수 방지 (최소 0.1 보장)
+        sortino   = mean_r / downside
+        return max(sortino + 0.5, 0.1)  # 음수 방지
 
     @property
     def interval_str(self) -> str:
@@ -256,7 +259,13 @@ class SimAgent:
             stored_feats = data.get("feature_names", [])
             if stored_feats and stored_feats != self.feature_names:
                 return False  # 피처 불일치 → 재학습
-            self._model = data["model"]
+            loaded = data["model"]
+            # 모델 타입 불일치(예: xgb→lgbm 전환) 시 자동 폐기 → 다음 틱 재학습
+            loaded_type = "lgbm" if isinstance(loaded, LGBMClassifier) else "xgb"
+            if loaded_type != self.model_type:
+                self._model_path.unlink(missing_ok=True)
+                return False
+            self._model = loaded
             self._scaler = data["scaler"]
             self._trained_at = data.get("trained_at")
             return True
@@ -370,8 +379,9 @@ class SimAgent:
             label   = label.iloc[:min_len]
             ret     = ret.iloc[:min_len]
 
-            # 노이즈 필터 (±NOISE_FLOOR 이내 구간 학습 제외)
-            clear_mask = ret.abs() >= NOISE_FLOOR
+            # 노이즈 필터: label=0 중 LOOKAHEAD 후 수익률이 ±NOISE_FLOOR 미만인 구간 제외
+            # label=1(TP 조기 발동 후 되돌림)은 유효한 매수 기회이므로 항상 보존
+            clear_mask = (label == 1) | (ret.abs() >= NOISE_FLOOR)
             feat_df = feat_df[clear_mask.values]
             label   = label[clear_mask.values]
 
@@ -381,18 +391,27 @@ class SimAgent:
             X = feat_df.values
             y = label.values.astype(int)
 
-            # ── Purged Walk-Forward: 레이블 오염 방지를 위해 LOOKAHEAD만큼 갭 삽입 ──
-            # gap = lookahead봉 → 학습 레이블과 검증 피처가 겹치는 구간 제거
+            # ── 2-창 Purged Walk-Forward: 이전 레짐(창A) + 최신 레짐(창B) ──────
+            # 데이터: [───훈련───][GAP][──창A──][GAP][──창B──]
+            # 창A/B 모두 훈련셋 밖 → 데이터 리케이지 없음
             GAP      = self.lookahead
             VAL_SIZE = min(200, max(len(X) // 6, 30))
-            if len(X) > VAL_SIZE + GAP + 50:
-                X_train = X[:-(VAL_SIZE + GAP)]
-                X_val   = X[-VAL_SIZE:]
-                y_train = y[:-(VAL_SIZE + GAP)]
-                y_val   = y[-VAL_SIZE:]
+            _two_win = len(X) > 2 * VAL_SIZE + 2 * GAP + 50
+            if _two_win:
+                _t_end   = len(X) - 2 * VAL_SIZE - 2 * GAP
+                X_train  = X[:_t_end];    y_train  = y[:_t_end]
+                _a0 = _t_end + GAP;       _a1 = _a0 + VAL_SIZE
+                X_val_a  = X[_a0:_a1];   y_val_a  = y[_a0:_a1]   # 창A — 이전 레짐
+                X_val    = X[_a1 + GAP:]; y_val    = y[_a1 + GAP:]  # 창B — 최신 레짐
+            elif len(X) > VAL_SIZE + GAP + 50:
+                X_train  = X[:-(VAL_SIZE + GAP)]; y_train  = y[:-(VAL_SIZE + GAP)]
+                X_val    = X[-VAL_SIZE:];          y_val    = y[-VAL_SIZE:]
+                X_val_a  = None;                   y_val_a  = None
             else:
-                X_train, X_val = X, None
-                y_train, y_val = y, None
+                X_train  = X;    y_train  = y
+                X_val    = None; y_val    = None
+                X_val_a  = None; y_val_a  = None
+                _two_win = False
 
             # 최근 500샘플 2배 가중치 (최신 시장 환경 우선 반영)
             weights = np.ones(len(X_train))
@@ -478,30 +497,50 @@ class SimAgent:
 
             # Purged Walk-Forward 검증 — 정밀도(승률) 기반으로 평가
             if X_val is not None and len(X_val) > 0:
-                _val_s   = scaler.transform(X_val)
+                _val_s    = scaler.transform(X_val)
                 _val_prob = clf.predict_proba(_val_s)[:, 1]
-                val_acc  = clf.score(_val_s, y_val)
+                val_acc   = clf.score(_val_s, y_val)
                 if val_acc < 0.50:
                     logger.warning("[%s] WF검증 %.1f%% < 50%% → 학습 실패", self.agent_id, val_acc * 100)
                     return False
-                # 검증셋에서 정밀도 최대화 임계값 탐색 → 실제 buy_threshold 동적 조정
-                _best_thr, _best_prec = self.buy_threshold, 0.0
-                for _t in np.arange(0.50, 0.85, 0.01):
-                    _p = (_val_prob >= _t).astype(int)
-                    if _p.sum() < max(5, len(y_val) // 20):
-                        continue
-                    _recall = float(_p[y_val == 1].mean()) if (y_val == 1).sum() > 0 else 0.0
-                    if _recall < 0.10:  # 최소 10% recall 유지 (더 고정밀 임계값 탐색)
-                        continue
-                    from sklearn.metrics import precision_score as _ps
-                    _prec = _ps(y_val, _p, zero_division=0)
-                    if _prec > _best_prec:
-                        _best_prec, _best_thr = _prec, float(_t)
-                if _best_prec > 0:
-                    self.buy_threshold = round(min(max(_best_thr, 0.60), 0.82), 2)  # 최소 60%로 상향
-                logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
-                             self.agent_id, val_acc * 100, self.buy_threshold, _best_prec)
 
+                from sklearn.metrics import precision_score as _ps
+                _init_thr = self.buy_threshold
+
+                def _find_best_thr(prob_arr: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
+                    best_thr, best_prec = _init_thr, 0.0
+                    for _t in np.arange(0.50, 0.85, 0.01):
+                        _p = (prob_arr >= _t).astype(int)
+                        if _p.sum() < max(5, len(y_true) // 20):
+                            continue
+                        if (y_true == 1).sum() > 0 and float(_p[y_true == 1].mean()) < 0.10:
+                            continue
+                        _prec = _ps(y_true, _p, zero_division=0)
+                        if _prec > best_prec:
+                            best_prec, best_thr = _prec, float(_t)
+                    return best_thr, best_prec
+
+                # 창B (최신 레짐) 임계값
+                thr_b, prec_b = _find_best_thr(_val_prob, y_val)
+
+                if _two_win and X_val_a is not None and len(X_val_a) > 0:
+                    # 창A (이전 레짐) 임계값 — 훈련셋 밖, 리케이지 없음
+                    _va_prob = clf.predict_proba(scaler.transform(X_val_a))[:, 1]
+                    thr_a, _ = _find_best_thr(_va_prob, y_val_a)
+                    # 최종: 최신 60% + 이전 40% 가중 평균
+                    if prec_b > 0:
+                        _combined = 0.6 * thr_b + 0.4 * thr_a
+                        self.buy_threshold = round(min(max(_combined, 0.60), 0.82), 2)
+                    logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
+                                 self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
+                else:
+                    if prec_b > 0:
+                        self.buy_threshold = round(min(max(thr_b, 0.60), 0.82), 2)
+                    logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
+                                 self.agent_id, val_acc * 100, self.buy_threshold, prec_b)
+
+            # 검증 유무와 무관하게 최소 임계값 0.60 항상 보장 (초기값 0.58 에이전트 방어)
+            self.buy_threshold = max(self.buy_threshold, 0.60)
             self._model = clf
             self._scaler = scaler
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
@@ -561,19 +600,8 @@ class SimAgent:
             logger.debug("[%s] predict 예외 — hold 반환", self.agent_id, exc_info=True)
             return "hold", 0.5
 
-        # ── 펀딩률 극단값 필터 (코인 전용) ─────────────────────────────
-        # funding_rate > 0.001 (0.1%/8h) = 롱 과열 → 매수 확률 억제
-        if self.market == "coin" and self._cached_funding_rates:
-            try:
-                _latest_fr = float(self._cached_funding_rates[-1].get("fundingRate", 0) or 0)
-                if _latest_fr > 0.001:
-                    prob = max(0.01, prob - min(_latest_fr * 80, 0.10))
-                elif _latest_fr < -0.001:  # 숏 과열 → 매수 기회
-                    prob = min(0.99, prob + min(abs(_latest_fr) * 40, 0.05))
-            except Exception:
-                pass
-
         # ── MTF 정렬 필터: 3개 타임프레임 모두 불일치 시 신호 억제 ───
+        # 펀딩률은 predict_live / predict_ensemble 에서 라이브 데이터로 처리 (이중 적용 방지)
         try:
             if "mtf_align" in full_df.columns:
                 _align = float(full_df["mtf_align"].iloc[-1])
@@ -821,6 +849,9 @@ async def predict_ensemble(
         and not (a.total_trades >= 30 and a.win_rate < 0.40)
     ]
     if not candidates:
+        # 폴백: 저승률이라도 모델 있는 에이전트 전원 사용 (완전 거래 중단 방지)
+        candidates = [a for a in AGENTS.values() if a.market == market and a._model is not None]
+    if not candidates:
         return "hold", 0.5
 
     # ── 현재 시장 레짐 감지 (앙상블 가중치 조정용) ───────────────
@@ -834,6 +865,7 @@ async def predict_ensemble(
 
     # ── 가중 예측 집계 (샤프비율 × 수익률 × 레짐 부스터) ─────────
     weighted_prob = 0.0
+    weighted_thr  = 0.0  # 임계값도 동일 가중치로 집계 (단순평균 불일치 방지)
     total_weight  = 0.0
     for agent in candidates:
         ret    = max(agent.total_return, -0.5)
@@ -866,6 +898,7 @@ async def predict_ensemble(
 
         _, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
         weighted_prob += prob * weight
+        weighted_thr  += agent.buy_threshold * weight
         total_weight  += weight
 
     final_prob = weighted_prob / total_weight if total_weight > 0 else 0.5
@@ -918,8 +951,8 @@ async def predict_ensemble(
         except Exception:
             pass
 
-    # ── 임계값: 학습된 에이전트 buy_threshold 가중 평균 ─────────
-    avg_thr = sum(a.buy_threshold for a in candidates) / len(candidates)
+    # ── 임계값: 확률과 동일한 가중치로 집계 (고성능 에이전트 임계값 우선) ─────────
+    avg_thr = weighted_thr / total_weight if total_weight > 0 else 0.60
 
     if final_prob >= avg_thr:
         return "buy", round(final_prob, 4)
