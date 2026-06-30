@@ -371,10 +371,17 @@ async def trigger_portfolio_snapshot():
 
 @app.get("/news/{symbol}/headlines", tags=["News"])
 async def get_news_headlines(symbol: str):
-    """심볼의 최근 뉴스 헤드라인 + 감성점수 (캐시 기준, 최대 1시간 유효)."""
-    from backend.ml.news import get_headlines, get_cached_score
+    """심볼의 뉴스 헤드라인 + 감성점수. 캐시 없으면 실시간 수집 후 반환."""
+    from backend.ml.news import get_headlines, get_cached_score, get_sentiment_score
     headlines = get_headlines(symbol)
     score = get_cached_score(symbol)
+    # 캐시 없으면 실시간 수집 (최초 요청 또는 TTL 만료 시)
+    if not headlines:
+        try:
+            score = await get_sentiment_score(symbol)
+            headlines = get_headlines(symbol)
+        except Exception:
+            pass
     return {
         "symbol": symbol,
         "news_score": score,
@@ -490,6 +497,18 @@ async def get_ml_status():
 async def get_agents():
     """20개 AI 에이전트 현재 상태 조회 (승률, 수익률, 포지션 등)."""
     return scheduler.get_agents_snapshot()
+
+
+@app.post("/agents/retrain", tags=["Agents"])
+async def trigger_agent_retrain():
+    """AI 에이전트 20개 즉시 재학습 트리거 (일반적으로 18:00 자동, 필요 시 수동 호출).
+
+    학습 데이터 수집 + 20개 모델 순차 학습으로 수 분 소요.
+    백그라운드 비동기 실행 — 즉시 응답 후 서버 로그에서 진행상황 확인 가능.
+    """
+    import asyncio
+    asyncio.create_task(scheduler._daily_retrain())
+    return {"status": "started", "message": "에이전트 재학습 시작됨 (백그라운드 실행, 수 분 소요)"}
 
 
 @app.get("/agents/{agent_id}/trades", tags=["Agents"])

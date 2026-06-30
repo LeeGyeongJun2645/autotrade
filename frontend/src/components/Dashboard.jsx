@@ -246,6 +246,39 @@ function MLSignalRow({ symbol, data }) {
   )
 }
 
+function RetrainButton() {
+  const [status, setStatus] = useState(null)
+  const [busy, setBusy]     = useState(false)
+
+  const trigger = async () => {
+    if (busy) return
+    setBusy(true)
+    setStatus(null)
+    try {
+      const res = await api.post('/agents/retrain')
+      setStatus({ ok: true, msg: res.message })
+    } catch {
+      setStatus({ ok: false, msg: '재학습 요청 실패' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <button onClick={trigger} disabled={busy}
+        className="text-xs px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 text-white font-medium transition-colors">
+        {busy ? '재학습 중…' : '🔄 에이전트 즉시 재학습'}
+      </button>
+      {status && (
+        <span className={`text-xs ${status.ok ? 'text-green-400' : 'text-red-400'}`}>
+          {status.msg}
+        </span>
+      )}
+    </div>
+  )
+}
+
 export default function Dashboard({ sse }) {
   const { positions, mlSignals, connected, error } = sse
   const [kisBalance, setKisBalance] = useState(null)
@@ -318,6 +351,15 @@ export default function Dashboard({ sse }) {
             <p className="text-gray-500 text-sm">{upbitError ?? 'Upbit API 키 미설정'}</p>
           )}
         </BalanceCard>
+      </div>
+
+      {/* 에이전트 재학습 */}
+      <div className="bg-gray-800 rounded-xl border border-gray-700 px-5 py-3 flex items-center justify-between">
+        <div>
+          <span className="text-sm font-semibold">AI 에이전트 학습</span>
+          <span className="text-xs text-gray-500 ml-2">매일 18:00 자동 재학습 | 수동 트리거 가능</span>
+        </div>
+        <RetrainButton />
       </div>
 
       {/* 포트폴리오 손익 히스토리 */}
