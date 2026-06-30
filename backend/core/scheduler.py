@@ -1277,15 +1277,25 @@ class TradingScheduler:
             except Exception:
                 continue
 
-        stock_ohlcv: list[dict] = []
+        # 주식 에이전트별로 다른 종목 데이터를 할당해 앙상블 다양성 확보
+        stock_ohlcv_pool: list[list[dict]] = []
         for symbol in STOCK_SYMBOLS:
             try:
-                stock_ohlcv = await _kis.get_minute_ohlcv(symbol, 5, count=500)
-                if len(stock_ohlcv) >= 100:
-                    logger.info("[Retrain] 주식 학습 데이터: %s (%d봉)", symbol, len(stock_ohlcv))
-                    break
+                _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=500)
+                if len(_tmp) >= 100:
+                    stock_ohlcv_pool.append(_tmp)
+                    logger.info("[Retrain] 주식 학습 데이터: %s (%d봉, 누적 %d종목)", symbol, len(_tmp), len(stock_ohlcv_pool))
             except Exception:
                 continue
+        stock_ohlcv = stock_ohlcv_pool[0] if stock_ohlcv_pool else []
+
+        # 주식 에이전트별 종목 순환 배정 (round-robin)
+        _stock_agents = [a for a in AGENTS.values() if a.market == "stock"]
+        _stock_data_map: dict[str, list[dict]] = {}
+        for _i, _sa in enumerate(_stock_agents):
+            _stock_data_map[_sa.agent_id] = (
+                stock_ohlcv_pool[_i % len(stock_ohlcv_pool)] if stock_ohlcv_pool else []
+            )
 
         # ── 코인 펀딩비 히스토리 수집 (BTC 대표값, 50봉 = 약 16일치) ──
         from backend.api.binance import get_historical_funding_rates
@@ -1367,7 +1377,7 @@ class TradingScheduler:
         # ── 에이전트별 재학습 ────────────────────────────────────
         success = 0
         for agent in AGENTS.values():
-            data = coin_ohlcv if agent.market == "coin" else stock_ohlcv
+            data = coin_ohlcv if agent.market == "coin" else _stock_data_map.get(agent.agent_id, stock_ohlcv)
             fr   = coin_funding if agent.market == "coin" else None
             _btc_ref   = btc_train_ohlcv  if agent.market == "coin"  else None
             _kospi_ref = kospi_train_ohlcv if agent.market == "stock" else None
@@ -1401,7 +1411,7 @@ class TradingScheduler:
             await telegram.notify_message(
                 f"🔄 <b>AI 일일 재학습 완료 (18:00)</b>\n"
                 f"성공: {success}/20 에이전트\n"
-                f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv)}봉"
+                f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv_pool)}종목"
             )
         except Exception:
             pass

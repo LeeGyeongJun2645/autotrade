@@ -289,11 +289,15 @@ class SimAgent:
                 oi_hist=oi_hist,
                 taker_hist=taker_hist,
             )
+            # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
+            _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
             # ADX 필터를 열 선택 전에 캡처 (feature_set 에 adx_14 없는 에이전트도 동일 필터 적용)
             _adx_mask = feat_df["adx_14"] >= 20 if "adx_14" in feat_df.columns else None
             feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
             if _adx_mask is not None:
                 feat_df = feat_df[_adx_mask.reindex(feat_df.index, fill_value=False)]
+            # ATR도 feat_df 인덱스에 맞춰 정렬
+            _atr_series = _atr_full.reindex(feat_df.index) if _atr_full is not None else None
             if len(feat_df) < 50:
                 return False
 
@@ -312,18 +316,26 @@ class SimAgent:
                 logger.warning("[%s] close reindex NaN 발생 — 날짜 불일치. 학습 스킵.", self.agent_id)
                 return False
             feat_df = feat_df.reset_index(drop=True)
+            if _atr_series is not None:
+                _atr_series = _atr_series.reset_index(drop=True)
 
             # ── 트리플 배리어 레이블링 ────────────────────────────────
-            # 익절(TP) 또는 손절(SL) 배리어 먼저 터치한 쪽으로 레이블 결정
-            # 시간 배리어(LOOKAHEAD)까지 아무것도 안 터치하면 0(=미진입 최선)
+            # TP/SL을 봉별 ATR에 맞춰 동적으로 계산 — 실제 매매 손익 기준(ATR×3.0/1.5)과 정합
+            # ATR 미존재 시 label_threshold 폴백
             LOOKAHEAD   = self.lookahead
             NOISE_FLOOR = 0.001
-            tp_pct = self.label_threshold
-            sl_pct = self.label_threshold
 
             raw_labels = np.zeros(len(close), dtype=int)
             for i in range(len(close) - LOOKAHEAD):
                 entry = close.iloc[i]
+                # 실제 _agent_execute 손익 기준 ATR×3.0 TP, ATR×1.5 SL 과 동일하게 맞춤
+                if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
+                    _atr = float(_atr_series.iloc[i])
+                    tp_pct = min(_atr * 3.0, 0.10)  # 최대 10% 상한 (이상치 방어)
+                    sl_pct = min(_atr * 1.5, 0.05)  # 최대 5% 상한
+                else:
+                    tp_pct = self.label_threshold
+                    sl_pct = self.label_threshold
                 tp, sl = entry * (1 + tp_pct), entry * (1 - sl_pct)
                 for j in range(1, LOOKAHEAD + 1):
                     p = close.iloc[i + j]

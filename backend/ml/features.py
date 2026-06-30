@@ -175,7 +175,9 @@ def compute_features(
     df["adx_pos"] = adx_ind.adx_pos()
     df["adx_neg"] = adx_ind.adx_neg()
     df["trix_15"] = trend.TRIXIndicator(close, window=15).trix()
-    df["dpo_20"]  = trend.DPOIndicator(close, window=20).dpo()
+    # DPO: close[t-(n//2+1)] - SMA(close, n)[t] — ta 라이브러리 구현 방식과 동일하나 명시적으로 직접 구현
+    _dpo_n = 20
+    df["dpo_20"]  = close.shift(_dpo_n // 2 + 1) - close.rolling(_dpo_n).mean()
     vortex        = trend.VortexIndicator(high, low, close, window=14)
     df["vortex_diff"] = vortex.vortex_indicator_pos() - vortex.vortex_indicator_neg()
 
