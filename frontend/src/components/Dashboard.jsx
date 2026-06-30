@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api.js'
 
+const fmt = (n) => Number(Math.round(n)).toLocaleString('ko-KR')
+const sign = (n) => n >= 0 ? '+' : ''
+
 function BalanceCard({ title, children }) {
   return (
     <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
@@ -29,6 +32,173 @@ function ProfitBadge({ rate }) {
   )
 }
 
+// ── 포트폴리오 히스토리 ───────────────────────────────────────────
+function PortfolioHistory() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get('/portfolio/history?days=30')
+      setData(res)
+    } catch {
+      setData(null)
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const triggerSnapshot = async () => {
+    try {
+      await api.post('/portfolio/snapshot')
+      await load()
+    } catch { /* ignore */ }
+  }
+
+  if (loading) return null
+  if (!data || data.history.length === 0) {
+    return (
+      <div className="bg-gray-800 rounded-xl border border-gray-700 p-5">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="font-semibold text-white">포트폴리오 손익 히스토리</h3>
+          <button onClick={triggerSnapshot}
+            className="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-1.5 rounded">
+            지금 스냅샷 저장
+          </button>
+        </div>
+        <p className="text-gray-500 text-sm text-center py-4">
+          아직 스냅샷 없음 — 매일 16:00 KST 자동 저장 (또는 위 버튼으로 즉시 저장)
+        </p>
+      </div>
+    )
+  }
+
+  const initial = data.initial_capital
+  const latest  = data.history[data.history.length - 1]
+  const pnlAmt  = latest?.pnl_amount ?? 0
+  const pnlPct  = latest?.pnl_pct ?? 0
+
+  return (
+    <div className="bg-gray-800 rounded-xl border border-gray-700 p-5">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <h3 className="font-semibold text-white">포트폴리오 손익 히스토리</h3>
+          <span className="text-xs text-gray-500">매일 16:00 자동 갱신</span>
+        </div>
+        <button onClick={triggerSnapshot}
+          className="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded">
+          지금 저장
+        </button>
+      </div>
+
+      {/* 요약 카드 */}
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="bg-gray-700/50 rounded-lg p-3">
+          <p className="text-xs text-gray-400 mb-1">원금</p>
+          <p className="font-mono text-sm font-bold text-white">
+            {initial > 0 ? `${fmt(initial)}원` : '—'}
+          </p>
+        </div>
+        <div className="bg-gray-700/50 rounded-lg p-3">
+          <p className="text-xs text-gray-400 mb-1">현재 총평가</p>
+          <p className="font-mono text-sm font-bold text-white">{fmt(latest.total_value)}원</p>
+        </div>
+        <div className="bg-gray-700/50 rounded-lg p-3">
+          <p className="text-xs text-gray-400 mb-1">원금 대비 손익</p>
+          {initial > 0 ? (
+            <>
+              <p className={`font-mono text-sm font-bold ${pnlAmt >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {sign(pnlAmt)}{fmt(Math.abs(pnlAmt))}원
+              </p>
+              <p className={`text-xs font-mono ${pnlPct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {sign(pnlPct)}{pnlPct.toFixed(2)}%
+              </p>
+            </>
+          ) : (
+            <p className="text-gray-500 text-xs">원금 미설정</p>
+          )}
+        </div>
+      </div>
+
+      {/* 날짜별 테이블 (최근 14일) */}
+      <div className="overflow-x-auto max-h-60 overflow-y-auto rounded-lg border border-gray-700/50">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-800 border-b border-gray-700">
+            <tr className="text-gray-400">
+              {['날짜', 'KIS 현금', 'KIS 주식', '업비트 KRW', '업비트 코인', '총평가', '원금 대비'].map(h => (
+                <th key={h} className="px-3 py-2 text-left font-medium whitespace-nowrap">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {[...data.history].reverse().map((row, i) => {
+              const pa = row.pnl_amount
+              const pp = row.pnl_pct
+              return (
+                <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/20">
+                  <td className="px-3 py-1.5 text-gray-400 whitespace-nowrap">{row.snapshot_at?.slice(0, 16)}</td>
+                  <td className="px-3 py-1.5 font-mono text-gray-300">{fmt(row.kis_cash)}</td>
+                  <td className="px-3 py-1.5 font-mono text-gray-300">{fmt(row.kis_stocks)}</td>
+                  <td className="px-3 py-1.5 font-mono text-gray-300">{fmt(row.upbit_krw)}</td>
+                  <td className="px-3 py-1.5 font-mono text-gray-300">{fmt(row.upbit_coins)}</td>
+                  <td className="px-3 py-1.5 font-mono font-semibold text-white">{fmt(row.total_value)}</td>
+                  <td className={`px-3 py-1.5 font-mono font-semibold whitespace-nowrap ${
+                    pa == null ? 'text-gray-600'
+                    : pa >= 0 ? 'text-green-400' : 'text-red-400'
+                  }`}>
+                    {pa != null
+                      ? `${sign(pa)}${fmt(Math.abs(pa))}원 (${sign(pp)}${pp.toFixed(2)}%)`
+                      : '원금 미설정'}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ── ML 신호 + 뉴스 헤드라인 ──────────────────────────────────────
+function NewsPanel({ symbol }) {
+  const [headlines, setHeadlines] = useState(null)
+  const [loading, setLoading]     = useState(false)
+
+  const toggle = async () => {
+    if (headlines !== null) { setHeadlines(null); return }
+    setLoading(true)
+    try {
+      const data = await api.get(`/news/${symbol}/headlines`)
+      setHeadlines(data)
+    } catch { setHeadlines({ headlines: [], news_score: null }) }
+    setLoading(false)
+  }
+
+  return (
+    <div>
+      <button onClick={toggle}
+        className="text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
+        {loading ? '…' : headlines ? '닫기' : '뉴스 보기'}
+      </button>
+      {headlines && (
+        <div className="mt-1 bg-gray-900/80 border border-gray-700 rounded-lg p-2 max-w-xs">
+          {headlines.headlines.length === 0 ? (
+            <p className="text-gray-600 text-xs">캐시 없음 (ML 신호 수신 후 1시간 유효)</p>
+          ) : (
+            <ul className="space-y-1">
+              {headlines.headlines.slice(0, 8).map((h, i) => (
+                <li key={i} className="text-xs text-gray-300 leading-snug">• {h}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const SIGNAL_BADGE = {
   strong_buy:  { label: '강력매수', cls: 'bg-green-800 text-green-300 border-green-600' },
   buy:         { label: '매수',     cls: 'bg-green-900/60 text-green-400 border-green-700' },
@@ -50,7 +220,7 @@ function MLSignalRow({ symbol, data }) {
   const b = SIGNAL_BADGE[data.signal] ?? SIGNAL_BADGE.hold
   const fg = FG_LABEL(data.fear_greed)
   return (
-    <tr className="border-b border-gray-700/50 hover:bg-gray-700/20">
+    <tr className="border-b border-gray-700/50 hover:bg-gray-700/20 align-top">
       <td className="px-4 py-2 font-mono text-sm text-white">{symbol}</td>
       <td className="px-4 py-2">
         <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${b.cls}`}>{b.label}</span>
@@ -63,6 +233,9 @@ function MLSignalRow({ symbol, data }) {
         {fg ? fg.text : '—'}
       </td>
       <td className="px-4 py-2 text-xs text-gray-500">{data.checked_at ?? '-'}</td>
+      <td className="px-4 py-2">
+        <NewsPanel symbol={symbol} />
+      </td>
     </tr>
   )
 }
@@ -97,7 +270,6 @@ export default function Dashboard({ sse }) {
     return () => clearInterval(id)
   }, [fetchBalances])
 
-  const fmt = (n) => Number(n).toLocaleString('ko-KR')
   const posEntries = Object.entries(positions)
 
   return (
@@ -142,6 +314,9 @@ export default function Dashboard({ sse }) {
         </BalanceCard>
       </div>
 
+      {/* 포트폴리오 손익 히스토리 */}
+      <PortfolioHistory />
+
       {/* ML 신호 현황 */}
       {Object.keys(mlSignals).length > 0 && (
         <div className="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
@@ -153,7 +328,7 @@ export default function Dashboard({ sse }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-gray-400 text-xs border-b border-gray-700">
-                  {['종목', '신호', '매수확률', '뉴스감성', '공포탐욕', '갱신'].map((h) => (
+                  {['종목', '신호', '매수확률', '뉴스감성', '공포탐욕', '갱신', '뉴스 헤드라인'].map((h) => (
                     <th key={h} className="text-left px-4 py-2 font-medium">{h}</th>
                   ))}
                 </tr>

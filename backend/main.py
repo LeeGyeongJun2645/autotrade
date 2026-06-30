@@ -320,6 +320,47 @@ async def trigger_daily_report():
     return {"status": "sent"}
 
 
+# ── 포트폴리오 히스토리 ─────────────────────────────────────────
+
+@app.get("/portfolio/history", tags=["Portfolio"])
+async def get_portfolio_history(days: int = Query(default=30, ge=1, le=365)):
+    """일별 포트폴리오 총평가액 히스토리 + 원금 대비 손익."""
+    from backend.core.portfolio_snapshot import get_history, get_initial_capital
+    history = await get_history(days)
+    initial = await get_initial_capital()
+    for row in history:
+        row["initial_capital"] = initial
+        row["pnl_amount"] = row["total_value"] - initial if initial > 0 else None
+        row["pnl_pct"] = (row["total_value"] - initial) / initial * 100 if initial > 0 else None
+    return {"initial_capital": initial, "history": history}
+
+
+@app.post("/portfolio/snapshot", tags=["Portfolio"])
+async def trigger_portfolio_snapshot():
+    """포트폴리오 스냅샷 즉시 저장 (수동 트리거용)."""
+    from backend.core.portfolio_snapshot import take_snapshot
+    result = await take_snapshot()
+    return result
+
+
+# ── 뉴스 헤드라인 ───────────────────────────────────────────────
+
+@app.get("/news/{symbol}/headlines", tags=["News"])
+async def get_news_headlines(symbol: str):
+    """심볼의 최근 뉴스 헤드라인 + 감성점수 (캐시 기준, 최대 1시간 유효)."""
+    import time
+    from backend.ml import news as _news_mod
+    headlines = _news_mod.get_headlines(symbol)
+    cached = _news_mod._score_cache.get(symbol)
+    score = cached[0] if cached and time.time() < cached[1] else None
+    return {
+        "symbol": symbol,
+        "news_score": score,
+        "headlines": headlines,
+        "count": len(headlines),
+    }
+
+
 # ── 차트 데이터 ──────────────────────────────────────────────────
 
 _UPBIT_INTERVALS = {

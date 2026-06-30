@@ -33,6 +33,9 @@ _analyzer = SentimentIntensityAnalyzer()
 _score_cache: dict[str, tuple[float, float]] = {}
 _SCORE_TTL = 3600  # 1시간
 
+# ── 헤드라인 캐시 {symbol: (headlines, expires_at)} ──────────────
+_headlines_cache: dict[str, tuple[list[str], float]] = {}
+
 # ── 업비트 마켓 정보 캐시 {ticker: {korean_name, english_name}} ──
 _market_info: dict[str, dict] = {}
 _market_expires = 0.0
@@ -241,25 +244,35 @@ async def get_sentiment_score(symbol: str, token: str | None = None) -> float:  
 
     # ── LLM 경로 (OPENAI_API_KEY 있을 때) ──────────────────────────
     if settings.openai_api_key:
-        # 관련 영어 제목 필터링 + 한국어 전체 합산 → GPT에 전달
         relevant_en = [t for t in en_titles if any(kw in t.lower() for kw in en_kws)]
         all_titles = relevant_en[:20] + kr_titles[:15]
         llm_score = await _llm_sentiment(all_titles, symbol)
         if llm_score is not None:
             _score_cache[symbol] = (llm_score, now + _SCORE_TTL)
+            _headlines_cache[symbol] = (all_titles, now + _SCORE_TTL)
             logger.info("[뉴스][LLM] %s → %.3f (제목 %d건)", symbol, llm_score, len(all_titles))
             return llm_score
-        # LLM 실패 시 VADER 폴백으로 계속 진행
 
     # ── VADER / 키워드 폴백 경로 ────────────────────────────────────
     en_score, en_cnt = _score_en(en_titles, en_kws)
     kr_score, kr_cnt = _score_kr(kr_titles)
     score = _weighted(en_score, kr_score)
 
+    # 관련 헤드라인만 추려 캐시 (영어: 키워드 매칭, 한국어: 전체)
+    relevant_en_vader = [t for t in en_titles if any(kw in t.lower() for kw in en_kws)]
     _score_cache[symbol] = (score, now + _SCORE_TTL)
+    _headlines_cache[symbol] = (relevant_en_vader[:15] + kr_titles[:15], now + _SCORE_TTL)
 
     logger.info(
         "[뉴스][VADER] %s | 영어 %.3f(%d건) + 한국어 %.3f(%d건) → %.3f",
         symbol, en_score, en_cnt, kr_score, kr_cnt, score,
     )
     return score
+
+
+def get_headlines(symbol: str) -> list[str]:
+    """캐시된 뉴스 헤드라인 반환. 캐시 만료 또는 없으면 빈 리스트."""
+    entry = _headlines_cache.get(symbol)
+    if entry and time.time() < entry[1]:
+        return entry[0]
+    return []

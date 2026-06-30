@@ -263,6 +263,15 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # 포트폴리오 일별 스냅샷: 매일 16:00 KST (장 마감 30분 후)
+        self._scheduler.add_job(
+            self._portfolio_snapshot,
+            CronTrigger(hour=16, minute=0, timezone=KST),
+            id="portfolio_snapshot",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         # 일일 현황 레포트: 매일 22:00 텔레그램 전송
         self._scheduler.add_job(
             self._send_daily_agent_report,
@@ -1546,6 +1555,15 @@ class TradingScheduler:
             await telegram.notify_message(msg)
         except Exception:
             logger.exception("[레포트] 일일 에이전트 레포트 발송 실패")
+
+    async def _portfolio_snapshot(self) -> None:
+        """매일 16:00 KST — KIS + 업비트 총자산 스냅샷 저장."""
+        from backend.core.portfolio_snapshot import take_snapshot
+        try:
+            result = await take_snapshot()
+            logger.info("[포트폴리오] 스냅샷 저장: 총 %.0f원", result["total_value"])
+        except Exception:
+            logger.exception("[포트폴리오] 스냅샷 저장 실패")
 
     def get_agents_snapshot(self) -> list[dict]:
         """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 순)."""

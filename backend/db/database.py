@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS agent_stats (
 )
 """
 
+_CREATE_PORTFOLIO_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_at TEXT    NOT NULL,
+    kis_cash    REAL    DEFAULT 0.0,
+    kis_stocks  REAL    DEFAULT 0.0,
+    upbit_krw   REAL    DEFAULT 0.0,
+    upbit_coins REAL    DEFAULT 0.0,
+    total_value REAL    NOT NULL
+)
+"""
+
 
 async def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +116,7 @@ async def init_db() -> None:
         await db.execute(_CREATE_AGENT_TRADES)
         await db.execute(_CREATE_AGENT_POSITIONS)
         await db.execute(_CREATE_AGENT_STATS)
+        await db.execute(_CREATE_PORTFOLIO_SNAPSHOTS)
         # 기존 DB migration: 누락 컬럼 추가 (OperationalError = 이미 존재, 그 외는 재발생)
         _migrations = [
             "ALTER TABLE agent_stats ADD COLUMN is_active       INTEGER DEFAULT 1",

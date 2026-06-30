@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     rsi_oversold: float = 30.0
     rsi_overbought: float = 70.0
 
+    # ── 포트폴리오 원금 (0 = 첫 스냅샷 기준 자동) ─────────────────────
+    initial_real_capital: float = 0.0
+
     # ── Rate Limit ───────────────────────────────────────────────
     kis_rate_limit_per_sec: int = 18
 
