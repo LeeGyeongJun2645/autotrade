@@ -283,7 +283,8 @@ async def get_volume_rank(n: int = 50) -> list[str]:
                 _STOCK_NAMES_FILE.write_text(json.dumps(_STOCK_NAMES, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
-        _VOLUME_RANK_CACHE = (symbols, now)
+        if symbols:  # 빈 결과는 캐시하지 않아 다음 호출 시 재시도
+            _VOLUME_RANK_CACHE = (symbols, now)
         logger.debug("[KIS] 거래량 상위 %d개: %s", n, symbols[:n])
         return symbols[:n]
     except Exception as e:
@@ -434,7 +435,8 @@ async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200)
         최신 봉이 앞에 옴 (내림차순)
     """
     result: list[dict] = []
-    time_str = ""       # 빈 문자열 = 최신부터
+    seen: set[str] = set()   # 중복 봉 방지 (마지막 봉이 다음 페이지 첫 봉으로 중복 수신)
+    time_str = ""             # 빈 문자열 = 최신부터
     prev_last_key = None
 
     while len(result) < count:
@@ -464,6 +466,10 @@ async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200)
 
         for r in rows:
             try:
+                bar_key = f"{r['stck_bsop_date']}_{r['stck_cntg_hour']}"
+                if bar_key in seen:
+                    continue
+                seen.add(bar_key)
                 result.append({
                     "date":   f"{r['stck_bsop_date']}T{r['stck_cntg_hour']}",
                     "open":   int(r["stck_oprc"]),
@@ -531,7 +537,8 @@ async def get_balance() -> dict[str, Any]:
         },
     )
     output1 = data.get("output1") or []
-    output2 = (data.get("output2") or [{}])[0]
+    raw2 = data.get("output2")
+    output2 = raw2[0] if isinstance(raw2, list) and raw2 else {}
 
     holdings = [
         {

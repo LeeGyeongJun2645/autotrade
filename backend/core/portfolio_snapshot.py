@@ -58,14 +58,18 @@ async def take_snapshot() -> dict:
         logger.warning("[스냅샷] 유효한 잔고 없음(total=%.0f) — 저장 건너뜀", total)
         return {"snapshot_at": now_kst, "total_value": 0, "skipped": True}
 
-    async with connect_db() as db:
-        await db.execute(
-            """INSERT INTO portfolio_snapshots
-               (snapshot_at, kis_cash, kis_stocks, upbit_krw, upbit_coins, total_value)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (now_kst, kis_cash, kis_stocks, upbit_krw, upbit_coins, total),
-        )
-        await db.commit()
+    try:
+        async with connect_db() as db:
+            await db.execute(
+                """INSERT INTO portfolio_snapshots
+                   (snapshot_at, kis_cash, kis_stocks, upbit_krw, upbit_coins, total_value)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (now_kst, kis_cash, kis_stocks, upbit_krw, upbit_coins, total),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error("[스냅샷] DB 저장 실패: %s", e)
+        return {"snapshot_at": now_kst, "total_value": total, "db_error": str(e)}
 
     logger.info(
         "[스냅샷] 저장 완료 | KIS %.0f + 주식 %.0f | 업비트 %.0f + 코인 %.0f | 합계 %.0f",

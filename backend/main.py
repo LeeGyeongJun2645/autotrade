@@ -49,6 +49,23 @@ from backend.models.trade import get_trades
 _LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 
+
+def _json_default(obj):
+    """numpy scalar 등 기본 직렬화 불가 타입 → Python 기본형으로 변환."""
+    import math
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            v = float(obj)
+            return None if (math.isnan(v) or math.isinf(v)) else v
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except ImportError:
+        pass
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 _fmt = logging.Formatter(
     "%(asctime)s %(levelname)-8s %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
@@ -527,12 +544,12 @@ async def stream(request: Request):
 
                 yield {
                     "event": "mlsignal",
-                    "data": json.dumps(scheduler.get_ml_signals(), ensure_ascii=False),
+                    "data": json.dumps(scheduler.get_ml_signals(), ensure_ascii=False, default=_json_default),
                 }
 
                 yield {
                     "event": "agents",
-                    "data": json.dumps(scheduler.get_agents_snapshot(), ensure_ascii=False),
+                    "data": json.dumps(scheduler.get_agents_snapshot(), ensure_ascii=False, default=_json_default),
                 }
             except Exception:
                 import logging as _log

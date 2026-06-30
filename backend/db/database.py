@@ -129,8 +129,9 @@ async def init_db() -> None:
         for sql in _migrations:
             try:
                 await db.execute(sql)
-            except aiosqlite.OperationalError:
-                pass  # 컬럼이 이미 존재하면 무시
+            except aiosqlite.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
         # 조회 성능용 인덱스 (IF NOT EXISTS로 멱등)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_trades_agent ON agent_trades(agent_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_trades_ticker ON agent_trades(ticker)")

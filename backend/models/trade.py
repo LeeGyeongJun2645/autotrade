@@ -82,6 +82,7 @@ async def upsert_position(symbol: str, exchange: str, pos: Position) -> None:
                         highest_price, trailing_stop_price, strategy, opened_at, is_crypto)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(symbol) DO UPDATE SET
+                       exchange=excluded.exchange,
                        entry_price=excluded.entry_price,
                        qty=excluded.qty,
                        stop_loss_price=excluded.stop_loss_price,

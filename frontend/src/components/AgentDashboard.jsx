@@ -23,13 +23,13 @@ const FEAT_DESC = {
 const INITIAL = 10_000_000
 
 // ── 유틸 ────────────────────────────────────────────────────────
-const fmt  = n => Number(Math.round(n)).toLocaleString('ko-KR')
+const fmt  = n => (n == null || !Number.isFinite(Number(n))) ? '—' : Number(Math.round(n)).toLocaleString('ko-KR')
 const sign = n => n >= 0 ? '+' : ''
 const label = a => `${a.agent_id}(${FEAT_KR[a.feature_set] ?? a.feature_set})`
 
 // ── 공통 배지 ────────────────────────────────────────────────────
 function ReturnBadge({ pct, size = 'sm' }) {
-  if (pct == null) return <span className="text-gray-600 text-xs">—</span>
+  if (pct == null || !Number.isFinite(pct)) return <span className="text-gray-600 text-xs">—</span>
   const pos = pct >= 0
   const sz  = size === 'lg' ? 'text-xl' : 'text-sm'
   return (
@@ -40,7 +40,7 @@ function ReturnBadge({ pct, size = 'sm' }) {
 }
 
 function WinBadge({ rate, wins = null, total = null, size = 'sm' }) {
-  if (rate == null) return <span className="text-gray-600 text-xs">—</span>
+  if (rate == null || !Number.isFinite(rate)) return <span className="text-gray-600 text-xs">—</span>
   const color = rate >= 60 ? 'text-green-400' : rate >= 50 ? 'text-yellow-400' : 'text-red-400'
   const sz    = size === 'lg' ? 'text-2xl' : 'text-sm'
   return (
@@ -182,11 +182,13 @@ function AgentDetail({ agent, stockNames = {} }) {
   const loadTrades = async () => {
     if (dbTrades) { setDbTrades(null); return }
     setLoading(true)
+    let mounted = true
     try {
       const data = await api.get(`/agents/${agent.agent_id}/trades?limit=200`)
-      setDbTrades(data)
-    } catch { setDbTrades([]) }
-    setLoading(false)
+      if (mounted) setDbTrades(data)
+    } catch { if (mounted) setDbTrades([]) }
+    if (mounted) setLoading(false)
+    return () => { mounted = false }
   }
 
   const trades = (dbTrades ?? agent.recent_trades ?? []).slice(0, 20)
@@ -317,7 +319,7 @@ function AgentDetail({ agent, stockNames = {} }) {
                 </tr>
               </thead>
               <tbody>
-                {trades.map((t) => <TradeRow key={`${t.id ?? t.traded_at}-${t.ticker}`} t={t} stockNames={stockNames} />)}
+                {trades.map((t, idx) => <TradeRow key={`${t.id ?? t.traded_at}-${t.ticker}-${idx}`} t={t} stockNames={stockNames} />)}
               </tbody>
             </table>
           </div>
@@ -408,7 +410,7 @@ function AgentCard({ agent, onClick, selected }) {
   const unrealized = posVal - invested  // 미실현 손익
 
   // 최근 매도 거래의 실현 손익
-  const lastSell   = agent.recent_trades?.find(t => t.action === 'SELL')
+  const lastSell   = Array.isArray(agent.recent_trades) ? agent.recent_trades.find(t => t.action === 'SELL') : undefined
   const lastPnlAmt = lastSell?.entry_price != null
     ? (lastSell.price - lastSell.entry_price) * lastSell.qty
     : null
@@ -610,7 +612,7 @@ function MarketSection({ agents, market, selected, onSelect, stockNames }) {
       {/* 선택된 에이전트 상세 — 카드 그리드 위에 표시 */}
       {selectedAgent && (
         <div className="mb-4">
-          <AgentDetail agent={selectedAgent} stockNames={stockNames} />
+          <AgentDetail key={selectedAgent.agent_id} agent={selectedAgent} stockNames={stockNames} />
         </div>
       )}
 
