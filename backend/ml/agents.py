@@ -495,8 +495,11 @@ class SimAgent:
             # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
-            # ADX 레짐 필터 — 횡보장(ADX<20)은 예측 신뢰도 낮으므로 스킵
-            if "adx_14" not in full_df.columns or full_df["adx_14"].iloc[-1] < 20:
+            # ADX 레짐 필터 — 횡보장(ADX<20) 또는 NaN이면 예측 신뢰도 낮으므로 스킵
+            # NaN < 20은 Python에서 False를 반환하므로 isna() 체크 필수
+            _adx_val = full_df["adx_14"].iloc[-1] if "adx_14" in full_df.columns else float("nan")
+            import pandas as _pd
+            if _pd.isna(_adx_val) or _adx_val < 20:
                 return "hold", 0.5
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:
@@ -653,8 +656,9 @@ class SimAgent:
     def restore_from_db(self, stats: dict, positions: list[dict], trades: list[dict]) -> None:
         """서버 재시작 시 DB에서 상태 복구."""
         self._balance      = float(stats.get("current_balance") or INITIAL_CAPITAL)
-        self.total_trades  = stats.get("total_trades", 0)
-        self.win_trades    = stats.get("win_trades", 0)
+        # SQLite INTEGER → Python int 보장 (일부 드라이버에서 str 반환 가능)
+        self.total_trades  = int(stats.get("total_trades") or 0)
+        self.win_trades    = int(stats.get("win_trades") or 0)
         self.is_champion   = bool(stats.get("is_champion", 0))
         self.is_active     = bool(stats.get("is_active", 1))
         # 자동 조정된 임계값 복구 (0이거나 없으면 AGENT_CONFIGS 기본값 유지)

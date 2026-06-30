@@ -57,7 +57,8 @@ function PortfolioHistory() {
   }
 
   if (loading) return null
-  if (!data || data.history.length === 0) {
+  // data.history가 null/undefined인 경우(백엔드 응답 이상) 안전 처리
+  if (!data || !Array.isArray(data.history) || data.history.length === 0) {
     return (
       <div className="bg-gray-800 rounded-xl border border-gray-700 p-5">
         <div className="flex items-center justify-between mb-2">
@@ -76,8 +77,9 @@ function PortfolioHistory() {
 
   const initial = data.initial_capital
   const latest  = data.history[data.history.length - 1]
-  const pnlAmt  = latest?.pnl_amount ?? 0
-  const pnlPct  = latest?.pnl_pct ?? 0
+  // NaN/null 모두 0으로 처리 (isFinite 로 NaN·Infinity 방어)
+  const pnlAmt  = Number.isFinite(latest?.pnl_amount) ? latest.pnl_amount : 0
+  const pnlPct  = Number.isFinite(latest?.pnl_pct)    ? latest.pnl_pct    : 0
 
   return (
     <div className="bg-gray-800 rounded-xl border border-gray-700 p-5">
@@ -133,8 +135,8 @@ function PortfolioHistory() {
           </thead>
           <tbody>
             {[...data.history].reverse().map((row, i) => {
-              const pa = row.pnl_amount
-              const pp = row.pnl_pct
+              const pa = Number.isFinite(row.pnl_amount) ? row.pnl_amount : null
+              const pp = Number.isFinite(row.pnl_pct)    ? row.pnl_pct    : null
               return (
                 <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/20">
                   <td className="px-3 py-1.5 text-gray-400 whitespace-nowrap">{row.snapshot_at?.slice(0, 16)}</td>
@@ -167,19 +169,23 @@ function NewsPanel({ symbol }) {
   const [loading, setLoading]     = useState(false)
 
   const toggle = async () => {
+    if (loading) return                          // 로딩 중 재클릭 레이스 컨디션 방지
     if (headlines !== null) { setHeadlines(null); return }
     setLoading(true)
     try {
       const data = await api.get(`/news/${symbol}/headlines`)
       setHeadlines(data)
-    } catch { setHeadlines({ headlines: [], news_score: null }) }
-    setLoading(false)
+    } catch {
+      setHeadlines({ headlines: [], news_score: null })
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
     <div>
-      <button onClick={toggle}
-        className="text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
+      <button onClick={toggle} disabled={loading}
+        className="text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2 disabled:opacity-50">
         {loading ? '…' : headlines ? '닫기' : '뉴스 보기'}
       </button>
       {headlines && (

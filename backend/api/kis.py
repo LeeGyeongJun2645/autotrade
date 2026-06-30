@@ -533,8 +533,8 @@ async def get_balance() -> dict[str, Any]:
 
     holdings = [
         {
-            "symbol": h["pdno"],
-            "name": h["prdt_name"],
+            "symbol": h.get("pdno", ""),
+            "name": h.get("prdt_name", ""),
             "qty": int(float(h.get("hldg_qty") or 0)),
             "avg_price": int(float(h.get("pchs_avg_pric") or 0)),
             "current_price": int(float(h.get("prpr") or 0)),

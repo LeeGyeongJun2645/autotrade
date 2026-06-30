@@ -329,9 +329,16 @@ async def get_portfolio_history(days: int = Query(default=30, ge=1, le=365)):
     history = await get_history(days)
     initial = await get_initial_capital()
     for row in history:
-        row["initial_capital"] = initial
-        row["pnl_amount"] = row["total_value"] - initial if initial > 0 else None
-        row["pnl_pct"] = (row["total_value"] - initial) / initial * 100 if initial > 0 else None
+        if initial > 0:
+            pnl_amt = row["total_value"] - initial
+            pnl_pct = pnl_amt / initial * 100
+            # NaN/inf 방어 (분모 0이나 비정상 값 차단)
+            import math
+            row["pnl_amount"] = pnl_amt if math.isfinite(pnl_amt) else 0.0
+            row["pnl_pct"]    = pnl_pct if math.isfinite(pnl_pct) else 0.0
+        else:
+            row["pnl_amount"] = 0.0
+            row["pnl_pct"]    = 0.0
     return {"initial_capital": initial, "history": history}
 
 
@@ -348,11 +355,9 @@ async def trigger_portfolio_snapshot():
 @app.get("/news/{symbol}/headlines", tags=["News"])
 async def get_news_headlines(symbol: str):
     """심볼의 최근 뉴스 헤드라인 + 감성점수 (캐시 기준, 최대 1시간 유효)."""
-    import time
-    from backend.ml import news as _news_mod
-    headlines = _news_mod.get_headlines(symbol)
-    cached = _news_mod._score_cache.get(symbol)
-    score = cached[0] if cached and time.time() < cached[1] else None
+    from backend.ml.news import get_headlines, get_cached_score
+    headlines = get_headlines(symbol)
+    score = get_cached_score(symbol)
     return {
         "symbol": symbol,
         "news_score": score,

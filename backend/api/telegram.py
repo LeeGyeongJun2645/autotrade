@@ -4,6 +4,7 @@
 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 미설정 시 모든 함수는 no-op.
 """
 
+import html
 import logging
 
 import httpx
@@ -11,6 +12,11 @@ import httpx
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _esc(text: str) -> str:
+    """HTML parse_mode용 특수문자 이스케이프 (<, >, &, ")."""
+    return html.escape(str(text))
 
 _BASE = "https://api.telegram.org"
 _TIMEOUT = 10
@@ -78,10 +84,10 @@ async def notify_buy(
     price_str = f"{price:,.0f}원"
     await _send(
         f"📈 <b>매수 체결</b>\n"
-        f"종목: <code>{symbol}</code>\n"
+        f"종목: <code>{_esc(symbol)}</code>\n"
         f"수량: {qty_str} @ {price_str}\n"
-        f"전략: {strategy}\n"
-        f"사유: {reason}"
+        f"전략: {_esc(strategy)}\n"
+        f"사유: {_esc(reason)}"
     )
 
 
@@ -110,10 +116,10 @@ async def notify_sell(
 
     await _send(
         f"{emoji} <b>매도 체결</b>\n"
-        f"종목: <code>{symbol}</code>\n"
+        f"종목: <code>{_esc(symbol)}</code>\n"
         f"수량: {qty_str} @ {price_str}\n"
         f"수익률: {pnl_pct:+.2f}%\n"
-        f"사유: {reason}"
+        f"사유: {_esc(reason)}"
     )
 
 
@@ -124,10 +130,14 @@ async def notify_error(context: str, error: Exception) -> None:
         context: 오류가 발생한 위치/상황 설명
         error:   발생한 예외 객체
     """
+    # 오류 메시지에 HTML 특수문자가 있으면 parse_mode=HTML에서 400 발생
+    err_msg = f"{type(error).__name__}: {error}"
+    # 4096자 초과 시 텔레그램 400 오류 — 앞 3800자만 사용
+    err_msg = err_msg[:3800]
     await _send(
         f"⚠️ <b>오류 발생</b>\n"
-        f"위치: {context}\n"
-        f"내용: {type(error).__name__}: {error}"
+        f"위치: {_esc(context)}\n"
+        f"내용: {_esc(err_msg)}"
     )
 
 

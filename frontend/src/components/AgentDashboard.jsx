@@ -524,7 +524,7 @@ function AgentCard({ agent, onClick, selected }) {
 function SectionSummary({ agents, market }) {
   const active    = agents.filter(a => a.total_trades > 0)
   const bestVal   = active.length
-    ? Math.max(...active.map(a => a.total_value ?? a.balance))
+    ? (Math.max(...active.map(a => a.total_value ?? a.balance ?? INITIAL)) || INITIAL)
     : INITIAL
   const champ     = agents.find(a => a.is_champion)
   const isCoin    = market === 'coin'
@@ -646,7 +646,7 @@ export default function AgentDashboard({ agents }) {
   const totalTrades  = agents.reduce((s, a) => s + a.total_trades, 0)
   const activeAgents = agents.filter(a => a.total_trades > 0)
   const bestTotal    = activeAgents.length
-    ? Math.max(...activeAgents.map(a => a.total_value ?? a.balance))
+    ? (Math.max(...activeAgents.map(a => a.total_value ?? a.balance ?? INITIAL)) || INITIAL)
     : INITIAL
   const champions    = agents.filter(a => a.is_champion)
 

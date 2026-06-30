@@ -276,3 +276,11 @@ def get_headlines(symbol: str) -> list[str]:
     if entry and time.time() < entry[1]:
         return entry[0]
     return []
+
+
+def get_cached_score(symbol: str) -> float | None:
+    """캐시된 감성 점수 반환 (공개 API). 캐시 없거나 만료 시 None."""
+    entry = _score_cache.get(symbol)
+    if entry and time.time() < entry[1]:
+        return entry[0]
+    return None

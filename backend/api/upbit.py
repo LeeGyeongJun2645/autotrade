@@ -318,8 +318,16 @@ async def get_balance() -> dict[str, Any]:
     krw = 0.0
     raw_holdings = []
     for item in data:
-        currency = item["currency"]
-        balance = float(item["balance"]) + float(item.get("locked") or 0)
+        currency = item.get("currency", "")
+        # locked가 문자열 "None" 또는 None인 경우 0으로 처리
+        _locked_raw = item.get("locked")
+        _locked = 0.0
+        if _locked_raw not in (None, "", "None", "null"):
+            try:
+                _locked = float(_locked_raw)
+            except (ValueError, TypeError):
+                _locked = 0.0
+        balance = float(item.get("balance") or 0) + _locked
         if currency == "KRW":
             krw = balance
             continue

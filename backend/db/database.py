@@ -135,6 +135,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_trades_agent ON agent_trades(agent_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_trades_ticker ON agent_trades(ticker)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_trades_at ON agent_trades(traded_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_at ON portfolio_snapshots(snapshot_at)")
         await db.commit()
     logger.info("DB 초기화 완료: %s", DB_PATH)
 
