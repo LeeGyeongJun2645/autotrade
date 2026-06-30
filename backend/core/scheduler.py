@@ -236,15 +236,6 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # 일일 백테스트 리포트: 매일 08:00 KST
-        self._scheduler.add_job(
-            self._daily_report,
-            CronTrigger(hour=8, minute=0, timezone=KST),
-            id="daily_report",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
         # AI 에이전트 경쟁 시뮬레이션: 5분마다
         self._scheduler.add_job(
             self._agent_tick,
@@ -254,11 +245,29 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # 전 에이전트 일일 재학습: 매일 18:00 (장 마감 후, 코인/주식 모두 안전)
+        # 코인 일일 현황 레포트: 매일 06:00 KST
+        self._scheduler.add_job(
+            self._send_daily_coin_report,
+            CronTrigger(hour=6, minute=0, timezone=KST),
+            id="daily_coin_report",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 전 에이전트 일일 재학습: 매일 06:05 (코인 현황 직후, 하루치 데이터 반영)
         self._scheduler.add_job(
             self._daily_retrain,
-            CronTrigger(hour=18, minute=0, timezone=KST),
+            CronTrigger(hour=6, minute=5, timezone=KST),
             id="daily_retrain",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 주식 일일 현황 레포트: 평일 15:35 KST (장 마감 후)
+        self._scheduler.add_job(
+            self._send_daily_stock_report,
+            CronTrigger(day_of_week="mon-fri", hour=15, minute=35, timezone=KST),
+            id="daily_stock_report",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -268,15 +277,6 @@ class TradingScheduler:
             self._portfolio_snapshot,
             CronTrigger(hour=16, minute=0, timezone=KST),
             id="portfolio_snapshot",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
-        # 일일 현황 레포트: 매일 22:00 텔레그램 전송
-        self._scheduler.add_job(
-            self._send_daily_agent_report,
-            CronTrigger(hour=22, minute=0, timezone=KST),
-            id="daily_agent_report",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -1409,9 +1409,10 @@ class TradingScheduler:
         logger.info("[Retrain] 완료: %d/20 에이전트 재학습", success)
         try:
             await telegram.notify_message(
-                f"🔄 <b>AI 일일 재학습 완료 (18:00)</b>\n"
+                f"🔄 <b>AI 일일 재학습 완료 (06:05)</b>\n"
                 f"성공: {success}/20 에이전트\n"
-                f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv_pool)}종목"
+                f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv_pool)}종목\n"
+                f"※ 전일 거래내역 sample_weight 반영 → 승률 지속 개선"
             )
         except Exception:
             pass
@@ -1524,50 +1525,134 @@ class TradingScheduler:
                 total_trades, avg_return * 100,
             )
 
-    async def _send_daily_agent_report(self) -> None:
-        """매일 22:00 — 에이전트 현황 레포트 텔레그램 전송."""
+    # ── 에이전트 역할명 매핑 ──────────────────────────────────────────
+    _AGENT_ROLE: dict[tuple, str] = {
+        ("all",      3): "단기종합",   # RSI/MACD/추세/거래량 복합, 15분 내 청산
+        ("all",      5): "중기종합",   # 복합전략, 25분 내 청산
+        ("all",      8): "장기종합",   # 복합전략, 40분 내 청산
+        ("momentum", 3): "단기모멘텀", # RSI·MACD·스토캐스틱, 속도 추종
+        ("momentum", 5): "중기모멘텀",
+        ("momentum", 8): "장기모멘텀",
+        ("trend",    3): "단기추세",   # MA·ADX·VWAP·이치모쿠, 방향성 추종
+        ("trend",    5): "중기추세",
+        ("trend",    8): "장기추세",
+        ("volume",   3): "단기거래량", # OBV·CMF·MFI·OFI, 거래량 이상 감지
+        ("volume",   5): "중기거래량",
+        ("volume",   8): "장기거래량",
+    }
+
+    def _build_agent_section(self, agents: list, initial_capital: float) -> str:
+        """에이전트 목록 → 텔레그램용 상세 문자열 생성."""
+        total_now  = sum(a._balance + a.position_value for a in agents)
+        total_init = len(agents) * initial_capital
+        pnl_amt    = total_now - total_init
+        pnl_pct    = pnl_amt / total_init * 100 if total_init else 0
+        all_trades = sum(a.total_trades for a in agents)
+        all_wins   = sum(a.win_trades for a in agents)
+        wr = all_wins / all_trades * 100 if all_trades else 0
+        active = sum(1 for a in agents if a.is_active)
+
+        summary = (
+            f"원금: {total_init:,.0f}원  →  현재: {total_now:,.0f}원\n"
+            f"손익: <b>{pnl_amt:+,.0f}원</b> ({pnl_pct:+.2f}%)\n"
+            f"승률: {wr:.1f}%  거래: {all_trades}건  활성: {active}/{len(agents)}"
+        )
+        lines = []
+        for a in sorted(agents, key=lambda x: -x.total_return):
+            flag = "⛔" if not a.is_active else ("★" if a.is_champion else "·")
+            role = self._AGENT_ROLE.get((a.feature_set, a.lookahead), a.feature_set)
+            agent_pnl = (a._balance + a.position_value - initial_capital)
+            lines.append(
+                f"{flag} {a.agent_id}({role}): "
+                f"{a.total_return*100:+.1f}% | {agent_pnl:+,.0f}원 | "
+                f"승률 {a.win_rate*100:.0f}% | {a.total_trades}건"
+            )
+        return summary + "\n" + "\n".join(lines)
+
+    async def _send_daily_coin_report(self) -> None:
+        """매일 06:00 KST — 코인 AI 현황 + 실제 업비트 잔고 텔레그램 전송."""
         from backend.ml.agents import AGENTS, INITIAL_CAPITAL
 
         now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
 
-        def _market_lines(agents: list) -> tuple[str, str]:
-            total_now = sum(a._balance + a.position_value for a in agents)
-            total_start = len(agents) * INITIAL_CAPITAL
-            ret_pct = (total_now - total_start) / total_start * 100
-            all_trades = sum(a.total_trades for a in agents)
-            all_wins = sum(a.win_trades for a in agents)
-            wr = all_wins / all_trades * 100 if all_trades else 0
-            active = sum(1 for a in agents if a.is_active)
-
-            summary = (
-                f"총평가: {total_now:,.0f}원 ({ret_pct:+.2f}%)\n"
-                f"승률: {wr:.1f}% / {all_trades}건 | 활성: {active}/{len(agents)}"
+        # 실제 업비트 잔고
+        real_lines = []
+        try:
+            bal = await upbit.get_balance()
+            krw = bal.get("krw", 0)
+            holdings = bal.get("holdings", [])
+            coins_str = (
+                "  ".join(
+                    f"{h.get('ticker','?')} {h.get('balance',0):.4f}개 ({h.get('current_value',0):,.0f}원)"
+                    for h in holdings[:5]
+                ) if holdings else "없음"
             )
-            lines = []
-            for a in sorted(agents, key=lambda x: -x.total_return):
-                flag = "⛔" if not a.is_active else ("★" if a.is_champion else "·")
-                lines.append(
-                    f"{flag} {a.agent_id}({a.feature_set[:3]}): "
-                    f"{a.total_return*100:+.1f}% | {a.win_rate*100:.0f}% ({a.total_trades}건)"
-                )
-            return summary, "\n".join(lines)
+            real_lines = [
+                f"💰 <b>실제 업비트 계좌</b>",
+                f"KRW 잔고: {krw:,.0f}원",
+                f"보유 코인: {coins_str}",
+            ]
+        except Exception:
+            real_lines = ["💰 <b>실제 업비트 계좌</b>", "잔고 조회 실패"]
 
-        coin_agents  = [a for a in AGENTS.values() if a.market == "coin"]
-        stock_agents = [a for a in AGENTS.values() if a.market == "stock"]
-        c_summary, c_lines = _market_lines(coin_agents)
-        s_summary, s_lines = _market_lines(stock_agents)
+        coin_agents = [a for a in AGENTS.values() if a.market == "coin"]
+        agent_section = self._build_agent_section(coin_agents, INITIAL_CAPITAL)
 
         msg = (
-            f"📊 <b>AI 에이전트 일일 현황</b>  {now_str}\n"
-            f"{'─'*28}\n"
-            f"🪙 <b>코인 (AI01~10)</b>\n{c_summary}\n{c_lines}\n"
-            f"{'─'*28}\n"
-            f"📈 <b>주식 (AI11~20)</b>\n{s_summary}\n{s_lines}"
+            f"🪙 <b>코인 AI 일일 현황</b>  {now_str}\n"
+            f"{'─'*30}\n"
+            + "\n".join(real_lines) + "\n"
+            f"{'─'*30}\n"
+            f"🤖 <b>AI 에이전트 (코인 10개)</b>\n"
+            + agent_section
         )
         try:
             await telegram.notify_message(msg)
         except Exception:
-            logger.exception("[레포트] 일일 에이전트 레포트 발송 실패")
+            logger.exception("[레포트] 코인 일일 레포트 발송 실패")
+
+    async def _send_daily_stock_report(self) -> None:
+        """평일 15:35 KST — 주식 AI 현황 + 실제 KIS 잔고 텔레그램 전송."""
+        from backend.ml.agents import AGENTS, INITIAL_CAPITAL
+
+        now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
+        # 실제 KIS 잔고
+        real_lines = []
+        try:
+            bal = await kis.get_balance()
+            cash       = bal.get("cash", 0)
+            total_eval = bal.get("total_eval", 0)
+            holdings   = bal.get("holdings", [])
+            stocks_str = (
+                "  ".join(
+                    f"{h.get('name','?')} {h.get('qty',0)}주 ({h.get('profit_rate',0)*100:+.1f}%)"
+                    for h in holdings[:5]
+                ) if holdings else "없음"
+            )
+            real_lines = [
+                f"💰 <b>실제 KIS 계좌</b>",
+                f"예수금: {cash:,.0f}원  총평가: {total_eval:,.0f}원",
+                f"보유 주식: {stocks_str}",
+            ]
+        except Exception:
+            real_lines = ["💰 <b>실제 KIS 계좌</b>", "잔고 조회 실패 (API 키 미설정 가능)"]
+
+        stock_agents = [a for a in AGENTS.values() if a.market == "stock"]
+        agent_section = self._build_agent_section(stock_agents, INITIAL_CAPITAL)
+
+        msg = (
+            f"📈 <b>주식 AI 일일 현황</b>  {now_str}\n"
+            f"{'─'*30}\n"
+            + "\n".join(real_lines) + "\n"
+            f"{'─'*30}\n"
+            f"🤖 <b>AI 에이전트 (주식 10개)</b>\n"
+            + agent_section
+        )
+        try:
+            await telegram.notify_message(msg)
+        except Exception:
+            logger.exception("[레포트] 주식 일일 레포트 발송 실패")
 
     async def _portfolio_snapshot(self) -> None:
         """매일 16:00 KST — KIS + 업비트 총자산 스냅샷 저장."""
