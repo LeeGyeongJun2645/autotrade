@@ -113,6 +113,17 @@ FEATURE_NAMES = [
     "dist_to_r1",   # (R1/close) - 1: 익절 목표까지 남은 거리
     "dist_to_s1",   # (close/S1) - 1: 지지선 대비 여유
     "above_pp",     # close > PP → 1 (추세 방향)
+    # ── Order Flow Imbalance Proxy ──────────────────────────────────
+    "ofi_5",        # 5봉 방향성 볼륨 비율 (-1~1, 양수=매수우세)
+    "ofi_20",       # 20봉 OFI
+    "cvd_ratio",    # 60봉 누적 볼륨 델타 비율
+    # ── Garman-Klass 변동성 ─────────────────────────────────────────
+    "gk_vol",       # OHLC 4가지 활용 변동성 (ATR 대비 7.4배 효율)
+    # ── 멀티타임프레임 수익률 ────────────────────────────────────────
+    "mtf_ret_15m",  # 15분 수익률 (3봉)
+    "mtf_ret_1h",   # 1시간 수익률 (12봉)
+    "mtf_ret_4h",   # 4시간 수익률 (48봉)
+    "mtf_align",    # 현재봉 방향과 상위 TF 3개 일치 수 (0~3)
 ]
 
 
@@ -495,6 +506,37 @@ def compute_features(
         df["ichi_above_cloud"]       = 0.5
         df["ichi_cloud_green"]       = 0.5
         df["ichi_tenkan_kijun_bull"] = 0.5
+
+    # ── Order Flow Imbalance Proxy (논문: Sharpe 1.4→3.6 개선) ────────
+    # OHLCV에서 방향성 볼륨 추정: 양봉=매수압력, 음봉=매도압력
+    _vol_delta     = vol * np.sign(close - open_)
+    _vr5           = vol.rolling(5).sum().replace(0, np.nan)
+    _vr20          = vol.rolling(20).sum().replace(0, np.nan)
+    _vr60          = vol.rolling(60).sum().replace(0, np.nan)
+    df["ofi_5"]    = (_vol_delta.rolling(5).sum()  / _vr5).fillna(0.0)
+    df["ofi_20"]   = (_vol_delta.rolling(20).sum() / _vr20).fillna(0.0)
+    df["cvd_ratio"] = (_vol_delta.rolling(60).sum() / _vr60).fillna(0.0)
+
+    # ── Garman-Klass 변동성 (OHLC 4가지 활용, ATR 대비 7.4배 효율) ──
+    _ln_hl = (np.log((high / low.replace(0, np.nan)).clip(lower=1e-9))) ** 2
+    _ln_co = (np.log((close / open_.replace(0, np.nan)).clip(lower=1e-9))) ** 2
+    df["gk_vol"] = np.sqrt(
+        (0.5 * _ln_hl - (2 * np.log(2) - 1) * _ln_co).clip(lower=0).rolling(14).mean()
+    ).fillna(0.0)
+
+    # ── 멀티타임프레임 수익률 (5분봉 기준, 상위 TF 모멘텀 정렬 감지) ─
+    df["mtf_ret_15m"] = close.pct_change(3).fillna(0.0)    # 15분
+    df["mtf_ret_1h"]  = close.pct_change(12).fillna(0.0)   # 1시간
+    df["mtf_ret_4h"]  = close.pct_change(48).fillna(0.0)   # 4시간
+    _dir_1   = np.sign(close.pct_change(1))
+    _dir_15m = np.sign(df["mtf_ret_15m"])
+    _dir_1h  = np.sign(df["mtf_ret_1h"])
+    _dir_4h  = np.sign(df["mtf_ret_4h"])
+    df["mtf_align"] = (
+        (_dir_1 == _dir_15m).astype(float) +
+        (_dir_1 == _dir_1h).astype(float) +
+        (_dir_1 == _dir_4h).astype(float)
+    ).fillna(0.0)
 
     # ── 일별 피봇 포인트 (전일 H/L/C 기준) ──────────────────────────
     try:

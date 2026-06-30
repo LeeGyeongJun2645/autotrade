@@ -46,6 +46,9 @@ FEATURE_SETS: dict[str, list[str]] = {
         "btc_corr_20", "btc_ret_5",
         "taker_buy_ratio",
         "ha_color", "ha_bull_streak",
+        # OFI + MTF (모멘텀 방향성 강화)
+        "ofi_5", "ofi_20", "cvd_ratio",
+        "mtf_ret_15m", "mtf_ret_1h", "mtf_align",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -60,6 +63,9 @@ FEATURE_SETS: dict[str, list[str]] = {
         "oi_price_diverge",
         "ichi_above_cloud", "ichi_cloud_green", "ichi_tenkan_kijun_bull",
         "above_pp", "dist_to_r1",
+        # MTF 모멘텀 + GK 변동성 (추세 강도 보조)
+        "mtf_ret_1h", "mtf_ret_4h", "mtf_align",
+        "gk_vol",
     ],
     "volume": [
         "vol_ratio", "obv_change", "cmf_20",
@@ -70,6 +76,9 @@ FEATURE_SETS: dict[str, list[str]] = {
         "btc_ret_5", "kospi_ret_5",
         "oi_change_pct", "taker_buy_ratio",
         "dist_to_pp", "dist_to_s1",
+        # OFI + GK (거래량 품질 강화)
+        "ofi_5", "ofi_20", "cvd_ratio",
+        "gk_vol",
     ],
 }
 
@@ -477,19 +486,19 @@ class SimAgent:
                     return False
                 # 검증셋에서 정밀도 최대화 임계값 탐색 → 실제 buy_threshold 동적 조정
                 _best_thr, _best_prec = self.buy_threshold, 0.0
-                for _t in np.arange(0.45, 0.80, 0.01):
+                for _t in np.arange(0.50, 0.85, 0.01):
                     _p = (_val_prob >= _t).astype(int)
                     if _p.sum() < max(5, len(y_val) // 20):
                         continue
                     _recall = float(_p[y_val == 1].mean()) if (y_val == 1).sum() > 0 else 0.0
-                    if _recall < 0.15:
+                    if _recall < 0.10:  # 최소 10% recall 유지 (더 고정밀 임계값 탐색)
                         continue
                     from sklearn.metrics import precision_score as _ps
                     _prec = _ps(y_val, _p, zero_division=0)
                     if _prec > _best_prec:
                         _best_prec, _best_thr = _prec, float(_t)
                 if _best_prec > 0:
-                    self.buy_threshold = round(min(max(_best_thr, 0.50), 0.78), 2)
+                    self.buy_threshold = round(min(max(_best_thr, 0.60), 0.82), 2)  # 최소 60%로 상향
                 logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
                              self.agent_id, val_acc * 100, self.buy_threshold, _best_prec)
 
@@ -551,6 +560,29 @@ class SimAgent:
         except Exception:
             logger.debug("[%s] predict 예외 — hold 반환", self.agent_id, exc_info=True)
             return "hold", 0.5
+
+        # ── 펀딩률 극단값 필터 (코인 전용) ─────────────────────────────
+        # funding_rate > 0.001 (0.1%/8h) = 롱 과열 → 매수 확률 억제
+        if self.market == "coin" and self._cached_funding_rates:
+            try:
+                _latest_fr = float(self._cached_funding_rates[-1].get("fundingRate", 0) or 0)
+                if _latest_fr > 0.001:
+                    prob = max(0.01, prob - min(_latest_fr * 80, 0.10))
+                elif _latest_fr < -0.001:  # 숏 과열 → 매수 기회
+                    prob = min(0.99, prob + min(abs(_latest_fr) * 40, 0.05))
+            except Exception:
+                pass
+
+        # ── MTF 정렬 필터: 3개 타임프레임 모두 불일치 시 신호 억제 ───
+        try:
+            if "mtf_align" in full_df.columns:
+                _align = float(full_df["mtf_align"].iloc[-1])
+                if _align == 0.0:  # 15분·1시간·4시간 방향 전부 불일치
+                    prob = max(0.01, min(0.99, prob * 0.85))
+                elif _align == 3.0:  # 전부 일치 → 강화
+                    prob = max(0.01, min(0.99, prob * 1.08))
+        except Exception:
+            pass
 
         if prob >= self.buy_threshold:
             return "buy", round(prob, 4)
@@ -785,6 +817,8 @@ async def predict_ensemble(
     candidates = [
         a for a in AGENTS.values()
         if a.market == market and a._model is not None
+        # 30거래 이상 쌓인 에이전트 중 승률 40% 미만이면 앙상블에서 제외
+        and not (a.total_trades >= 30 and a.win_rate < 0.40)
     ]
     if not candidates:
         return "hold", 0.5
@@ -805,6 +839,14 @@ async def predict_ensemble(
         ret    = max(agent.total_return, -0.5)
         sharpe = agent._sharpe_weight()
         weight = max(sharpe * max(1.0 + ret, 0.1), 0.1)
+        # 고승률 에이전트 발언권 강화 (30거래 이상 검증된 경우만)
+        if agent.total_trades >= 30:
+            if agent.win_rate >= 0.60:
+                weight *= 2.0
+            elif agent.win_rate >= 0.55:
+                weight *= 1.5
+            elif agent.win_rate >= 0.50:
+                weight *= 1.2
 
         # 레짐별 전략 가중치 조정
         if current_regime == 1:    # 추세장: trend 우대, volume 축소
