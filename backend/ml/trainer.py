@@ -18,10 +18,10 @@ DEFAULT_TICKERS = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"]
 _status: dict[str, dict] = {}
 
 
-async def train_ticker(ticker: str, count: int = 200) -> dict:
+async def train_ticker(ticker: str, count: int = 2000) -> dict:
     """단일 티커 모델 학습."""
     try:
-        ohlcv = await upbit.get_ohlcv(ticker, interval="days", count=min(count, 200))
+        ohlcv = await upbit.get_ohlcv(ticker, interval="minutes/5", count=min(count, 2000))
         if not ohlcv:
             logger.warning("[ML Trainer] %s: OHLCV 없음", ticker)
             return {"ticker": ticker, "error": "OHLCV 없음"}

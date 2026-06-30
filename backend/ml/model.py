@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-LABEL_THRESHOLD = 0.005  # +0.5% 이상 상승 → 양성 레이블
+LABEL_THRESHOLD = 0.003  # +0.3%로 낮춤 — 거래비용(0.05%) 충분 커버, 양성 레이블 비율 확보
 
 _FEAR_GREED_CACHE: tuple[float, float] | None = None  # (value_-1to1, timestamp)
 _FEAR_GREED_TTL = 3600.0  # 1시간 캐시
@@ -62,14 +62,16 @@ class TrainResult:
     trained_at: str
 
 
-def _prob_to_signal(prob: float) -> tuple[str, str]:
-    if prob >= 0.70:
+def _prob_to_signal(prob: float, buy_thr: float = 0.58) -> tuple[str, str]:
+    strong_thr = min(buy_thr + 0.12, 0.90)
+    sell_thr   = 1.0 - buy_thr
+    if prob >= strong_thr:
         return "strong_buy", "high"
-    if prob >= 0.58:
+    if prob >= buy_thr:
         return "buy", "medium"
-    if prob <= 0.30:
+    if prob <= 1.0 - strong_thr:
         return "strong_sell", "high"
-    if prob <= 0.42:
+    if prob <= sell_thr:
         return "sell", "medium"
     return "hold", "low"
 
@@ -106,6 +108,7 @@ class XGBSignalModel:
         self._model: XGBClassifier | None = None
         self._scaler: StandardScaler | None = None
         self._trained_at: str | None = None
+        self._buy_threshold: float = 0.58   # 정밀도 기반 최적 임계값 (학습 후 갱신)
         self._model_path = MODEL_DIR / f"xgb_{ticker.replace('/', '_').replace('-', '_')}.pkl"
 
     # ── 저장/로드 ────────────────────────────────────────────────
@@ -127,6 +130,7 @@ class XGBSignalModel:
             self._model = model
             self._scaler = data["scaler"]
             self._trained_at = data.get("trained_at")
+            self._buy_threshold = float(data.get("buy_threshold", 0.58))
             logger.info("[ML] %s 모델 로드 성공 (학습일: %s)", self.ticker, self._trained_at)
             return True
         except Exception as e:
@@ -136,7 +140,12 @@ class XGBSignalModel:
     def save(self) -> None:
         with open(self._model_path, "wb") as f:
             pickle.dump(
-                {"model": self._model, "scaler": self._scaler, "trained_at": self._trained_at},
+                {
+                    "model": self._model,
+                    "scaler": self._scaler,
+                    "trained_at": self._trained_at,
+                    "buy_threshold": self._buy_threshold,
+                },
                 f,
             )
         logger.info("[ML] %s 모델 저장: %s", self.ticker, self._model_path)
@@ -176,8 +185,13 @@ class XGBSignalModel:
         X = feat_df[FEATURE_NAMES].values
         y = label.values.astype(int)
 
-        # TimeSeriesSplit 5-fold
-        tscv = TimeSeriesSplit(n_splits=5)
+        # 클래스 불균형 보정
+        _n_neg = int((y == 0).sum())
+        _n_pos = int((y == 1).sum())
+        _scale_pos = _n_neg / max(_n_pos, 1)
+
+        # Purged TimeSeriesSplit — gap=12봉(1시간) 엠바고로 레이블 오염 방지
+        tscv = TimeSeriesSplit(n_splits=5, gap=12)
         acc_scores, auc_scores = [], []
 
         for train_idx, val_idx in tscv.split(X):
@@ -194,6 +208,7 @@ class XGBSignalModel:
                 learning_rate=0.05,
                 subsample=0.8,
                 colsample_bytree=0.8,
+                scale_pos_weight=_scale_pos,
                 eval_metric="logloss",
                 random_state=42,
                 n_jobs=-1,
@@ -215,15 +230,34 @@ class XGBSignalModel:
             learning_rate=0.05,
             subsample=0.8,
             colsample_bytree=0.8,
+            scale_pos_weight=_scale_pos,
             eval_metric="logloss",
             random_state=42,
             n_jobs=-1,
         )
         final.fit(X_s, y, verbose=False)
 
+        # 정밀도(Precision) 기반 최적 임계값 탐색 — 승률 직결 지표
+        _probs_all = final.predict_proba(X_s)[:, 1]
+        _best_thr, _best_prec = 0.58, 0.0
+        for _t in np.arange(0.45, 0.80, 0.01):
+            _preds = (_probs_all >= _t).astype(int)
+            _cnt = int(_preds.sum())
+            if _cnt < max(10, len(y) // 20):
+                continue
+            _recall = float(_preds[y == 1].mean()) if (y == 1).sum() > 0 else 0.0
+            if _recall < 0.20:
+                continue
+            from sklearn.metrics import precision_score as _ps
+            _prec = _ps(y, _preds, zero_division=0)
+            if _prec > _best_prec:
+                _best_prec, _best_thr = _prec, float(_t)
+        logger.info("[ML] %s 최적 임계값: %.2f (정밀도 %.3f)", self.ticker, _best_thr, _best_prec)
+
         self._model = final
         self._scaler = scaler
         self._trained_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._buy_threshold = _best_thr
         self.save()
 
         avg_acc = float(np.mean(acc_scores)) if acc_scores else 0.0
@@ -331,7 +365,7 @@ class XGBSignalModel:
             except Exception as e:
                 logger.debug("[ML] KIS 보조지표 실패 (무시): %s", e)
 
-        signal, confidence = _prob_to_signal(buy_prob)
+        signal, confidence = _prob_to_signal(buy_prob, self._buy_threshold)
 
         # 뉴스 감성 조회
         news_score = await get_sentiment_score(self.ticker, token)

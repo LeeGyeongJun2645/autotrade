@@ -40,6 +40,7 @@ FEATURE_NAMES = [
     # ── 변동성 ────────────────────────────
     "bb_pband",
     "atr_pct",
+    "rv_ratio",          # 단기(5봉) / 중기(20봉) 실현변동성 비율 — 변동성 레짐 탐지
     "mass_index",
     "hl_range_20",
     # ── 거래량 ────────────────────────────
@@ -207,6 +208,9 @@ def compute_features(
     df["bb_pband"] = bb.bollinger_pband()
     atr            = volatility.AverageTrueRange(high, low, close, window=14).average_true_range()
     df["atr_pct"]  = atr / close.replace(0, np.nan)
+    _rv5  = close.pct_change().rolling(5).std()
+    _rv20 = close.pct_change().rolling(20).std()
+    df["rv_ratio"] = (_rv5 / _rv20.replace(0, np.nan)).fillna(1.0)   # >1=변동성 확장, <1=수축
     df["mass_index"]  = trend.MassIndex(high, low, window_fast=9, window_slow=25).mass_index()
     df["hl_range_20"] = (high.rolling(20).max() - low.rolling(20).min()) / close.replace(0, np.nan)
 

@@ -372,11 +372,15 @@ class SimAgent:
             X = feat_df.values
             y = label.values.astype(int)
 
-            # ── Walk-Forward: 최근 200봉을 검증셋으로 분리 (과적합 방지) ──
+            # ── Purged Walk-Forward: 레이블 오염 방지를 위해 LOOKAHEAD만큼 갭 삽입 ──
+            # gap = lookahead봉 → 학습 레이블과 검증 피처가 겹치는 구간 제거
+            GAP      = self.lookahead
             VAL_SIZE = min(200, max(len(X) // 6, 30))
-            if len(X) > VAL_SIZE + 50:
-                X_train, X_val = X[:-VAL_SIZE], X[-VAL_SIZE:]
-                y_train, y_val = y[:-VAL_SIZE], y[-VAL_SIZE:]
+            if len(X) > VAL_SIZE + GAP + 50:
+                X_train = X[:-(VAL_SIZE + GAP)]
+                X_val   = X[-VAL_SIZE:]
+                y_train = y[:-(VAL_SIZE + GAP)]
+                y_val   = y[-VAL_SIZE:]
             else:
                 X_train, X_val = X, None
                 y_train, y_val = y, None
@@ -463,13 +467,31 @@ class SimAgent:
                 fit_kwargs["verbose"] = False
             clf.fit(X_train_s, y_train, **fit_kwargs)
 
-            # Walk-Forward 검증 (50% 미만 = 랜덤보다 못함 → 학습 실패 처리)
+            # Purged Walk-Forward 검증 — 정밀도(승률) 기반으로 평가
             if X_val is not None and len(X_val) > 0:
-                val_acc = clf.score(scaler.transform(X_val), y_val)
+                _val_s   = scaler.transform(X_val)
+                _val_prob = clf.predict_proba(_val_s)[:, 1]
+                val_acc  = clf.score(_val_s, y_val)
                 if val_acc < 0.50:
                     logger.warning("[%s] WF검증 %.1f%% < 50%% → 학습 실패", self.agent_id, val_acc * 100)
                     return False
-                logger.debug("[%s] WF검증 %.1f%%", self.agent_id, val_acc * 100)
+                # 검증셋에서 정밀도 최대화 임계값 탐색 → 실제 buy_threshold 동적 조정
+                _best_thr, _best_prec = self.buy_threshold, 0.0
+                for _t in np.arange(0.45, 0.80, 0.01):
+                    _p = (_val_prob >= _t).astype(int)
+                    if _p.sum() < max(5, len(y_val) // 20):
+                        continue
+                    _recall = float(_p[y_val == 1].mean()) if (y_val == 1).sum() > 0 else 0.0
+                    if _recall < 0.15:
+                        continue
+                    from sklearn.metrics import precision_score as _ps
+                    _prec = _ps(y_val, _p, zero_division=0)
+                    if _prec > _best_prec:
+                        _best_prec, _best_thr = _prec, float(_t)
+                if _best_prec > 0:
+                    self.buy_threshold = round(min(max(_best_thr, 0.50), 0.78), 2)
+                logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
+                             self.agent_id, val_acc * 100, self.buy_threshold, _best_prec)
 
             self._model = clf
             self._scaler = scaler
