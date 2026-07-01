@@ -248,7 +248,11 @@ async def get_ohlcv(
     """업비트 캔들 데이터 조회. 최신 캔들이 리스트 앞에 옴(내림차순).
 
     count > 200 이면 자동 페이징하여 최대 count개 수집.
+    429 Too Many Requests 시 최대 3회 재시도 (1s / 3s / 6s backoff).
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     url = f"{_BASE}/candles/{interval}"
     result: list[dict] = []
     to_param: str | None = None
@@ -263,7 +267,14 @@ async def get_ohlcv(
             if to_param:
                 params["to"] = to_param
 
-            resp = await client.get(url, params=params)
+            # 429 재시도 (backoff: 1s → 3s → 6s)
+            for _attempt, _wait in enumerate([0, 1, 3, 6]):
+                if _wait:
+                    await asyncio.sleep(_wait)
+                resp = await client.get(url, params=params)
+                if resp.status_code != 429:
+                    break
+                _log.warning("[Upbit] 429 Too Many Requests (%s), %d초 후 재시도", ticker, [1, 3, 6][min(_attempt, 2)])
             resp.raise_for_status()
             data = resp.json()
             _raise_for_upbit_error(data)

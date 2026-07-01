@@ -254,10 +254,10 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # 전 에이전트 일일 재학습: 매일 06:05 (코인 현황 직후, 하루치 데이터 반영)
+        # 전 에이전트 일일 재학습: 매일 06:07 (업비트 틱 06:05 종료 후, 5분 경계 회피)
         self._scheduler.add_job(
             self._daily_retrain,
-            CronTrigger(hour=6, minute=5, timezone=KST),
+            CronTrigger(hour=6, minute=7, timezone=KST),
             id="daily_retrain",
             replace_existing=True,
             coalesce=True,
@@ -1280,8 +1280,12 @@ class TradingScheduler:
                 if len(coin_ohlcv) >= 500:
                     logger.info("[Retrain] 코인 학습 데이터: %s (%d봉)", ticker, len(coin_ohlcv))
                     break
-            except Exception:
+            except Exception as e:
+                logger.warning("[Retrain] 코인 OHLCV 수집 실패 (%s): %s", ticker, e)
                 continue
+
+        if not coin_ohlcv:
+            logger.error("[Retrain] 코인 학습 데이터 수집 전부 실패 — 코인 에이전트 재학습 건너뜀")
 
         # 주식 에이전트별로 다른 종목 데이터를 할당해 앙상블 다양성 확보
         stock_ohlcv_pool: list[list[dict]] = []
@@ -1291,7 +1295,8 @@ class TradingScheduler:
                 if len(_tmp) >= 100:
                     stock_ohlcv_pool.append(_tmp)
                     logger.info("[Retrain] 주식 학습 데이터: %s (%d봉, 누적 %d종목)", symbol, len(_tmp), len(stock_ohlcv_pool))
-            except Exception:
+            except Exception as e:
+                logger.warning("[Retrain] 주식 OHLCV 수집 실패 (%s): %s", symbol, e)
                 continue
         stock_ohlcv = stock_ohlcv_pool[0] if stock_ohlcv_pool else []
 
