@@ -349,11 +349,12 @@ class SimAgent:
                 # 실제 _agent_execute 손익 기준 ATR×3.0 TP, ATR×1.5 SL 과 동일하게 맞춤
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr = float(_atr_series.iloc[i])
-                    tp_pct = min(_atr * 3.0, 0.10)  # 최대 10% 상한 (이상치 방어)
-                    sl_pct = min(_atr * 1.5, 0.05)  # 최대 5% 상한
+                    # ATR 기반 TP/SL — label_threshold 최소값 보장 (저변동성 구간 레이블 전멸 방지)
+                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)
+                    sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
-                    sl_pct = self.label_threshold
+                    sl_pct = self.label_threshold * 0.5
                 tp, sl = entry * (1 + tp_pct), entry * (1 - sl_pct)
                 for j in range(1, LOOKAHEAD + 1):
                     p = close.iloc[i + j]
@@ -578,10 +579,11 @@ class SimAgent:
             # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
-            # ADX 레짐 필터 — 횡보장(ADX<20) 또는 NaN이면 예측 신뢰도 낮으므로 스킵
-            # NaN < 20은 Python에서 False를 반환하므로 isna() 체크 필수
+            # ADX 레짐 필터 — 횡보장이면 예측 신뢰도 낮으므로 스킵
+            # 주식은 코인보다 낮은 임계값(15) 적용 — 장 초반 ADX가 낮은 경우가 많음
             _adx_val = full_df["adx_14"].iloc[-1] if "adx_14" in full_df.columns else float("nan")
-            if pd.isna(_adx_val) or _adx_val < 20:
+            _adx_thr = 15 if self.market == "stock" else 20
+            if pd.isna(_adx_val) or _adx_val < _adx_thr:
                 return "hold", 0.5
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:

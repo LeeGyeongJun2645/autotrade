@@ -1095,26 +1095,27 @@ class TradingScheduler:
                         if not is_market_open:
                             continue
                         agent.update_position_values(stock_prices)
+                        # 모델 없으면 대표 종목(삼성전자)으로 에이전트당 1회만 즉석 학습 시도
+                        if agent._model is None and not agent.load_model():
+                            _train_sym = next((s for s in ["005930", "000660", "035420"] if s in stock_symbols), None) \
+                                         or (stock_symbols[0] if stock_symbols else None)
+                            if _train_sym:
+                                _train_count = 500
+                                try:
+                                    _tr_ohlcv  = await _kis.get_minute_ohlcv(_train_sym, agent.interval_min, count=_train_count)
+                                    _kospi_tr  = await _kis.get_minute_ohlcv("0001", 5, count=_train_count)
+                                except Exception:
+                                    _tr_ohlcv  = stock_ohlcv_cache.get(f"{_train_sym}:{agent.interval_min}", [])
+                                    _kospi_tr  = kospi_ohlcv
+                                if _tr_ohlcv:
+                                    async with agent._train_lock:
+                                        await asyncio.to_thread(agent.train, _tr_ohlcv, None, None, _kospi_tr)
                         for symbol in stock_symbols:
                             ohlcv = stock_ohlcv_cache.get(f"{symbol}:{agent.interval_min}", [])
                             if not ohlcv:
                                 continue
-                            if agent._model is None and not agent.load_model():
-                                train_count = 500 if agent.interval_min <= 5 else 200
-                                try:
-                                    train_ohlcv = await _kis.get_minute_ohlcv(
-                                        symbol, agent.interval_min, count=train_count
-                                    )
-                                    _kospi_train = await _kis.get_minute_ohlcv("0001", 5, count=train_count)
-                                except Exception:
-                                    train_ohlcv = ohlcv
-                                    _kospi_train = kospi_ohlcv
-                                async with agent._train_lock:
-                                    trained = await asyncio.to_thread(
-                                        agent.train, train_ohlcv, None, None, _kospi_train
-                                    )
-                                if not trained:
-                                    continue
+                            if agent._model is None:
+                                continue  # 즉석 학습도 실패 → 이번 틱 스킵
                             price = stock_prices.get(symbol, 0.0)
                             if price <= 0:
                                 continue
