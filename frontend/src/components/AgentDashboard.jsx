@@ -852,6 +852,69 @@ export default function AgentDashboard({ agents }) {
         </div>
       </div>
 
+      {/* 앙상블 실매매 신호 추적 — 맨 위 */}
+      {ensembleAgents.length > 0 && (
+        <div className="bg-purple-950/20 border border-purple-800/40 rounded-xl p-4">
+          <div className="flex items-center gap-3 mb-4">
+            <span className="text-lg font-bold text-purple-300">앙상블 실매매 신호 추적</span>
+            <span className="text-xs bg-purple-900/60 text-purple-300 px-2 py-0.5 rounded">가상 10M</span>
+            <span className="text-xs text-gray-500">실제 실매매에 쓰이는 앙상블 신호를 가상 포트폴리오로 추적</span>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            {ensembleAgents.map(ea => {
+              const totalVal = ea.total_value ?? ea.balance ?? INITIAL
+              const pnlAmt   = totalVal - INITIAL
+              const posEnt   = Object.entries(ea.positions ?? {})
+              return (
+                <div key={ea.agent_id} className="bg-purple-900/20 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-purple-200 text-sm">{ea.agent_id}</span>
+                    <span className="text-xs text-gray-400">{ea.market === 'coin' ? '🪙 코인' : '📈 주식'} 앙상블</span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2 text-center">
+                    <div className="bg-purple-900/30 rounded-lg p-2">
+                      <p className="text-xs text-gray-400">총평가액</p>
+                      <p className={`font-mono font-bold text-sm ${pnlAmt >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {fmt(totalVal)}원
+                      </p>
+                      <p className={`text-xs font-mono ${pnlAmt >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                        {pnlAmt >= 0 ? '+' : ''}{fmt(pnlAmt)}원
+                      </p>
+                    </div>
+                    <div className="bg-purple-900/30 rounded-lg p-2">
+                      <p className="text-xs text-gray-400">수익률</p>
+                      <ReturnBadge pct={ea.total_return_pct} size="lg" />
+                    </div>
+                    <div className="bg-purple-900/30 rounded-lg p-2">
+                      <p className="text-xs text-gray-400">승률</p>
+                      <WinBadge rate={ea.win_rate} wins={ea.win_trades} total={ea.total_trades} size="lg" />
+                    </div>
+                    <div className="bg-purple-900/30 rounded-lg p-2">
+                      <p className="text-xs text-gray-400">보유</p>
+                      <p className="font-bold text-purple-300 text-sm">{posEnt.length}종목</p>
+                    </div>
+                  </div>
+                  {posEnt.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {posEnt.map(([ticker, pos]) => {
+                        const pnl = pos.unrealized_pnl_pct ?? 0
+                        return (
+                          <span key={ticker}
+                            className={`text-xs px-2 py-0.5 rounded font-mono
+                              ${pnl >= 0 ? 'bg-green-900/40 text-green-300' : 'bg-red-900/40 text-red-300'}`}>
+                            {ticker.replace('KRW-','')} {pnl >= 0 ? '+' : ''}{pnl.toFixed(1)}%
+                          </span>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* 암호화폐 섹션 */}
       <div>
         <div className="flex items-center gap-3 mb-3 pb-2 border-b border-yellow-800/40">
@@ -883,47 +946,6 @@ export default function AgentDashboard({ agents }) {
 
       {/* 분석 패널 */}
       <AnalysisPanel />
-
-      {/* 앙상블 그림자 에이전트 — 실매매 앙상블 가상 추적 */}
-      {ensembleAgents.length > 0 && (
-        <div>
-          <div className="flex items-center gap-3 mb-3 pb-2 border-t border-gray-700 pt-4">
-            <span className="text-lg font-bold text-purple-300">앙상블 실매매 신호 추적</span>
-            <span className="text-xs bg-purple-900/60 text-purple-300 px-2 py-0.5 rounded">가상 10M</span>
-            <span className="text-xs text-gray-500">실제 앙상블 신호를 가상 포트폴리오로 추적 — 실매매 기대수익 검증용</span>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            {ensembleAgents.map(ea => {
-              const totalVal = ea.total_value ?? ea.balance ?? INITIAL
-              const pnlAmt   = totalVal - INITIAL
-              return (
-                <div key={ea.agent_id} className="bg-purple-950/30 border border-purple-800/40 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <span className="font-bold text-purple-200">{ea.agent_id}</span>
-                    <span className="text-xs text-gray-500">{ea.market === 'coin' ? '코인 앙상블' : '주식 앙상블'}</span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-3 text-center">
-                    <div className="bg-purple-900/20 rounded-lg p-2">
-                      <p className="text-xs text-gray-400">총평가액</p>
-                      <p className={`font-mono font-bold text-sm ${pnlAmt >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        {fmt(totalVal)}원
-                      </p>
-                    </div>
-                    <div className="bg-purple-900/20 rounded-lg p-2">
-                      <p className="text-xs text-gray-400">승률</p>
-                      <WinBadge rate={ea.win_rate} wins={ea.win_trades} total={ea.total_trades} />
-                    </div>
-                    <div className="bg-purple-900/20 rounded-lg p-2">
-                      <p className="text-xs text-gray-400">수익률</p>
-                      <ReturnBadge pct={ea.total_return_pct} />
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
 
     </div>
   )
