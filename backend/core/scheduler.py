@@ -1196,23 +1196,25 @@ class TradingScheduler:
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
-            # 최소 보유 15분: 손절 기준 완화(ATR×2.25), 익절은 정상 적용
-            if held_min < 15:
-                extreme_sl = STOP_LOSS * 1.5  # ATR×2.25 극단적 손실만 즉시 청산
+            # 최소 보유 5분: 진입 직후 노이즈 손절 방지 (ATR×1.8 긴급 손절만)
+            if held_min < 5:
+                extreme_sl = STOP_LOSS * 1.2  # ATR×1.8 (기존 2.25에서 축소 — 급락 시 빠른 컷)
                 if unreal >= tp_base:
                     signal = "sell"
                     sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) @ {price:,.0f}원", "SELL")
                 elif unreal <= extreme_sl:
                     signal = "sell"
-                    sim_log.push(agent.agent_id, f"[급락손절] {symbol} {unreal*100:.1f}% (ATR×2.25={extreme_sl*100:.1f}%) @ {price:,.0f}원", "SELL")
+                    sim_log.push(agent.agent_id, f"[급락손절] {symbol} {unreal*100:.1f}% (ATR×1.8={extreme_sl*100:.1f}%) @ {price:,.0f}원", "SELL")
             else:
-                # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤 (floor 없음 — 항상 감소)
+                # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤
+                # R:R 항상 1.1 이상 유지 (TP > SL × 1.1) — R:R 역전 방지
+                sl_abs = abs(STOP_LOSS)
                 if held_min < 30:
                     take_profit = tp_base
                 elif held_min < 90:
-                    take_profit = tp_base * 0.7   # floor 제거: 저변동성 자산에서 TP 상승 버그 수정
+                    take_profit = max(tp_base * 0.7, sl_abs * 1.1)
                 else:
-                    take_profit = tp_base * 0.4   # floor 제거
+                    take_profit = max(tp_base * 0.4, sl_abs * 1.1)  # R:R 역전 방지
 
                 if unreal >= take_profit:
                     signal = "sell"

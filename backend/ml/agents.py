@@ -530,12 +530,12 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        self.buy_threshold = round(min(max(_combined, 0.60), 0.82), 2)
+                        self.buy_threshold = round(min(max(_combined, 0.60), 0.75), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        self.buy_threshold = round(min(max(thr_b, 0.60), 0.82), 2)
+                        self.buy_threshold = round(min(max(thr_b, 0.60), 0.75), 2)
                     logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
                                  self.agent_id, val_acc * 100, self.buy_threshold, prec_b)
 
@@ -717,8 +717,9 @@ class SimAgent:
         pos = self._positions.pop(ticker, None)
         if pos is None:
             return None
-        proceeds = pos.qty * price
-        profit_rate = (price - pos.entry_price) / pos.entry_price
+        actual_sell = price * 0.9995  # 매도 수수료 0.05% (Upbit/KIS 기준)
+        proceeds = pos.qty * actual_sell
+        profit_rate = (actual_sell - pos.entry_price) / pos.entry_price
         self._balance += proceeds
         self.total_trades += 1
         if profit_rate > 0:
