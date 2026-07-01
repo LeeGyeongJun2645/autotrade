@@ -789,8 +789,9 @@ function ResetButton() {
 
 // ── 메인 ──────────────────────────────────────────────────────────
 export default function AgentDashboard({ agents }) {
-  const [selected,    setSelected]    = useState(null)
-  const [stockNames,  setStockNames]  = useState({})
+  const [selected,         setSelected]         = useState(null)
+  const [selectedEnsemble, setSelectedEnsemble] = useState(null)
+  const [stockNames,       setStockNames]       = useState({})
 
   useEffect(() => {
     api.get('/stock-names').then(setStockNames).catch(() => {})
@@ -854,21 +855,29 @@ export default function AgentDashboard({ agents }) {
 
       {/* 앙상블 실매매 신호 추적 — 맨 위 */}
       {ensembleAgents.length > 0 && (
-        <div className="bg-purple-950/20 border border-purple-800/40 rounded-xl p-4">
-          <div className="flex items-center gap-3 mb-4">
+        <div className="space-y-3">
+          <div className="flex items-center gap-3 pb-2 border-b border-purple-800/40">
             <span className="text-lg font-bold text-purple-300">앙상블 실매매 신호 추적</span>
             <span className="text-xs bg-purple-900/60 text-purple-300 px-2 py-0.5 rounded">가상 10M</span>
-            <span className="text-xs text-gray-500">실제 실매매에 쓰이는 앙상블 신호를 가상 포트폴리오로 추적</span>
+            <span className="text-xs text-gray-500">실제 앙상블 신호를 가상 포트폴리오로 추적 — 클릭하면 상세 보기</span>
           </div>
+
+          {/* 요약 카드 2개 — 클릭 시 상세 토글 */}
           <div className="grid grid-cols-2 gap-4">
             {ensembleAgents.map(ea => {
-              const totalVal = ea.total_value ?? ea.balance ?? INITIAL
-              const pnlAmt   = totalVal - INITIAL
-              const posEnt   = Object.entries(ea.positions ?? {})
+              const totalVal  = ea.total_value ?? ea.balance ?? INITIAL
+              const pnlAmt    = totalVal - INITIAL
+              const posEnt    = Object.entries(ea.positions ?? {})
+              const isSelected = selectedEnsemble === ea.agent_id
               return (
-                <div key={ea.agent_id} className="bg-purple-900/20 rounded-xl p-4 space-y-3">
+                <div key={ea.agent_id}
+                  onClick={() => setSelectedEnsemble(isSelected ? null : ea.agent_id)}
+                  className={`bg-purple-950/30 border rounded-xl p-4 cursor-pointer transition-all space-y-3
+                    ${isSelected
+                      ? 'border-purple-500 ring-2 ring-purple-500/30'
+                      : 'border-purple-800/40 hover:border-purple-600/60'}`}>
                   <div className="flex items-center justify-between">
-                    <span className="font-bold text-purple-200 text-sm">{ea.agent_id}</span>
+                    <span className="font-bold text-purple-200">{ea.agent_id}</span>
                     <span className="text-xs text-gray-400">{ea.market === 'coin' ? '🪙 코인' : '📈 주식'} 앙상블</span>
                   </div>
                   <div className="grid grid-cols-4 gap-2 text-center">
@@ -892,26 +901,30 @@ export default function AgentDashboard({ agents }) {
                     <div className="bg-purple-900/30 rounded-lg p-2">
                       <p className="text-xs text-gray-400">보유</p>
                       <p className="font-bold text-purple-300 text-sm">{posEnt.length}종목</p>
+                      {posEnt.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1 justify-center">
+                          {posEnt.slice(0,3).map(([ticker, pos]) => {
+                            const pnl = pos.unrealized_pnl_pct ?? 0
+                            return (
+                              <span key={ticker} className={`text-xs font-mono ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                {ticker.replace('KRW-','')}
+                              </span>
+                            )
+                          })}
+                        </div>
+                      )}
                     </div>
                   </div>
-                  {posEnt.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {posEnt.map(([ticker, pos]) => {
-                        const pnl = pos.unrealized_pnl_pct ?? 0
-                        return (
-                          <span key={ticker}
-                            className={`text-xs px-2 py-0.5 rounded font-mono
-                              ${pnl >= 0 ? 'bg-green-900/40 text-green-300' : 'bg-red-900/40 text-red-300'}`}>
-                            {ticker.replace('KRW-','')} {pnl >= 0 ? '+' : ''}{pnl.toFixed(1)}%
-                          </span>
-                        )
-                      })}
-                    </div>
-                  )}
                 </div>
               )
             })}
           </div>
+
+          {/* 선택된 앙상블 에이전트 상세 — 카드 바로 아래 */}
+          {selectedEnsemble && (() => {
+            const ea = ensembleAgents.find(a => a.agent_id === selectedEnsemble)
+            return ea ? <AgentDetail key={ea.agent_id} agent={ea} stockNames={stockNames} /> : null
+          })()}
         </div>
       )}
 
