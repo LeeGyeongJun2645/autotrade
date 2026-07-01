@@ -631,6 +631,162 @@ function MarketSection({ agents, market, selected, onSelect, stockNames }) {
   )
 }
 
+// ── 분석 패널 ─────────────────────────────────────────────────────
+function AnalysisPanel() {
+  const [data,   setData]   = useState(null)
+  const [loading,setLoading]= useState(false)
+  const [open,   setOpen]   = useState(false)
+
+  const load = async () => {
+    if (loading) return
+    setLoading(true)
+    try {
+      const r = await api.get('/agents/analysis')
+      setData(r)
+      setOpen(true)
+    } catch { setData(null) }
+    finally { setLoading(false) }
+  }
+
+  const s = data?.summary ?? {}
+  const byTicker   = data?.by_ticker   ?? []
+  const byHour     = data?.by_hour     ?? []
+  const byStrategy = data?.by_strategy ?? []
+
+  return (
+    <div className="bg-gray-800 rounded-xl border border-gray-700 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <span className="font-bold text-white text-sm">📊 거래 분석</span>
+        <button onClick={open ? () => setOpen(false) : load}
+          className="text-xs px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+          {loading ? '분석 중…' : open ? '접기' : '분석 보기'}
+        </button>
+      </div>
+      {open && data && (
+        <div className="space-y-4">
+          {/* 전체 요약 */}
+          <div className="grid grid-cols-4 gap-3 text-center">
+            {[
+              ['총 매도', s.total_sells ?? 0, 'text-white'],
+              ['전체 승률', s.overall_win_rate != null ? `${s.overall_win_rate}%` : '—',
+               s.overall_win_rate >= 55 ? 'text-green-400' : s.overall_win_rate >= 50 ? 'text-yellow-400' : 'text-red-400'],
+              ['평균 손익', s.avg_pnl_pct != null ? `${s.avg_pnl_pct > 0 ? '+' : ''}${s.avg_pnl_pct}%` : '—',
+               s.avg_pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'],
+              ['종목 수', s.unique_tickers ?? 0, 'text-gray-300'],
+            ].map(([k, v, cls]) => (
+              <div key={k} className="bg-gray-700/50 rounded-lg p-2">
+                <p className="text-xs text-gray-400">{k}</p>
+                <p className={`font-bold font-mono text-sm ${cls}`}>{v}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* 전략별 */}
+          <div>
+            <p className="text-xs text-gray-400 mb-1.5 font-semibold">전략별 성과</p>
+            <div className="grid grid-cols-2 gap-2">
+              {byStrategy.map(s => (
+                <div key={`${s.feature_set}_${s.market}`}
+                  className="bg-gray-700/40 rounded-lg px-3 py-2 flex justify-between items-center">
+                  <span className="text-xs text-gray-300">
+                    {FEAT_KR[s.feature_set] ?? s.feature_set}
+                    <span className="text-gray-500 ml-1">({s.market === 'coin' ? '코인' : '주식'})</span>
+                  </span>
+                  <span className="text-xs font-mono space-x-2">
+                    <span className={s.win_rate_pct >= 50 ? 'text-green-400' : 'text-red-400'}>{s.win_rate_pct}%</span>
+                    <span className="text-gray-500">{s.trades}건</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 시간대별 */}
+          <div>
+            <p className="text-xs text-gray-400 mb-1.5 font-semibold">시간대별 승률 (KST)</p>
+            <div className="flex flex-wrap gap-1.5">
+              {byHour.map(h => (
+                <div key={h.hour_kst}
+                  className={`rounded px-2 py-1 text-xs font-mono
+                    ${h.win_rate_pct >= 55 ? 'bg-green-900/50 text-green-300'
+                    : h.win_rate_pct >= 50 ? 'bg-yellow-900/50 text-yellow-300'
+                    : 'bg-red-900/30 text-red-400'}`}>
+                  {String(h.hour_kst).padStart(2,'0')}시 {h.win_rate_pct}% ({h.trades}건)
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 종목별 (상위/하위) */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs text-gray-400 mb-1.5 font-semibold">수익 상위 종목</p>
+              {byTicker.slice(0, 8).map(t => (
+                <div key={t.ticker} className="flex justify-between text-xs py-0.5">
+                  <span className="font-mono text-gray-300">{t.ticker.replace('KRW-','')}</span>
+                  <span className="space-x-2">
+                    <span className={t.avg_pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}>
+                      {t.avg_pnl_pct > 0 ? '+' : ''}{t.avg_pnl_pct}%
+                    </span>
+                    <span className="text-gray-500">{t.win_rate_pct}% ({t.trades}건)</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <p className="text-xs text-gray-400 mb-1.5 font-semibold">손실 하위 종목</p>
+              {[...byTicker].sort((a,b) => a.avg_pnl_pct - b.avg_pnl_pct).slice(0, 8).map(t => (
+                <div key={t.ticker} className="flex justify-between text-xs py-0.5">
+                  <span className="font-mono text-gray-300">{t.ticker.replace('KRW-','')}</span>
+                  <span className="space-x-2">
+                    <span className={t.avg_pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}>
+                      {t.avg_pnl_pct > 0 ? '+' : ''}{t.avg_pnl_pct}%
+                    </span>
+                    <span className="text-gray-500">{t.win_rate_pct}% ({t.trades}건)</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── 리셋 버튼 ─────────────────────────────────────────────────────
+function ResetButton() {
+  const [busy,   setBusy]   = useState(false)
+  const [status, setStatus] = useState(null)
+
+  const reset = async () => {
+    if (busy) return
+    if (!window.confirm('⚠️ 모든 에이전트를 10,000,000원으로 리셋하고 재학습을 시작합니다.\n기존 거래 기록은 아카이브로 보존됩니다.\n\n계속하시겠습니까?')) return
+    setBusy(true)
+    setStatus(null)
+    try {
+      const r = await api.post('/agents/reset?retrain=true')
+      setStatus({ ok: true, msg: r.message })
+    } catch {
+      setStatus({ ok: false, msg: '리셋 실패 — 서버 로그 확인' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <button onClick={reset} disabled={busy}
+        className="text-xs px-3 py-1.5 rounded-lg bg-red-900/70 hover:bg-red-800 disabled:opacity-40 text-red-200 font-medium transition-colors border border-red-700/60">
+        {busy ? '리셋 중…' : '🔄 전체 리셋 + 재학습 (10M)'}
+      </button>
+      {status && (
+        <span className={`text-xs ${status.ok ? 'text-green-400' : 'text-red-400'}`}>{status.msg}</span>
+      )}
+    </div>
+  )
+}
+
 // ── 메인 ──────────────────────────────────────────────────────────
 export default function AgentDashboard({ agents }) {
   const [selected,    setSelected]    = useState(null)
@@ -640,17 +796,19 @@ export default function AgentDashboard({ agents }) {
     api.get('/stock-names').then(setStockNames).catch(() => {})
   }, [])
 
-  const coinAgents    = agents.filter(a => a.market === 'coin')
-  const stockAgents   = agents.filter(a => a.market === 'stock')
+  const ensembleAgents = agents.filter(a => a.agent_id.startsWith('ENSEMBLE_'))
+  const coinAgents    = agents.filter(a => a.market === 'coin' && !a.agent_id.startsWith('ENSEMBLE_'))
+  const stockAgents   = agents.filter(a => a.market === 'stock' && !a.agent_id.startsWith('ENSEMBLE_'))
   const selectedAgent = agents.find(a => a.agent_id === selected)
   const handleClick   = id => setSelected(selected === id ? null : id)
 
-  const totalTrades  = agents.reduce((s, a) => s + a.total_trades, 0)
-  const activeAgents = agents.filter(a => a.total_trades > 0)
+  const allSim       = [...coinAgents, ...stockAgents]
+  const totalTrades  = allSim.reduce((s, a) => s + a.total_trades, 0)
+  const activeAgents = allSim.filter(a => a.total_trades > 0)
   const bestTotal    = activeAgents.length
     ? (Math.max(...activeAgents.map(a => a.total_value ?? a.balance ?? INITIAL)) || INITIAL)
     : INITIAL
-  const champions    = agents.filter(a => a.is_champion)
+  const champions    = allSim.filter(a => a.is_champion)
 
   return (
     <div className="space-y-6">
@@ -659,9 +817,10 @@ export default function AgentDashboard({ agents }) {
       <div className="bg-gray-800 rounded-xl border border-gray-700 p-5">
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-white text-lg">AI 에이전트 경쟁 현황</h2>
-          <span className="text-xs text-gray-500">
-            5분마다 자동 갱신 · 앙상블 게이트 · 매일 18:00 전 에이전트 재학습
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-gray-500">5분마다 자동 갱신 · 매일 06:07 재학습</span>
+            <ResetButton />
+          </div>
         </div>
         <div className="grid grid-cols-4 gap-4">
           <div className="bg-gray-700/50 rounded-lg p-3">
@@ -721,6 +880,50 @@ export default function AgentDashboard({ agents }) {
         </div>
         <MarketSection agents={stockAgents} market="stock" selected={selected} onSelect={handleClick} stockNames={stockNames} />
       </div>
+
+      {/* 분석 패널 */}
+      <AnalysisPanel />
+
+      {/* 앙상블 그림자 에이전트 — 실매매 앙상블 가상 추적 */}
+      {ensembleAgents.length > 0 && (
+        <div>
+          <div className="flex items-center gap-3 mb-3 pb-2 border-t border-gray-700 pt-4">
+            <span className="text-lg font-bold text-purple-300">앙상블 실매매 신호 추적</span>
+            <span className="text-xs bg-purple-900/60 text-purple-300 px-2 py-0.5 rounded">가상 10M</span>
+            <span className="text-xs text-gray-500">실제 앙상블 신호를 가상 포트폴리오로 추적 — 실매매 기대수익 검증용</span>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            {ensembleAgents.map(ea => {
+              const totalVal = ea.total_value ?? ea.balance ?? INITIAL
+              const pnlAmt   = totalVal - INITIAL
+              return (
+                <div key={ea.agent_id} className="bg-purple-950/30 border border-purple-800/40 rounded-xl p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="font-bold text-purple-200">{ea.agent_id}</span>
+                    <span className="text-xs text-gray-500">{ea.market === 'coin' ? '코인 앙상블' : '주식 앙상블'}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3 text-center">
+                    <div className="bg-purple-900/20 rounded-lg p-2">
+                      <p className="text-xs text-gray-400">총평가액</p>
+                      <p className={`font-mono font-bold text-sm ${pnlAmt >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {fmt(totalVal)}원
+                      </p>
+                    </div>
+                    <div className="bg-purple-900/20 rounded-lg p-2">
+                      <p className="text-xs text-gray-400">승률</p>
+                      <WinBadge rate={ea.win_rate} wins={ea.win_trades} total={ea.total_trades} />
+                    </div>
+                    <div className="bg-purple-900/20 rounded-lg p-2">
+                      <p className="text-xs text-gray-400">수익률</p>
+                      <ReturnBadge pct={ea.total_return_pct} />
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
     </div>
   )

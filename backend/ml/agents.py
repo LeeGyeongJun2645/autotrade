@@ -818,6 +818,26 @@ def build_agents() -> dict[str, SimAgent]:
 
 AGENTS: dict[str, SimAgent] = build_agents()
 
+# ── 앙상블 그림자 에이전트 — 실매매 앙상블 신호를 가상 포트폴리오로 추적 ──────
+# predict_ensemble() 호출 결과를 동일 TP/SL 로직으로 가상 매매해 앙상블 기대수익 검증
+ENSEMBLE_AGENTS: dict[str, SimAgent] = {
+    "ENSEMBLE_COIN":  SimAgent("ENSEMBLE_COIN",  5, 0.008, 0.65, "all", "coin",  5, "lgbm"),
+    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 5, 0.006, 0.60, "all", "stock", 5, "lgbm"),
+}
+
+
+def reset_all_agents() -> None:
+    """모든 에이전트(가상+앙상블) 메모리 초기화 — 잔액 10M, 거래기록 0, 포지션 없음."""
+    for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
+        agent._balance = INITIAL_CAPITAL
+        agent._positions.clear()
+        agent._last_position_values.clear()
+        agent.total_trades = 0
+        agent.win_trades   = 0
+        agent.recent_trades.clear()
+        agent.is_champion  = False
+        agent.is_active    = True
+
 
 def get_champion(market: str | None = None) -> SimAgent | None:
     """마켓별 총 자산(잔액+포지션) 1위 에이전트 반환 (최소 10거래)."""

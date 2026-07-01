@@ -511,6 +511,136 @@ async def trigger_agent_retrain():
     return {"status": "started", "message": "에이전트 재학습 시작됨 (백그라운드 실행, 수 분 소요)"}
 
 
+@app.get("/agents/analysis", tags=["Agents"])
+async def get_agent_analysis():
+    """에이전트 전체 거래 통계 분석 — 종목별/시간대별/전략별 승률."""
+    try:
+        from backend.db.database import connect_db
+        import aiosqlite
+        async with connect_db() as db:
+            db.row_factory = aiosqlite.Row
+
+            # 에이전트별 요약
+            cur = await db.execute("""
+                SELECT agent_id,
+                       COUNT(*) AS trades,
+                       SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) AS wins,
+                       ROUND(AVG(profit_rate)*100, 3) AS avg_pnl_pct,
+                       ROUND(AVG(CASE WHEN profit_rate > 0 THEN profit_rate END)*100, 3) AS avg_win_pct,
+                       ROUND(AVG(CASE WHEN profit_rate <= 0 THEN profit_rate END)*100, 3) AS avg_loss_pct,
+                       ROUND(MIN(profit_rate)*100, 3) AS worst_pct,
+                       ROUND(MAX(profit_rate)*100, 3) AS best_pct
+                FROM agent_trades WHERE action='SELL' AND profit_rate IS NOT NULL
+                GROUP BY agent_id ORDER BY trades DESC
+            """)
+            by_agent = [dict(r) for r in await cur.fetchall()]
+
+            # 종목별 요약 (SELL 거래 10건 이상만)
+            cur = await db.execute("""
+                SELECT ticker,
+                       COUNT(*) AS trades,
+                       ROUND(SUM(CASE WHEN profit_rate > 0 THEN 1.0 ELSE 0.0 END)/COUNT(*)*100, 1) AS win_rate_pct,
+                       ROUND(AVG(profit_rate)*100, 3) AS avg_pnl_pct
+                FROM agent_trades WHERE action='SELL' AND profit_rate IS NOT NULL
+                GROUP BY ticker HAVING trades >= 10
+                ORDER BY avg_pnl_pct DESC LIMIT 30
+            """)
+            by_ticker = [dict(r) for r in await cur.fetchall()]
+
+            # 시간대별 승률 (KST 기준)
+            cur = await db.execute("""
+                SELECT CAST(strftime('%H', traded_at) AS INTEGER) AS hour_kst,
+                       COUNT(*) AS trades,
+                       ROUND(SUM(CASE WHEN profit_rate > 0 THEN 1.0 ELSE 0.0 END)/COUNT(*)*100, 1) AS win_rate_pct,
+                       ROUND(AVG(profit_rate)*100, 3) AS avg_pnl_pct
+                FROM agent_trades WHERE action='SELL' AND profit_rate IS NOT NULL
+                GROUP BY hour_kst ORDER BY hour_kst
+            """)
+            by_hour = [dict(r) for r in await cur.fetchall()]
+
+            # 전략(피처셋)별 승률
+            cur = await db.execute("""
+                SELECT s.feature_set,
+                       s.market,
+                       COUNT(t.id) AS trades,
+                       ROUND(SUM(CASE WHEN t.profit_rate > 0 THEN 1.0 ELSE 0.0 END)/COUNT(t.id)*100, 1) AS win_rate_pct,
+                       ROUND(AVG(t.profit_rate)*100, 3) AS avg_pnl_pct
+                FROM agent_trades t
+                JOIN agent_stats s ON t.agent_id = s.agent_id
+                WHERE t.action='SELL' AND t.profit_rate IS NOT NULL
+                GROUP BY s.feature_set, s.market ORDER BY avg_pnl_pct DESC
+            """)
+            by_strategy = [dict(r) for r in await cur.fetchall()]
+
+            # 전체 요약
+            cur = await db.execute("""
+                SELECT COUNT(*) AS total_sells,
+                       ROUND(SUM(CASE WHEN profit_rate > 0 THEN 1.0 ELSE 0.0 END)/COUNT(*)*100, 1) AS overall_win_rate,
+                       ROUND(AVG(profit_rate)*100, 3) AS avg_pnl_pct,
+                       COUNT(DISTINCT ticker) AS unique_tickers,
+                       COUNT(DISTINCT agent_id) AS active_agents
+                FROM agent_trades WHERE action='SELL' AND profit_rate IS NOT NULL
+            """)
+            summary = dict((await cur.fetchone()) or {})
+
+        return {
+            "summary": summary,
+            "by_agent": by_agent,
+            "by_ticker": by_ticker,
+            "by_hour": by_hour,
+            "by_strategy": by_strategy,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@app.post("/agents/reset", tags=["Agents"])
+async def reset_agents(retrain: bool = Query(default=False)):
+    """모든 에이전트 초기화 — 잔액 10M 리셋, 포지션·거래기록 삭제.
+
+    retrain=true 로 호출하면 리셋 직후 재학습도 시작.
+    기존 거래 기록은 agent_trades_archive 테이블로 이동 후 삭제.
+    """
+    import asyncio
+    try:
+        from backend.db.database import connect_db
+        from backend.ml.agents import reset_all_agents, INITIAL_CAPITAL
+
+        reset_all_agents()
+
+        async with connect_db() as db:
+            # 기존 거래 기록 아카이브 이동 후 삭제
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_trades_archive AS
+                SELECT *, strftime('%Y-%m-%dT%H:%M:%S','now','localtime') AS archived_at
+                FROM agent_trades WHERE 0
+            """)
+            await db.execute("""
+                INSERT INTO agent_trades_archive
+                SELECT *, strftime('%Y-%m-%dT%H:%M:%S','now','localtime')
+                FROM agent_trades
+            """)
+            await db.execute("DELETE FROM agent_trades")
+            await db.execute("DELETE FROM agent_positions")
+            await db.execute("""
+                UPDATE agent_stats SET
+                    total_trades=0, win_trades=0, win_rate=0.0,
+                    total_return=0.0, current_balance=?,
+                    is_champion=0
+            """, (INITIAL_CAPITAL,))
+            await db.commit()
+
+        if retrain:
+            asyncio.create_task(scheduler._daily_retrain())
+            msg = "에이전트 리셋 완료 + 재학습 시작됨"
+        else:
+            msg = "에이전트 리셋 완료 (재학습은 /agents/retrain 별도 호출)"
+
+        return {"status": "reset", "message": msg, "initial_capital": INITIAL_CAPITAL}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
 @app.get("/agents/{agent_id}/trades", tags=["Agents"])
 async def get_agent_trades(
     agent_id: str,

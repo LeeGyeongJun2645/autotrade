@@ -147,7 +147,8 @@ class TradingScheduler:
                         if len(trade_rows.get(aid, [])) < 30:
                             trade_rows.setdefault(aid, []).append(dict(r))
 
-            for agent in AGENTS.values():
+            from backend.ml.agents import ENSEMBLE_AGENTS
+            for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
                 stats = stats_rows.get(agent.agent_id)
                 if stats:
                     agent.restore_from_db(
@@ -1151,7 +1152,54 @@ class TradingScheduler:
             except Exception:
                 logger.exception("[Agent] DB commit 실패 — 이번 틱 데이터 롤백됨")
 
-        from backend.ml.agents import refresh_champion_flags
+        # ── 앙상블 그림자 에이전트 — 실매매 앙상블 신호 가상 추적 ──────────
+        from backend.ml.agents import ENSEMBLE_AGENTS, predict_ensemble, refresh_champion_flags
+        try:
+            async with connect_db() as _edb:
+                _edb.row_factory = aiosqlite.Row
+                for _ea in ENSEMBLE_AGENTS.values():
+                    _ea.update_position_values(coin_prices if _ea.market == "coin" else stock_prices)
+                    _tickers = (coin_tickers if _ea.market == "coin" else stock_symbols)[:20]
+                    for _eticker in _tickers:
+                        _key = f"{_eticker}:minutes/5" if _ea.market == "coin" else f"{_eticker}:{_ea.interval_min}"
+                        _eohlcv = (ohlcv_cache if _ea.market == "coin" else stock_ohlcv_cache).get(_key, [])
+                        if not _eohlcv:
+                            continue
+                        _eprice = (coin_prices if _ea.market == "coin" else stock_prices).get(_eticker, 0.0)
+                        if _eprice <= 0:
+                            continue
+                        try:
+                            _esig, _eprob = await predict_ensemble(
+                                _eohlcv, ticker=_eticker, market=_ea.market,
+                                btc_ohlcv=self._btc_ohlcv_cache if _ea.market == "coin" else None,
+                                oi_hist=btc_oi_hist if _ea.market == "coin" else None,
+                                taker_hist=btc_taker_hist if _ea.market == "coin" else None,
+                            )
+                        except Exception:
+                            continue
+                        await self._agent_execute(_edb, _ea, _eticker, _esig, _eprob, _eprice)
+                    await _edb.execute(
+                        """INSERT INTO agent_stats
+                           (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
+                            total_trades, win_trades, win_rate, total_return, current_balance,
+                            is_champion, is_active, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?)
+                           ON CONFLICT(agent_id) DO UPDATE SET
+                             total_trades=excluded.total_trades, win_trades=excluded.win_trades,
+                             win_rate=excluded.win_rate, total_return=excluded.total_return,
+                             current_balance=excluded.current_balance,
+                             buy_threshold=excluded.buy_threshold,
+                             updated_at=excluded.updated_at""",
+                        (_ea.agent_id, _ea.interval_min, _ea.label_threshold,
+                         round(_ea.buy_threshold, 4), _ea.feature_set,
+                         _ea.total_trades, _ea.win_trades,
+                         round(_ea.win_rate, 4), round(_ea.total_return, 4),
+                         round(_ea._balance, 2), now.strftime("%Y-%m-%dT%H:%M:%S")),
+                    )
+                await _edb.commit()
+        except Exception:
+            logger.exception("[EnsembleAgent] 앙상블 그림자 에이전트 틱 실패")
+
         refresh_champion_flags()
 
     async def _agent_execute(self, db, agent, symbol: str, signal: str, prob: float, price: float) -> None:
@@ -1682,12 +1730,13 @@ class TradingScheduler:
             logger.exception("[포트폴리오] 스냅샷 저장 실패")
 
     def get_agents_snapshot(self) -> list[dict]:
-        """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 순)."""
-        from backend.ml.agents import AGENTS
+        """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 → 앙상블 순)."""
+        from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
         agents = list(AGENTS.values())
         coins  = sorted([a for a in agents if a.market == "coin"],  key=lambda a: (not a.is_champion, -a.win_rate))
         stocks = sorted([a for a in agents if a.market == "stock"], key=lambda a: (not a.is_champion, -a.win_rate))
-        return [a.to_dict() for a in coins + stocks]
+        ensembles = list(ENSEMBLE_AGENTS.values())
+        return [a.to_dict() for a in coins + stocks + ensembles]
 
 
 # 싱글톤 인스턴스 — FastAPI main.py 에서 import 해서 사용
