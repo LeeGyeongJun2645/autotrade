@@ -540,8 +540,9 @@ class SimAgent:
                     logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
                                  self.agent_id, val_acc * 100, self.buy_threshold, prec_b)
 
-            # 검증 유무와 무관하게 최소 임계값 0.60 항상 보장 (초기값 0.58 에이전트 방어)
-            self.buy_threshold = max(self.buy_threshold, 0.60)
+            # 최소 임계값 — 주식은 0.55, 코인은 0.60 (주식 5분봉 확률분포가 낮음)
+            _min_thr = 0.55 if self.market == "stock" else 0.60
+            self.buy_threshold = max(self.buy_threshold, _min_thr)
             self._model = clf
             self._scaler = scaler
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
@@ -579,12 +580,8 @@ class SimAgent:
             # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
-            # ADX 레짐 필터 — 횡보장이면 예측 신뢰도 낮으므로 스킵
-            # 주식은 코인보다 낮은 임계값(15) 적용 — 장 초반 ADX가 낮은 경우가 많음
-            _adx_val = full_df["adx_14"].iloc[-1] if "adx_14" in full_df.columns else float("nan")
-            _adx_thr = 15 if self.market == "stock" else 20
-            if pd.isna(_adx_val) or _adx_val < _adx_thr:
-                return "hold", 0.5
+            # ADX 피처는 모델이 내부적으로 학습하므로 외부 하드 필터 제거
+            # (외부 ADX 임계값 필터는 모든 신호를 차단하는 과도한 보수성 문제 야기)
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:
                 return "hold", 0.5

@@ -1100,7 +1100,7 @@ class TradingScheduler:
                             _train_sym = next((s for s in ["005930", "000660", "035420"] if s in stock_symbols), None) \
                                          or (stock_symbols[0] if stock_symbols else None)
                             if _train_sym:
-                                _train_count = 500
+                                _train_count = 1000
                                 try:
                                     _tr_ohlcv  = await _kis.get_minute_ohlcv(_train_sym, agent.interval_min, count=_train_count)
                                     _kospi_tr  = await _kis.get_minute_ohlcv("0001", 5, count=_train_count)
@@ -1342,7 +1342,7 @@ class TradingScheduler:
         stock_ohlcv_pool: list[list[dict]] = []
         for symbol in STOCK_SYMBOLS:
             try:
-                _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=500)
+                _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=1000)
                 if len(_tmp) >= 100:
                     stock_ohlcv_pool.append(_tmp)
                     logger.info("[Retrain] 주식 학습 데이터: %s (%d봉, 누적 %d종목)", symbol, len(_tmp), len(stock_ohlcv_pool))
@@ -1379,7 +1379,7 @@ class TradingScheduler:
         # ── KOSPI 학습용 데이터 (주식 에이전트 상대강도 피처용) ──────
         kospi_train_ohlcv: list[dict] = []
         try:
-            kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=500)
+            kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=1000)
             logger.info("[Retrain] KOSPI 학습 데이터: %d봉", len(kospi_train_ohlcv))
         except Exception:
             logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
