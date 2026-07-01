@@ -580,8 +580,11 @@ class SimAgent:
             # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
-            # ADX 피처는 모델이 내부적으로 학습하므로 외부 하드 필터 제거
-            # (외부 ADX 임계값 필터는 모든 신호를 차단하는 과도한 보수성 문제 야기)
+            # 코인만 ADX 횡보장 필터 적용 (주식은 모델 내부 학습으로 대체)
+            if self.market == "coin":
+                _adx_val = full_df["adx_14"].iloc[-1] if "adx_14" in full_df.columns else float("nan")
+                if not pd.isna(_adx_val) and _adx_val < 20:
+                    return "hold", 0.5
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:
                 return "hold", 0.5
