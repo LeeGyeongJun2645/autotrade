@@ -510,7 +510,7 @@ class SimAgent:
 
                 def _find_best_thr(prob_arr: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
                     best_thr, best_prec = _init_thr, 0.0
-                    for _t in np.arange(0.50, 0.85, 0.01):
+                    for _t in np.arange(0.50, 0.75, 0.01):  # 상한 0.85→0.75: 과도한 임계값 방지
                         _p = (prob_arr >= _t).astype(int)
                         if _p.sum() < max(5, len(y_true) // 20):
                             continue
@@ -531,18 +531,18 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        self.buy_threshold = round(min(max(_combined, 0.60), 0.75), 2)
+                        self.buy_threshold = round(min(max(_combined, 0.58), 0.72), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        self.buy_threshold = round(min(max(thr_b, 0.60), 0.75), 2)
+                        self.buy_threshold = round(min(max(thr_b, 0.58), 0.72), 2)
                     logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
                                  self.agent_id, val_acc * 100, self.buy_threshold, prec_b)
 
-            # 최소 임계값 — 주식은 0.55, 코인은 0.60 (주식 5분봉 확률분포가 낮음)
-            _min_thr = 0.55 if self.market == "stock" else 0.60
-            self.buy_threshold = max(self.buy_threshold, _min_thr)
+            # 최소 임계값 — 주식은 0.55, 코인은 0.58 (주식 5분봉 확률분포가 낮음), 상한 0.72
+            _min_thr = 0.55 if self.market == "stock" else 0.58
+            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.72)
             self._model = clf
             self._scaler = scaler
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
@@ -580,11 +580,8 @@ class SimAgent:
             # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
-            # 코인만 ADX 횡보장 필터 적용 (주식은 모델 내부 학습으로 대체)
-            if self.market == "coin":
-                _adx_val = full_df["adx_14"].iloc[-1] if "adx_14" in full_df.columns else float("nan")
-                if not pd.isna(_adx_val) and _adx_val < 20:
-                    return "hold", 0.5
+            # ADX 필터는 train()에서만 적용 (trending 구간 학습) — predict()에서 제거
+            # 횡보장에서 모델이 자연스럽게 낮은 확률을 출력하므로 별도 ADX 차단 불필요
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:
                 return "hold", 0.5
@@ -758,10 +755,10 @@ class SimAgent:
         self.win_trades    = int(stats.get("win_trades") or 0)
         self.is_champion   = bool(stats.get("is_champion", 0))
         self.is_active     = bool(stats.get("is_active", 1))
-        # 자동 조정된 임계값 복구 (0이거나 없으면 AGENT_CONFIGS 기본값 유지)
+        # 자동 조정된 임계값 복구 (0이거나 없으면 AGENT_CONFIGS 기본값 유지, 상한 0.72 클램핑)
         thr = stats.get("buy_threshold")
         if thr is not None and float(thr) > 0:
-            self.buy_threshold = float(thr)
+            self.buy_threshold = min(float(thr), 0.72)  # DB 과거 높은 임계값 상한 강제 적용
         for p in positions:
             pos = AgentPosition(
                 ticker=p["ticker"],
