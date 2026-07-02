@@ -933,12 +933,17 @@ class TradingScheduler:
             coin_tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"]
 
         # 주식 종목 (장중에만 추가)
+        _STOCK_FALLBACK = ["005930", "000660", "035420", "035720", "000270", "207940", "373220", "068270"]
         stock_symbols: list[str] = []
         if is_market_open:
             try:
                 stock_symbols = await _kis.get_volume_rank(50)
             except Exception:
                 stock_symbols = list(self._kis_symbols)
+            # 거래량 순위 조회 실패(빈 리스트) 시 대표 종목 폴백
+            if not stock_symbols:
+                stock_symbols = list(self._kis_symbols) or _STOCK_FALLBACK
+                logger.warning("[AgentTick] 거래량 순위 빈 결과 → 폴백 %d개 사용", len(stock_symbols))
 
         # ── 코인 인터벌별 OHLCV + 현재가 병렬 프리패치 ────────────
         coin_intervals = list({a.interval_str for a in AGENTS.values() if a.market == "coin"})
@@ -1098,7 +1103,7 @@ class TradingScheduler:
                         # 모델 없으면 대표 종목(삼성전자)으로 에이전트당 1회만 즉석 학습 시도
                         if agent._model is None and not agent.load_model():
                             _train_sym = next((s for s in ["005930", "000660", "035420"] if s in stock_symbols), None) \
-                                         or (stock_symbols[0] if stock_symbols else None)
+                                         or (stock_symbols[0] if stock_symbols else "005930")
                             if _train_sym:
                                 _train_count = 1000
                                 try:
