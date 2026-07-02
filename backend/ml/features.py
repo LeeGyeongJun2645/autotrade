@@ -311,38 +311,11 @@ def compute_features(
     df["ret_lag_3"]       = close.pct_change(1).shift(3)
 
     # ── 시장 레짐 (0=횡보, 1=추세, 2=고변동) ────────────────────
-    # HMM 3-state 우선 시도 → 실패 시 ADX+BB 폴백
-    _regime_ok = False
-    try:
-        import warnings
-        from hmmlearn import hmm as _hmm_lib
-        _ret_arr  = close.pct_change().fillna(0).values.reshape(-1, 1)
-        _vol_arr  = close.pct_change().rolling(5).std().fillna(0).values.reshape(-1, 1)
-        _hmm_X    = np.concatenate([_ret_arr, _vol_arr], axis=1)
-        if len(_hmm_X) >= 60:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                _model = _hmm_lib.GaussianHMM(
-                    n_components=3, covariance_type="diag",
-                    n_iter=10, random_state=42,
-                )
-                _model.fit(_hmm_X)
-            _states = _model.predict(_hmm_X)
-            # 상태별 평균 변동성 계산 → 낮은 변동성=횡보(0), 중간=추세(1), 높은=고변동(2)
-            _state_vol = {s: float(_vol_arr[_states == s].mean()) for s in range(3) if (_states == s).any()}
-            _sorted    = sorted(_state_vol, key=_state_vol.get)
-            _state_map = {_sorted[i]: float(i) for i in range(len(_sorted))}
-            df["regime_state"] = pd.Series(
-                [_state_map.get(int(s), 0.0) for s in _states], index=df.index
-            )
-            _regime_ok = True
-    except Exception:
-        pass
-    if not _regime_ok:
-        _regime = pd.Series(0.0, index=df.index)
-        _regime[df["adx_14"] > 25] = 1.0
-        _regime[_bb_wband > _bb_wband_ma * 1.5] = 2.0
-        df["regime_state"] = _regime
+    # ADX + BB 폭 기반 결정론적 레짐 감지 (HMM 제거 — 멀티스레드 경고 범람 + CPU 낭비)
+    _regime = pd.Series(0.0, index=df.index)
+    _regime[df["adx_14"] > 25] = 1.0
+    _regime[_bb_wband > _bb_wband_ma * 1.5] = 2.0
+    df["regime_state"] = _regime
 
     # ── MTF 15분봉 상위 추세 (5분봉 리샘플 → EMA 크로스) ────────
     try:
