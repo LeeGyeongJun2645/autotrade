@@ -1250,6 +1250,11 @@ class TradingScheduler:
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
+            # 8시간(480분) 이상 SL/TP 사이에서 무한 홀딩 → 강제 청산
+            if held_min >= 480:
+                signal = "sell"
+                sim_log.push(agent.agent_id, f"[8h강제청산] {symbol} {held_min:.0f}분 보유 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
+
             # 최소 보유 5분: 진입 직후 노이즈 손절 방지 (ATR×1.8 긴급 손절만)
             if held_min < 5:
                 extreme_sl = STOP_LOSS * 1.2  # ATR×1.8 (기존 2.25에서 축소 — 급락 시 빠른 컷)
@@ -1281,6 +1286,13 @@ class TradingScheduler:
             # 코인: 매크로 이벤트 발표 ±2시간은 변동성 폭발 위험 → 신규 매수 차단
             if agent.market == "coin" and _is_high_risk_window():
                 sim_log.push(agent.agent_id, f"[이벤트회피] {symbol} 매수 차단 (매크로 발표 ±2시간)", "INFO")
+                return
+            # 군집매수 방지: 동일 종목을 3개+ 에이전트가 이미 보유 시 차단
+            # (BTC 하락 시 동일 종목 전 에이전트 동시 손절 방지)
+            from backend.ml.agents import AGENTS as _ALL_AGENTS
+            _holders = sum(1 for a in _ALL_AGENTS.values() if a.market == agent.market and symbol in a._positions)
+            if _holders >= 3:
+                sim_log.push(agent.agent_id, f"[군집매수차단] {symbol} {_holders}개 에이전트 보유 중", "INFO")
                 return
             # DCA: 확률 강도에 비례한 진입 비율 (약한 신호는 50%, 강한 신호는 100%)
             _gap = prob - agent.buy_threshold
