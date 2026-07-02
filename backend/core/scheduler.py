@@ -51,6 +51,38 @@ def _is_high_risk_window() -> bool:
         if abs((now - ev).total_seconds()) <= 7200:
             return True
     return False
+
+
+# ── 저승률 종목 정적 블랙리스트 ─────────────────────────────────────
+# 거래내역 분석에서 누적 승률 < 30% + 군집손절 재발 확인된 종목
+_TICKER_BLACKLIST: frozenset[str] = frozenset({"KRW-HP", "KRW-SLX"})
+
+def _is_blacklisted(symbol: str, agent) -> bool:
+    """정적 블랙리스트 + 동적 저승률 차단 (최근 10거래 승률 < 25%)."""
+    if symbol in _TICKER_BLACKLIST:
+        return True
+    # 동적 필터: 이 에이전트의 최근 거래에서 해당 종목 승률 확인
+    ticker_sells = [
+        t for t in agent.recent_trades
+        if t.get("ticker") == symbol and t.get("action") == "SELL"
+    ]
+    if len(ticker_sells) >= 5:
+        win_cnt = sum(1 for t in ticker_sells if (t.get("profit_rate") or 0) > 0)
+        if win_cnt / len(ticker_sells) < 0.25:
+            return True
+    return False
+
+
+def _is_coin_night_risk() -> bool:
+    """코인 야간 고위험 시간대 (KST 01:00~03:00) — 변동성 폭발 구간."""
+    h = datetime.now(KST).hour
+    return 1 <= h < 3
+
+
+def _is_stock_open_noise() -> bool:
+    """주식 개장 첫 25분 (KST 09:00~09:25) — 개인 주문 집중 노이즈 구간."""
+    now = datetime.now(KST)
+    return now.hour == 9 and now.minute < 25
 _OHLCV_SEM = asyncio.Semaphore(10)  # 업비트/KIS OHLCV 동시 요청 최대 10개
 
 
@@ -1275,17 +1307,42 @@ class TradingScheduler:
                 else:
                     take_profit = max(tp_base * 0.4, sl_abs * 1.1)  # R:R 역전 방지
 
-                if unreal >= take_profit:
-                    signal = "sell"
-                    sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
-                elif unreal <= STOP_LOSS:
-                    signal = "sell"
-                    sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
+                # 트레일링 스탑: TP의 80% 도달 시 최고점 추적으로 전환
+                # 추가 이익 확보 + 되돌림 손실 방지
+                if unreal >= take_profit * 0.8:
+                    agent._trailing_mode.add(symbol)
+                if symbol in agent._trailing_mode:
+                    _peak = agent._peak_price.get(symbol, price)
+                    agent._peak_price[symbol] = max(_peak, price)
+                    _trail_sl = agent._peak_price[symbol] * (1 - sl_abs * 0.5)  # 최고점 대비 SL절반 하락 시 청산
+                    if price <= _trail_sl and unreal > 0:
+                        signal = "sell"
+                        sim_log.push(agent.agent_id, f"[트레일링] {symbol} 최고점 대비 하락 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
+
+                if signal != "sell":
+                    if unreal >= take_profit:
+                        signal = "sell"
+                        sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
+                    elif unreal <= STOP_LOSS:
+                        signal = "sell"
+                        sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
 
         if signal == "buy":
             # 코인: 매크로 이벤트 발표 ±2시간은 변동성 폭발 위험 → 신규 매수 차단
             if agent.market == "coin" and _is_high_risk_window():
                 sim_log.push(agent.agent_id, f"[이벤트회피] {symbol} 매수 차단 (매크로 발표 ±2시간)", "INFO")
+                return
+            # 코인: 야간 고위험 시간대 (KST 01:00~03:00) 신규 매수 차단
+            if agent.market == "coin" and _is_coin_night_risk():
+                sim_log.push(agent.agent_id, f"[야간차단] {symbol} 01~03시 변동성 폭발 구간", "INFO")
+                return
+            # 주식: 개장 첫 25분 노이즈 구간 신규 매수 차단
+            if agent.market == "stock" and _is_stock_open_noise():
+                sim_log.push(agent.agent_id, f"[개장차단] {symbol} 09:00~09:25 노이즈 구간", "INFO")
+                return
+            # 저승률 종목 블랙리스트 (정적 + 동적)
+            if _is_blacklisted(symbol, agent):
+                sim_log.push(agent.agent_id, f"[블랙리스트] {symbol} 저승률 종목 차단", "INFO")
                 return
             # 군집매수 방지: 동일 종목을 3개+ 에이전트가 이미 보유 시 차단
             # (BTC 하락 시 동일 종목 전 에이전트 동시 손절 방지)
@@ -1294,9 +1351,17 @@ class TradingScheduler:
             if _holders >= 3:
                 sim_log.push(agent.agent_id, f"[군집매수차단] {symbol} {_holders}개 에이전트 보유 중", "INFO")
                 return
+            # 3연속 손실 → 매수 차단 후 재학습 예약 (다음 주기에 자동 처리)
+            if agent.needs_retrain:
+                sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 3연속손실 — 매수 보류", "INFO")
+                return
+            # RVOL 필터: 거래량 1.5배 미만이면 포지션 50%로 줄임 (약한 신호 크기 축소)
+            _vol_ratio = agent._last_vol_ratio
+            _rvol_portion = 1.0 if _vol_ratio >= 1.5 else 0.5
             # DCA: 확률 강도에 비례한 진입 비율 (약한 신호는 50%, 강한 신호는 100%)
             _gap = prob - agent.buy_threshold
-            _portion = 1.0 if _gap >= 0.08 else (0.7 if _gap >= 0.04 else 0.5)
+            _signal_portion = 1.0 if _gap >= 0.08 else (0.7 if _gap >= 0.04 else 0.5)
+            _portion = min(_signal_portion, _rvol_portion)  # 두 필터 중 더 보수적인 값 적용
             trade = agent.virtual_buy(symbol, price, portion=_portion)
             if trade:
                 await db.execute(
@@ -1324,6 +1389,42 @@ class TradingScheduler:
                 )
                 level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
                 sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
+                # 3연속 손실 시 즉시 재학습 (백그라운드)
+                if agent.needs_retrain:
+                    agent.needs_retrain = False
+                    agent._consecutive_losses = 0
+                    sim_log.push(agent.agent_id, f"[즉시재학습] 3연속손실 감지 — 모델 갱신 시작", "INFO")
+                    import asyncio as _asyncio
+                    _asyncio.create_task(self._emergency_retrain(agent))
+
+    async def _emergency_retrain(self, agent) -> None:
+        """3연속 손실 감지 시 해당 에이전트 즉시 재학습."""
+        from backend.api import upbit as _upbit, kis as _kis
+        try:
+            if agent.market == "coin":
+                for _t in ["KRW-BTC", "KRW-ETH", "KRW-XRP"]:
+                    try:
+                        _ohlcv = await _upbit.get_ohlcv(_t, interval="minutes/5", count=2000)
+                        if len(_ohlcv) >= 300:
+                            ok = await asyncio.to_thread(agent.train, _ohlcv)
+                            if ok:
+                                logger.info("[비상재학습] %s 코인 모델 갱신 완료 (%s)", agent.agent_id, _t)
+                            return
+                    except Exception:
+                        continue
+            else:
+                for _sym in ["005930", "000660"]:
+                    try:
+                        _ohlcv = await _kis.get_ohlcv(_sym, interval="minutes/5", count=500)
+                        if len(_ohlcv) >= 100:
+                            ok = await asyncio.to_thread(agent.train, _ohlcv)
+                            if ok:
+                                logger.info("[비상재학습] %s 주식 모델 갱신 완료 (%s)", agent.agent_id, _sym)
+                            return
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.warning("[비상재학습] %s 실패: %s", agent.agent_id, e)
 
     async def _daily_retrain(self) -> None:
         """매일 06:05 KST — 전 에이전트 최신 데이터로 재학습.

@@ -175,9 +175,14 @@ class SimAgent:
         self.recent_trades: list[dict] = []
         self._last_position_values: dict[str, float] = {}  # ticker → 현재 평가액
         self._last_atr_pct: float = 0.0          # ATR 기반 동적 손익용 (predict()에서 업데이트)
+        self._last_vol_ratio: float = 1.0        # 최근 거래량 비율 (vol/ma20) — RVOL 필터용
         self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
+        self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
+        self._trailing_mode: set[str] = set()    # 트레일링 활성화된 종목
+        self._consecutive_losses: int = 0        # 연속 손실 카운터 → 3회 시 재학습 트리거
+        self.needs_retrain: bool = False          # 즉시 재학습 요청 플래그
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -467,7 +472,7 @@ class SimAgent:
                     learning_rate=0.05,
                     subsample=0.8,
                     colsample_bytree=0.8,
-                    min_child_samples=20,
+                    min_child_samples=30,
                     reg_alpha=0.1,
                     reg_lambda=2.0,
                     scale_pos_weight=scale_pos,
@@ -577,9 +582,11 @@ class SimAgent:
             )
             if full_df.empty:
                 return "hold", 0.5
-            # ATR 캐싱 — _agent_execute에서 동적 손익 계산에 사용
+            # ATR / RVOL 캐싱 — _agent_execute에서 동적 손익 및 거래량 필터에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
+            if "vol_ratio" in full_df.columns:
+                self._last_vol_ratio = float(full_df["vol_ratio"].iloc[-1])
             # ADX 필터는 train()에서만 적용 (trending 구간 학습) — predict()에서 제거
             # 횡보장에서 모델이 자연스럽게 낮은 확률을 출력하므로 별도 ADX 차단 불필요
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
@@ -723,6 +730,13 @@ class SimAgent:
         self.total_trades += 1
         if profit_rate > 0:
             self.win_trades += 1
+            self._consecutive_losses = 0
+        else:
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= 3:
+                self.needs_retrain = True  # 3연속 손실 → 다음 주기에 즉시 재학습
+        self._peak_price.pop(ticker, None)
+        self._trailing_mode.discard(ticker)
         now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         trade = AgentTrade(self.agent_id, ticker, "SELL", price, pos.qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
         self._push_recent(trade)
