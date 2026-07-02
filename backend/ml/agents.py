@@ -49,6 +49,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         # OFI + MTF (모멘텀 방향성 강화)
         "ofi_5", "ofi_20", "cvd_ratio",
         "mtf_ret_15m", "mtf_ret_1h", "mtf_align",
+        # 장중 세션 모멘텀 (주식 전용, 코인=중립)
+        "session_phase", "ret_since_open", "intraday_reversal",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -66,6 +68,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         # MTF 모멘텀 + GK 변동성 (추세 강도 보조)
         "mtf_ret_1h", "mtf_ret_4h", "mtf_align",
         "gk_vol",
+        # ORB 돌파 (주식 지지/저항 기반 추세 확인, 코인=중립)
+        "orb_position", "orb_breakout", "orb_high_pct", "session_phase",
     ],
     "volume": [
         "vol_ratio", "obv_change", "cmf_20",
@@ -79,6 +83,7 @@ FEATURE_SETS: dict[str, list[str]] = {
         # OFI + GK (거래량 품질 강화)
         "ofi_5", "ofi_20", "cvd_ratio",
         "gk_vol",
+        "session_phase", "ret_since_open",
     ],
 }
 
@@ -683,11 +688,12 @@ class SimAgent:
                     get_investor_trend(ticker),
                 )
                 prob = max(0.01, min(0.99, prob + (ob.get("buy_pressure", 0.5) - 0.5) * 0.06))
-                net = inv.get("institution_net_buy", 0) + inv.get("foreign_net_buy", 0)
-                if net > 0:
-                    prob = min(0.99, prob + 0.02)
-                elif net < 0:
-                    prob = max(0.01, prob - 0.02)
+                _inst = inv.get("institution_net_buy", 0)
+                _frgn = inv.get("foreign_net_buy", 0)
+                _net = _inst + _frgn
+                _total = abs(_inst) + abs(_frgn) + 1
+                _net_ratio = max(-1.0, min(1.0, _net / _total))
+                prob = max(0.01, min(0.99, prob + _net_ratio * 0.04))
             except Exception:
                 pass
 
@@ -977,11 +983,12 @@ async def predict_ensemble(
                 get_investor_trend(ticker),
             )
             final_prob = max(0.01, min(0.99, final_prob + (ob.get("buy_pressure", 0.5) - 0.5) * 0.06))
-            net = inv.get("institution_net_buy", 0) + inv.get("foreign_net_buy", 0)
-            if net > 0:
-                final_prob = min(0.99, final_prob + 0.02)
-            elif net < 0:
-                final_prob = max(0.01, final_prob - 0.02)
+            _inst = inv.get("institution_net_buy", 0)
+            _frgn = inv.get("foreign_net_buy", 0)
+            _net = _inst + _frgn
+            _total = abs(_inst) + abs(_frgn) + 1
+            _net_ratio = max(-1.0, min(1.0, _net / _total))
+            final_prob = max(0.01, min(0.99, final_prob + _net_ratio * 0.04))
         except Exception:
             pass
 

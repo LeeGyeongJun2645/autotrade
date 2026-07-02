@@ -124,6 +124,14 @@ FEATURE_NAMES = [
     "mtf_ret_1h",   # 1시간 수익률 (12봉)
     "mtf_ret_4h",   # 4시간 수익률 (48봉)
     "mtf_align",    # 현재봉 방향과 상위 TF 3개 일치 수 (0~3)
+    # ── ORB (Opening Range Breakout) — 주식 전용, 코인=0 ──────────
+    "orb_position",    # (close - orb_low) / (orb_high - orb_low): 09:00~09:30 범위 내 위치 (0~1)
+    "orb_breakout",    # 1=상단 돌파 / -1=하단 돌파 / 0=범위 내
+    "orb_high_pct",    # close / orb_high - 1: 상단 대비 거리
+    # ── 장중 세션 구조 — 주식 전용, 코인=0 ──────────────────────────
+    "session_phase",      # 0=개장(~09:30) / 1=오전 / 2=점심 / 3=오후마감 (기존 3개 이진 대비 압축)
+    "ret_since_open",     # 당일 시가 대비 현재 수익률 (장중 누적 모멘텀)
+    "intraday_reversal",  # 오전 강세(+1%↑) AND 마감 구간 → 반전 패턴 (1=반전 가능성)
 ]
 
 
@@ -534,5 +542,58 @@ def compute_features(
         df["dist_to_r1"] = 0.0
         df["dist_to_s1"] = 0.0
         df["above_pp"]   = 0.5
+
+    # ── ORB + 장중 세션 피처 (주식 전용: kospi_ohlcv 있을 때만, 코인=0) ──
+    # kospi_ohlcv 가 None 이면 코인 에이전트 → 전부 중립값
+    if kospi_ohlcv is not None:
+        try:
+            _h_idx = df.index.hour
+            _m_idx = df.index.minute
+            _date_key = df.index.date
+
+            # 당일 09:00~09:30 ORB 고가/저가
+            _orb_mask = (_h_idx == 9) & (_m_idx < 30)
+            _orb_h = df["high"].where(_orb_mask).groupby(_date_key).transform("max")
+            _orb_l = df["low"].where(_orb_mask).groupby(_date_key).transform("min")
+            # 09:30 이후 봉은 당일 ORB 값 유지 (forward fill 효과)
+            _orb_h = _orb_h.groupby(_date_key).ffill()
+            _orb_l = _orb_l.groupby(_date_key).ffill()
+            _orb_range = (_orb_h - _orb_l).replace(0, np.nan)
+
+            df["orb_position"] = ((close - _orb_l) / _orb_range).clip(0, 2).fillna(0.5)
+            df["orb_breakout"] = 0.0
+            df.loc[close > _orb_h.fillna(0), "orb_breakout"] = 1.0
+            df.loc[(close < _orb_l.fillna(float("inf"))) & _orb_l.notna(), "orb_breakout"] = -1.0
+            df["orb_high_pct"] = (close / _orb_h.replace(0, np.nan) - 1).fillna(0.0)
+
+            # session_phase: 0=개장(~09:30) / 1=오전(09:30~11:30) / 2=점심(11:30~13:00) / 3=오후(13:00~)
+            _sp = pd.Series(0.0, index=df.index)
+            _sp[((_h_idx == 9) & (_m_idx >= 30)) | (_h_idx == 10) | ((_h_idx == 11) & (_m_idx < 30))] = 1.0
+            _sp[((_h_idx == 11) & (_m_idx >= 30)) | (_h_idx == 12)] = 2.0
+            _sp[_h_idx >= 13] = 3.0
+            df["session_phase"] = _sp
+
+            # ret_since_open: 당일 시가(첫 봉 open) 대비 수익률
+            _day_open = open_.groupby(_date_key).transform("first")
+            df["ret_since_open"] = (close / _day_open.replace(0, np.nan) - 1).fillna(0.0)
+
+            # intraday_reversal: 오전 강세(+1%↑) AND 오후 마감 구간 → 반전 신호
+            _closing_zone = _h_idx >= 14
+            df["intraday_reversal"] = ((df["ret_since_open"] > 0.01) & _closing_zone).astype(float)
+        except Exception:
+            df["orb_position"]       = 0.5
+            df["orb_breakout"]       = 0.0
+            df["orb_high_pct"]       = 0.0
+            df["session_phase"]      = 1.0
+            df["ret_since_open"]     = 0.0
+            df["intraday_reversal"]  = 0.0
+    else:
+        # 코인: 해당 없음 → 중립값
+        df["orb_position"]       = 0.5
+        df["orb_breakout"]       = 0.0
+        df["orb_high_pct"]       = 0.0
+        df["session_phase"]      = 1.0
+        df["ret_since_open"]     = 0.0
+        df["intraday_reversal"]  = 0.0
 
     return df[FEATURE_NAMES].dropna()
