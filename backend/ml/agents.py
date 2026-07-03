@@ -268,7 +268,8 @@ class SimAgent:
                 data = pickle.load(f)
             stored_feats = data.get("feature_names", [])
             if stored_feats and stored_feats != self.feature_names:
-                return False  # 피처 불일치 → 재학습
+                self._model_path.unlink(missing_ok=True)  # 피처 불일치 → 구 모델 삭제 후 재학습
+                return False
             loaded = data["model"]
             # 모델 타입 불일치(예: xgb→lgbm 전환) 시 자동 폐기 → 다음 틱 재학습
             loaded_type = "lgbm" if isinstance(loaded, LGBMClassifier) else "xgb"
