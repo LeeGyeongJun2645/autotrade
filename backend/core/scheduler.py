@@ -1076,6 +1076,10 @@ class TradingScheduler:
         if _fresh_btc:
             self._btc_ohlcv_cache = _fresh_btc
 
+        # 주식 온더플라이 학습용 공유 캐시 — 10개 에이전트가 같은 데이터 재사용 (API 중복 방지)
+        _otf_stock_ohlcv: dict[str, list[dict]] = {}   # key: symbol
+        _otf_kospi_ohlcv: list[dict] = []
+
         async with connect_db() as db:
             for agent in AGENTS.values():
                 try:
@@ -1132,18 +1136,29 @@ class TradingScheduler:
                         if not is_market_open:
                             continue
                         agent.update_position_values(stock_prices)
-                        # 모델 없으면 대표 종목(삼성전자)으로 에이전트당 1회만 즉석 학습 시도
+                        # 모델 없으면 대표 종목(삼성전자)으로 즉석 학습 시도
+                        # 학습 데이터는 에이전트 간 공유 (_otf_stock_ohlcv) — API 중복 호출 방지
                         if agent._model is None and not agent.load_model():
                             _train_sym = next((s for s in ["005930", "000660", "035420"] if s in stock_symbols), None) \
                                          or (stock_symbols[0] if stock_symbols else "005930")
                             if _train_sym:
-                                _train_count = 1000
-                                try:
-                                    _tr_ohlcv  = await _kis.get_minute_ohlcv(_train_sym, agent.interval_min, count=_train_count)
-                                    _kospi_tr  = await _kis.get_minute_ohlcv("0001", 5, count=_train_count)
-                                except Exception:
-                                    _tr_ohlcv  = stock_ohlcv_cache.get(f"{_train_sym}:{agent.interval_min}", [])
-                                    _kospi_tr  = kospi_ohlcv
+                                _OTF_COUNT = 500  # 500봉=5거래일 (1000→500 절반 API 콜)
+                                if _train_sym not in _otf_stock_ohlcv:
+                                    try:
+                                        _otf_stock_ohlcv[_train_sym] = await _kis.get_minute_ohlcv(
+                                            _train_sym, agent.interval_min, count=_OTF_COUNT
+                                        )
+                                    except Exception:
+                                        _otf_stock_ohlcv[_train_sym] = stock_ohlcv_cache.get(
+                                            f"{_train_sym}:{agent.interval_min}", []
+                                        )
+                                if not _otf_kospi_ohlcv:
+                                    try:
+                                        _otf_kospi_ohlcv[:] = await _kis.get_minute_ohlcv("0001", 5, count=_OTF_COUNT)
+                                    except Exception:
+                                        _otf_kospi_ohlcv[:] = kospi_ohlcv or []
+                                _tr_ohlcv = _otf_stock_ohlcv.get(_train_sym, [])
+                                _kospi_tr = _otf_kospi_ohlcv
                                 if _tr_ohlcv:
                                     async with agent._train_lock:
                                         await asyncio.to_thread(agent.train, _tr_ohlcv, None, None, _kospi_tr)
@@ -1460,7 +1475,7 @@ class TradingScheduler:
         stock_ohlcv_pool: list[list[dict]] = []
         for symbol in STOCK_SYMBOLS:
             try:
-                _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=1000)
+                _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=500)
                 if len(_tmp) >= 100:
                     stock_ohlcv_pool.append(_tmp)
                     logger.info("[Retrain] 주식 학습 데이터: %s (%d봉, 누적 %d종목)", symbol, len(_tmp), len(stock_ohlcv_pool))
@@ -1497,7 +1512,7 @@ class TradingScheduler:
         # ── KOSPI 학습용 데이터 (주식 에이전트 상대강도 피처용) ──────
         kospi_train_ohlcv: list[dict] = []
         try:
-            kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=1000)
+            kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=500)
             logger.info("[Retrain] KOSPI 학습 데이터: %d봉", len(kospi_train_ohlcv))
         except Exception:
             logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
