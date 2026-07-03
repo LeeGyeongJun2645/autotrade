@@ -320,8 +320,12 @@ class SimAgent:
             )
             # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
-            # ADX 필터를 열 선택 전에 캡처 (feature_set 에 adx_14 없는 에이전트도 동일 필터 적용)
-            _adx_mask = feat_df["adx_14"] >= 20 if "adx_14" in feat_df.columns else None
+            # ADX 필터: 코인만 추세장 구간 학습 (주식은 predict()와 동일하게 필터 없음)
+            _adx_mask = (
+                feat_df["adx_14"] >= 20
+                if (self.market == "coin" and "adx_14" in feat_df.columns)
+                else None
+            )
             feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
             if _adx_mask is not None:
                 feat_df = feat_df[_adx_mask.reindex(feat_df.index, fill_value=False)]
@@ -472,13 +476,15 @@ class SimAgent:
             scale_pos = n_neg / n_pos if n_pos > 0 else 1.0
 
             if self.model_type == "lgbm":
+                # min_child_samples: 소규모 학습 데이터(OTF 200봉)에서도 분할 가능하도록 적응형
+                _mcs = max(10, min(30, len(X_train) // 10))
                 clf = LGBMClassifier(
                     n_estimators=200,
                     max_depth=3,
                     learning_rate=0.05,
                     subsample=0.8,
                     colsample_bytree=0.8,
-                    min_child_samples=30,
+                    min_child_samples=_mcs,
                     reg_alpha=0.1,
                     reg_lambda=2.0,
                     scale_pos_weight=scale_pos,

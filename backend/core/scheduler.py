@@ -1078,11 +1078,24 @@ class TradingScheduler:
         if _fresh_btc:
             self._btc_ohlcv_cache = _fresh_btc
 
-        # 주식 학습 데이터 캐시 갱신 — _daily_retrain / OTF 학습에서 API 재호출 방지
+        # 주식 학습 데이터 캐시 누적 갱신 (최대 500봉 rolling) — 틱마다 쌓아서 데이터 풍부하게
         if stock_ohlcv_cache:
-            self._stock_train_cache = dict(stock_ohlcv_cache)
+            for _k, _new in stock_ohlcv_cache.items():
+                _existing = self._stock_train_cache.get(_k, [])
+                if not _existing:
+                    self._stock_train_cache[_k] = list(_new)
+                else:
+                    _exist_dates = {c["date"] for c in _existing}
+                    _extra = [c for c in _new if c["date"] not in _exist_dates]
+                    _combined = _extra + _existing  # 신규 봉 앞에 추가
+                    self._stock_train_cache[_k] = _combined[:500]
         if kospi_ohlcv:
-            self._kospi_train_cache = list(kospi_ohlcv)
+            if not self._kospi_train_cache:
+                self._kospi_train_cache = list(kospi_ohlcv)
+            else:
+                _exist_dates = {c["date"] for c in self._kospi_train_cache}
+                _extra = [c for c in kospi_ohlcv if c["date"] not in _exist_dates]
+                self._kospi_train_cache = (_extra + self._kospi_train_cache)[:500]
 
         # 주식 온더플라이 학습용 공유 캐시 — 10개 에이전트가 같은 데이터 재사용 (API 중복 방지)
         _otf_stock_ohlcv: dict[str, list[dict]] = {}   # key: symbol
