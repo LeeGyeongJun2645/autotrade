@@ -410,9 +410,15 @@ class SimAgent:
             # ── 2-창 Purged Walk-Forward: 이전 레짐(창A) + 최신 레짐(창B) ──────
             # 데이터: [───훈련───][GAP][──창A──][GAP][──창B──]
             # 창A/B 모두 훈련셋 밖 → 데이터 리케이지 없음
-            GAP      = self.lookahead
-            VAL_SIZE = min(200, max(len(X) // 6, 30))
-            _two_win = len(X) > 2 * VAL_SIZE + 2 * GAP + 50
+            GAP = self.lookahead
+            if len(X) >= 400:
+                # 충분한 데이터: 2창 WF + 넉넉한 검증셋
+                VAL_SIZE = min(200, max(len(X) // 6, 30))
+                _two_win = len(X) > 2 * VAL_SIZE + 2 * GAP + 100
+            else:
+                # 소규모(OTF 200봉 등): 검증셋 최소화, 2창 비활성화 — 학습셋 확보 우선
+                VAL_SIZE = max(15, len(X) // 8)
+                _two_win = False
             if _two_win:
                 _t_end   = len(X) - 2 * VAL_SIZE - 2 * GAP
                 X_train  = X[:_t_end];    y_train  = y[:_t_end]
