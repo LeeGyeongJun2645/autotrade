@@ -618,7 +618,8 @@ class SimAgent:
                     self.agent_id, X_last_df.shape[1], expected,
                 )
                 return "hold", 0.5
-            X_scaled = self._scaler.transform(X_last_df)  # type: ignore[union-attr]
+            # scaler는 numpy로 fit됐으므로 numpy로 transform (DataFrame 전달 시 경고 발생)
+            X_scaled = self._scaler.transform(X_last_df.values)  # type: ignore[union-attr]
             X_scaled_df = pd.DataFrame(X_scaled, columns=X_last_df.columns)
             prob = float(self._model.predict_proba(X_scaled_df)[0, 1])  # type: ignore[union-attr]
         except Exception:
