@@ -604,16 +604,17 @@ class SimAgent:
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:
                 return "hold", 0.5
-            X_last = feat_df.iloc[[-1]].values
+            X_last_df = feat_df.iloc[[-1]]
             expected = getattr(self._scaler, "n_features_in_", None)
-            if expected is not None and X_last.shape[1] != expected:
+            if expected is not None and X_last_df.shape[1] != expected:
                 logger.warning(
                     "[%s] 피처 수 불일치: 현재 %d개, 스케일러 %d개 — hold 반환",
-                    self.agent_id, X_last.shape[1], expected,
+                    self.agent_id, X_last_df.shape[1], expected,
                 )
                 return "hold", 0.5
-            X_scaled = self._scaler.transform(X_last)  # type: ignore[union-attr]
-            prob = float(self._model.predict_proba(X_scaled)[0, 1])  # type: ignore[union-attr]
+            X_scaled = self._scaler.transform(X_last_df)  # type: ignore[union-attr]
+            X_scaled_df = pd.DataFrame(X_scaled, columns=X_last_df.columns)
+            prob = float(self._model.predict_proba(X_scaled_df)[0, 1])  # type: ignore[union-attr]
         except Exception:
             logger.debug("[%s] predict 예외 — hold 반환", self.agent_id, exc_info=True)
             return "hold", 0.5

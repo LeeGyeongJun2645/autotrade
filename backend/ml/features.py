@@ -581,19 +581,15 @@ def compute_features(
             _closing_zone = _h_idx >= 14
             df["intraday_reversal"] = ((df["ret_since_open"] > 0.01) & _closing_zone).astype(float)
         except Exception:
-            df["orb_position"]       = 0.5
-            df["orb_breakout"]       = 0.0
-            df["orb_high_pct"]       = 0.0
-            df["session_phase"]      = 1.0
-            df["ret_since_open"]     = 0.0
-            df["intraday_reversal"]  = 0.0
+            df = pd.concat([df, pd.DataFrame({
+                "orb_position": 0.5, "orb_breakout": 0.0, "orb_high_pct": 0.0,
+                "session_phase": 1.0, "ret_since_open": 0.0, "intraday_reversal": 0.0,
+            }, index=df.index)], axis=1)
     else:
         # 코인: 해당 없음 → 중립값
-        df["orb_position"]       = 0.5
-        df["orb_breakout"]       = 0.0
-        df["orb_high_pct"]       = 0.0
-        df["session_phase"]      = 1.0
-        df["ret_since_open"]     = 0.0
-        df["intraday_reversal"]  = 0.0
+        df = pd.concat([df, pd.DataFrame({
+            "orb_position": 0.5, "orb_breakout": 0.0, "orb_high_pct": 0.0,
+            "session_phase": 1.0, "ret_since_open": 0.0, "intraday_reversal": 0.0,
+        }, index=df.index)], axis=1)
 
     return df[FEATURE_NAMES].dropna()
