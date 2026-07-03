@@ -1375,11 +1375,13 @@ class TradingScheduler:
                 return
             # 군집매수 방지: 동일 종목을 3개+ 에이전트가 이미 보유 시 차단
             # (BTC 하락 시 동일 종목 전 에이전트 동시 손절 방지)
-            from backend.ml.agents import AGENTS as _ALL_AGENTS
-            _holders = sum(1 for a in _ALL_AGENTS.values() if a.market == agent.market and symbol in a._positions)
-            if _holders >= 3:
-                sim_log.push(agent.agent_id, f"[군집매수차단] {symbol} {_holders}개 에이전트 보유 중", "INFO")
-                return
+            # 앙상블 에이전트는 제외 — 이미 다수결 합의(40%+ buy_votes)로 필터링됨
+            from backend.ml.agents import AGENTS as _ALL_AGENTS, ENSEMBLE_AGENTS as _EA
+            if agent.agent_id not in _EA:
+                _holders = sum(1 for a in _ALL_AGENTS.values() if a.market == agent.market and symbol in a._positions)
+                if _holders >= 3:
+                    sim_log.push(agent.agent_id, f"[군집매수차단] {symbol} {_holders}개 에이전트 보유 중", "INFO")
+                    return
             # 3연속 손실 → 매수 차단 후 재학습 예약 (다음 주기에 자동 처리)
             if agent.needs_retrain:
                 sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 3연속손실 — 매수 보류", "INFO")
