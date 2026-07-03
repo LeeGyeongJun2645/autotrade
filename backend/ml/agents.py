@@ -332,6 +332,8 @@ class SimAgent:
             # ATR도 feat_df 인덱스에 맞춰 정렬
             _atr_series = _atr_full.reindex(feat_df.index) if _atr_full is not None else None
             if len(feat_df) < 50:
+                logger.warning("[%s] 학습 스킵: feat_df %d행 < 50 (입력 %d봉, 피처수 %d)",
+                               self.agent_id, len(feat_df), len(ohlcv_list), len(self.feature_names))
                 return False
 
             # close_all: ohlcv_list 전체(N_raw)를 DatetimeIndex로 구성
@@ -402,6 +404,8 @@ class SimAgent:
             label   = label[clear_mask.values]
 
             if len(feat_df) < 30 or len(set(label.values)) < 2:
+                logger.warning("[%s] 학습 스킵: 레이블 후 %d행 / 클래스수 %d (양성레이블 %d개)",
+                               self.agent_id, len(feat_df), len(set(label.values)), int(label.sum()))
                 return False
 
             X = feat_df.values
@@ -570,7 +574,7 @@ class SimAgent:
             self._scaler = scaler
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
             self.save_model()
-            logger.info("[%s] 모델 학습 완료 (%d샘플)", self.agent_id, len(X))
+            logger.warning("[%s] 모델 학습 완료 (%d샘플, X_train=%d, thr=%.2f)", self.agent_id, len(X), len(X_train), self.buy_threshold)
             return True
         except Exception as e:
             logger.warning("[%s] 학습 실패: %s", self.agent_id, e)
