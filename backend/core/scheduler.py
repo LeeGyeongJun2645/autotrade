@@ -104,6 +104,8 @@ class TradingScheduler:
         self._btc_oi_hist:    list[dict] = []  # BTC 선물 OI 히스토리 캐시 (코인 에이전트 전체 공유)
         self._btc_taker_hist: list[dict] = []  # BTC 선물 Taker 비율 히스토리 캐시
         self._btc_ohlcv_cache: list[dict] = []  # BTC 5분봉 OHLCV 캐시 (ML 게이트 BTC 상관관계용)
+        self._stock_train_cache: dict[str, list] = {}  # 최근 틱에서 수집한 주식 OHLCV (재학습 재사용)
+        self._kospi_train_cache: list[dict] = []       # 최근 틱 KOSPI OHLCV (재학습 재사용)
         # DCA 분할매수 상태: {symbol: {"stage": 1~3, "total_budget": float}}
         # stage 1=1차완료, 2=2차완료, 3=3차완료(전량매수)
         self._dca_state: dict[str, dict] = {}
@@ -1076,6 +1078,12 @@ class TradingScheduler:
         if _fresh_btc:
             self._btc_ohlcv_cache = _fresh_btc
 
+        # 주식 학습 데이터 캐시 갱신 — _daily_retrain / OTF 학습에서 API 재호출 방지
+        if stock_ohlcv_cache:
+            self._stock_train_cache = dict(stock_ohlcv_cache)
+        if kospi_ohlcv:
+            self._kospi_train_cache = list(kospi_ohlcv)
+
         # 주식 온더플라이 학습용 공유 캐시 — 10개 에이전트가 같은 데이터 재사용 (API 중복 방지)
         _otf_stock_ohlcv: dict[str, list[dict]] = {}   # key: symbol
         _otf_kospi_ohlcv: list[dict] = []
@@ -1142,21 +1150,14 @@ class TradingScheduler:
                             _train_sym = next((s for s in ["005930", "000660", "035420"] if s in stock_symbols), None) \
                                          or (stock_symbols[0] if stock_symbols else "005930")
                             if _train_sym:
-                                _OTF_COUNT = 500  # 500봉=5거래일 (1000→500 절반 API 콜)
+                                # OTF 학습: 이번 틱에 이미 fetched된 데이터 재사용 → 추가 API 콜 0
                                 if _train_sym not in _otf_stock_ohlcv:
-                                    try:
-                                        _otf_stock_ohlcv[_train_sym] = await _kis.get_minute_ohlcv(
-                                            _train_sym, agent.interval_min, count=_OTF_COUNT
-                                        )
-                                    except Exception:
-                                        _otf_stock_ohlcv[_train_sym] = stock_ohlcv_cache.get(
-                                            f"{_train_sym}:{agent.interval_min}", []
-                                        )
+                                    _otf_stock_ohlcv[_train_sym] = (
+                                        stock_ohlcv_cache.get(f"{_train_sym}:{agent.interval_min}")
+                                        or self._stock_train_cache.get(f"{_train_sym}:{agent.interval_min}", [])
+                                    )
                                 if not _otf_kospi_ohlcv:
-                                    try:
-                                        _otf_kospi_ohlcv[:] = await _kis.get_minute_ohlcv("0001", 5, count=_OTF_COUNT)
-                                    except Exception:
-                                        _otf_kospi_ohlcv[:] = kospi_ohlcv or []
+                                    _otf_kospi_ohlcv[:] = kospi_ohlcv or self._kospi_train_cache or []
                                 _tr_ohlcv = _otf_stock_ohlcv.get(_train_sym, [])
                                 _kospi_tr = _otf_kospi_ohlcv
                                 if _tr_ohlcv:
@@ -1474,14 +1475,20 @@ class TradingScheduler:
         # 주식 에이전트별로 다른 종목 데이터를 할당해 앙상블 다양성 확보
         stock_ohlcv_pool: list[list[dict]] = []
         for symbol in STOCK_SYMBOLS:
+            # 1순위: 틱 캐시 재사용 (API 콜 0)
+            _cached = self._stock_train_cache.get(f"{symbol}:5", [])
+            if len(_cached) >= 50:
+                stock_ohlcv_pool.append(list(_cached))
+                logger.info("[Retrain] 주식 학습 데이터(캐시): %s (%d봉)", symbol, len(_cached))
+                continue
+            # 2순위: 캐시 없으면 최소 API 호출 (100봉 = ~17콜)
             try:
-                _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=500)
-                if len(_tmp) >= 100:
+                _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=100)
+                if len(_tmp) >= 50:
                     stock_ohlcv_pool.append(_tmp)
-                    logger.info("[Retrain] 주식 학습 데이터: %s (%d봉, 누적 %d종목)", symbol, len(_tmp), len(stock_ohlcv_pool))
+                    logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉)", symbol, len(_tmp))
             except Exception as e:
                 logger.warning("[Retrain] 주식 OHLCV 수집 실패 (%s): %s", symbol, e)
-                continue
         stock_ohlcv = stock_ohlcv_pool[0] if stock_ohlcv_pool else []
 
         # 주식 에이전트별 종목 순환 배정 (round-robin)
@@ -1511,11 +1518,15 @@ class TradingScheduler:
 
         # ── KOSPI 학습용 데이터 (주식 에이전트 상대강도 피처용) ──────
         kospi_train_ohlcv: list[dict] = []
-        try:
-            kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=500)
-            logger.info("[Retrain] KOSPI 학습 데이터: %d봉", len(kospi_train_ohlcv))
-        except Exception:
-            logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
+        if len(self._kospi_train_cache) >= 50:
+            kospi_train_ohlcv = list(self._kospi_train_cache)
+            logger.info("[Retrain] KOSPI 학습 데이터(캐시): %d봉", len(kospi_train_ohlcv))
+        else:
+            try:
+                kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=100)
+                logger.info("[Retrain] KOSPI 학습 데이터(API): %d봉", len(kospi_train_ohlcv))
+            except Exception:
+                logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
 
         # ── BTC 선물 OI + Taker 히스토리 (코인 에이전트 학습용) ─────
         from backend.api.binance import get_open_interest_hist, get_taker_ratio_hist
