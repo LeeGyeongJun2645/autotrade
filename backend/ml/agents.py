@@ -926,6 +926,7 @@ async def predict_ensemble(
     weighted_prob = 0.0
     weighted_thr  = 0.0  # 임계값도 동일 가중치로 집계 (단순평균 불일치 방지)
     total_weight  = 0.0
+    buy_votes     = 0    # 개별 에이전트 "buy" 투표 수
     for agent in candidates:
         ret    = max(agent.total_return, -0.5)
         sharpe = agent._sharpe_weight()
@@ -955,10 +956,12 @@ async def predict_ensemble(
             if agent.feature_set == "all":
                 weight *= 1.3
 
-        _, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
+        sig, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight
         total_weight  += weight
+        if sig == "buy":
+            buy_votes += 1
 
     final_prob = weighted_prob / total_weight if total_weight > 0 else 0.5
 
@@ -1011,10 +1014,19 @@ async def predict_ensemble(
         except Exception:
             pass
 
-    # ── 임계값: 확률과 동일한 가중치로 집계 (고성능 에이전트 임계값 우선) ─────────
-    avg_thr = weighted_thr / total_weight if total_weight > 0 else 0.60
+    # ── 임계값: 개별 임계값 가중평균 × 0.95 (앙상블 합의 효과 반영) ─────────────
+    # 여러 에이전트가 동의 → 개별 임계값보다 낮아도 신뢰도 충분
+    avg_thr = (weighted_thr / total_weight) * 0.95 if total_weight > 0 else 0.57
+    vote_ratio = buy_votes / len(candidates) if candidates else 0.0
 
-    if final_prob >= avg_thr:
+    # 투표 로그 (앙상블 진단용)
+    logger.warning(
+        "[앙상블-%s] ticker=%s final_prob=%.4f avg_thr=%.4f buy_votes=%d/%d",
+        market, ticker or "-", final_prob, avg_thr, buy_votes, len(candidates),
+    )
+
+    # 매수: 가중확률 임계 초과 OR 에이전트 40% 이상 buy + 확률 ≥ 0.54
+    if final_prob >= avg_thr or (vote_ratio >= 0.40 and final_prob >= 0.54):
         return "buy", round(final_prob, 4)
     if final_prob <= (1.0 - avg_thr):
         return "sell", round(final_prob, 4)
