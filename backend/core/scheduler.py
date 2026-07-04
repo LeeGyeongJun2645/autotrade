@@ -1379,19 +1379,25 @@ class TradingScheduler:
                     signal = "sell"
                     sim_log.push(agent.agent_id, f"[급락손절] {symbol} {unreal*100:.1f}% (ATR×1.8={extreme_sl*100:.1f}%) @ {price:,.0f}원", "SELL")
             else:
-                # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 낮춤
-                # R:R 항상 1.1 이상 유지 (TP > SL × 1.1) — R:R 역전 방지
+                # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 완만 하향
+                # R:R 항상 1.3 이상 유지 — 연구: ATR 고정 stops profit factor 1.26 vs 트레일링 0.89
+                # 43% 승률에서 손익분기 R:R = 1.45:1 (수수료 포함) → 최소 1.3:1 보장
                 sl_abs = abs(STOP_LOSS)
                 if held_min < 30:
                     take_profit = tp_base
                 elif held_min < 90:
-                    take_profit = max(tp_base * 0.7, sl_abs * 1.1)
+                    take_profit = max(tp_base * 0.85, sl_abs * 1.3)  # 기존 0.7→0.85 (R:R 1.7:1 유지)
+                elif held_min < 150:
+                    take_profit = max(tp_base * 0.65, sl_abs * 1.3)  # 기존 0.4→0.65 (R:R 1.3:1 유지)
                 else:
-                    take_profit = max(tp_base * 0.4, sl_abs * 1.1)  # R:R 역전 방지
+                    # 150분 이상 보유 → 5분봉 알파 소멸 구간, 수익 있으면 강제 청산
+                    if unreal > 0:
+                        signal = "sell"
+                        sim_log.push(agent.agent_id, f"[알파소멸] {symbol} {unreal*100:.1f}% 150분 보유 강제청산 @ {price:,.0f}원", "SELL")
+                    take_profit = max(tp_base * 0.65, sl_abs * 1.3)
 
-                # 트레일링 스탑: TP의 80% 도달 시 최고점 추적으로 전환
-                # 추가 이익 확보 + 되돌림 손실 방지
-                if unreal >= take_profit * 0.8:
+                # 트레일링 스탑: TP의 90% 도달 시 최고점 추적으로 전환 (80%→90%: 조기활성 방지)
+                if unreal >= take_profit * 0.9:
                     agent._trailing_mode.add(symbol)
                 if symbol in agent._trailing_mode:
                     _peak = agent._peak_price.get(symbol, price)
