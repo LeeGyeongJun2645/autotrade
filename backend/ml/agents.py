@@ -190,6 +190,7 @@ class SimAgent:
         self.needs_retrain: bool = False          # 즉시 재학습 요청 플래그
         self._daily_retrain_count: int = 0       # 당일 비상재학습 횟수 (최대 3회)
         self._last_retrain_date: str = ""        # 마지막 재학습 날짜 (YYYY-MM-DD)
+        self._cooldown_tickers: dict[str, str] = {}  # ticker → 쿨다운 만료 시각 (ISO), 손절 후 30분 재매수 금지
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 

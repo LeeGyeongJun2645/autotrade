@@ -56,31 +56,59 @@ def _is_high_risk_window() -> bool:
 # ── 저승률 종목 정적 블랙리스트 ─────────────────────────────────────
 # 거래내역 분석에서 누적 승률 < 30% + 군집손절 재발 확인된 종목
 _TICKER_BLACKLIST: frozenset[str] = frozenset({
-    "KRW-HP", "KRW-SLX",
-    "KRW-TAIKO", "KRW-IN", "KRW-BREV",
-    "KRW-DOGE", "KRW-WET", "KRW-USDT",
+    "KRW-HP",    "KRW-SLX",
+    "KRW-TAIKO", "KRW-IN",   "KRW-BREV",
+    "KRW-DOGE",  "KRW-WET",  "KRW-USDT",
+    "KRW-ID",    "KRW-JTO",  "KRW-DKA",
+    "KRW-EDGE",  "KRW-MET2", "KRW-IOTA",
+    "KRW-SONIC", "KRW-SAND",
 })
 
 def _is_blacklisted(symbol: str, agent) -> bool:
-    """정적 블랙리스트 + 동적 저승률 차단 (최근 10거래 승률 < 25%)."""
+    """정적 블랙리스트 + 동적 저승률 차단 (최근 거래 3건 이상 승률 < 25%)."""
     if symbol in _TICKER_BLACKLIST:
         return True
-    # 동적 필터: 이 에이전트의 최근 거래에서 해당 종목 승률 확인
+    # 동적 필터: 이 에이전트의 최근 거래에서 해당 종목 승률 확인 (3건→민감도 향상)
     ticker_sells = [
         t for t in agent.recent_trades
         if t.get("ticker") == symbol and t.get("action") == "SELL"
     ]
-    if len(ticker_sells) >= 5:
+    if len(ticker_sells) >= 3:
         win_cnt = sum(1 for t in ticker_sells if (t.get("profit_rate") or 0) > 0)
         if win_cnt / len(ticker_sells) < 0.25:
             return True
     return False
 
 
+def _is_cooldown(symbol: str, agent) -> bool:
+    """손절 후 30분 쿨다운 — 재매수 금지."""
+    until = agent._cooldown_tickers.get(symbol)
+    if not until:
+        return False
+    from datetime import datetime as _dt
+    if _dt.now(KST).isoformat() < until:
+        return True
+    agent._cooldown_tickers.pop(symbol, None)
+    return False
+
+
+def _set_cooldown(symbol: str, agent) -> None:
+    """손절 확정 시 해당 종목 30분 쿨다운 등록."""
+    from datetime import datetime as _dt, timedelta as _td
+    until = (_dt.now(KST) + _td(minutes=30)).isoformat()
+    agent._cooldown_tickers[symbol] = until
+
+
 def _is_coin_night_risk() -> bool:
     """코인 야간 고위험 시간대 (KST 00:00~03:00) — 변동성 폭발 구간."""
     h = datetime.now(KST).hour
     return 0 <= h < 3
+
+
+def _is_coin_afternoon_risk() -> bool:
+    """코인 오후 저승률 시간대 (KST 16:00~17:59) — 실거래 데이터 기준 -0.5%/거래."""
+    h = datetime.now(KST).hour
+    return 16 <= h < 18
 
 
 def _is_stock_open_noise() -> bool:
@@ -168,6 +196,20 @@ class TradingScheduler:
                 db.row_factory = aiosqlite.Row
                 async with db.execute("SELECT * FROM agent_stats") as cur:
                     stats_rows = {r["agent_id"]: dict(r) async for r in cur}
+
+                # 실거래 기준 total_trades/win_trades 재계산 (stats 불일치 보정)
+                async with db.execute("""
+                    SELECT agent_id,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) as wins
+                    FROM agent_trades WHERE action='SELL'
+                    GROUP BY agent_id
+                """) as cur:
+                    trade_counts = {r["agent_id"]: (int(r["total"]), int(r["wins"])) async for r in cur}
+
+                for agent_id, row in stats_rows.items():
+                    if agent_id in trade_counts:
+                        row["total_trades"], row["win_trades"] = trade_counts[agent_id]
 
                 async with db.execute(
                     "SELECT * FROM agent_positions"
@@ -1372,9 +1414,13 @@ class TradingScheduler:
             if agent.market == "coin" and _is_high_risk_window():
                 sim_log.push(agent.agent_id, f"[이벤트회피] {symbol} 매수 차단 (매크로 발표 ±2시간)", "INFO")
                 return
-            # 코인: 야간 고위험 시간대 (KST 01:00~03:00) 신규 매수 차단
+            # 코인: 야간 고위험 시간대 (KST 00:00~03:00) 신규 매수 차단
             if agent.market == "coin" and _is_coin_night_risk():
-                sim_log.push(agent.agent_id, f"[야간차단] {symbol} 01~03시 변동성 폭발 구간", "INFO")
+                sim_log.push(agent.agent_id, f"[야간차단] {symbol} 00~03시 변동성 폭발 구간", "INFO")
+                return
+            # 코인: 오후 저승률 시간대 (KST 16:00~17:59) 신규 매수 차단
+            if agent.market == "coin" and _is_coin_afternoon_risk():
+                sim_log.push(agent.agent_id, f"[오후차단] {symbol} 16~18시 저승률 구간", "INFO")
                 return
             # 주식: 개장 첫 25분 노이즈 구간 신규 매수 차단
             if agent.market == "stock" and _is_stock_open_noise():
@@ -1383,6 +1429,10 @@ class TradingScheduler:
             # 저승률 종목 블랙리스트 (정적 + 동적)
             if _is_blacklisted(symbol, agent):
                 sim_log.push(agent.agent_id, f"[블랙리스트] {symbol} 저승률 종목 차단", "INFO")
+                return
+            # 손절 후 30분 쿨다운 — 재매수 금지
+            if _is_cooldown(symbol, agent):
+                sim_log.push(agent.agent_id, f"[쿨다운] {symbol} 손절 후 30분 재매수 금지", "INFO")
                 return
             # 군집매수 방지: 동일 종목을 3개+ 에이전트가 이미 보유 시 차단
             # (BTC 하락 시 동일 종목 전 에이전트 동시 손절 방지)
@@ -1431,7 +1481,10 @@ class TradingScheduler:
                 )
                 level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
                 sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
-                # 3연속 손실 시 즉시 재학습 (백그라운드)
+                # 손절 시 30분 쿨다운 등록 (이중손절 방지)
+                if (trade.profit_rate or 0) < -0.003:
+                    _set_cooldown(symbol, agent)
+                # 5연속 손실 시 즉시 재학습 (백그라운드)
                 if agent.needs_retrain:
                     agent.needs_retrain = False
                     agent._consecutive_losses = 0
