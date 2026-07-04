@@ -55,7 +55,11 @@ def _is_high_risk_window() -> bool:
 
 # ── 저승률 종목 정적 블랙리스트 ─────────────────────────────────────
 # 거래내역 분석에서 누적 승률 < 30% + 군집손절 재발 확인된 종목
-_TICKER_BLACKLIST: frozenset[str] = frozenset({"KRW-HP", "KRW-SLX"})
+_TICKER_BLACKLIST: frozenset[str] = frozenset({
+    "KRW-HP", "KRW-SLX",
+    "KRW-TAIKO", "KRW-IN", "KRW-BREV",
+    "KRW-DOGE", "KRW-WET", "KRW-USDT",
+})
 
 def _is_blacklisted(symbol: str, agent) -> bool:
     """정적 블랙리스트 + 동적 저승률 차단 (최근 10거래 승률 < 25%)."""
@@ -74,16 +78,16 @@ def _is_blacklisted(symbol: str, agent) -> bool:
 
 
 def _is_coin_night_risk() -> bool:
-    """코인 야간 고위험 시간대 (KST 01:00~03:00) — 변동성 폭발 구간."""
+    """코인 야간 고위험 시간대 (KST 00:00~03:00) — 변동성 폭발 구간."""
     h = datetime.now(KST).hour
-    return 1 <= h < 3
+    return 0 <= h < 3
 
 
 def _is_stock_open_noise() -> bool:
     """주식 개장 첫 25분 (KST 09:00~09:25) — 개인 주문 집중 노이즈 구간."""
     now = datetime.now(KST)
     return now.hour == 9 and now.minute < 25
-_OHLCV_SEM = asyncio.Semaphore(10)  # 업비트/KIS OHLCV 동시 요청 최대 10개
+_OHLCV_SEM = asyncio.Semaphore(5)  # 업비트/KIS OHLCV 동시 요청 최대 5개 (429 방지)
 
 
 class TradingScheduler:
@@ -1007,11 +1011,18 @@ class TradingScheduler:
             except Exception:
                 return ticker, 0.0
 
-        # 병렬 OHLCV 요청 (fetch_coin_tickers × 코인 인터벌 수)
-        ohlcv_tasks = [
-            _fetch_coin_ohlcv(t, iv) for t in fetch_coin_tickers for iv in coin_intervals
+        # 배치 OHLCV 요청 — 10개씩 나눠서 배치 간 0.2초 딜레이 (429 방지)
+        _all_ohlcv_tasks = [
+            (t, iv) for t in fetch_coin_tickers for iv in coin_intervals
         ]
-        ohlcv_results = await asyncio.gather(*ohlcv_tasks)
+        ohlcv_results: list = []
+        _BATCH = 10
+        for _bi in range(0, len(_all_ohlcv_tasks), _BATCH):
+            _chunk = _all_ohlcv_tasks[_bi:_bi + _BATCH]
+            _chunk_results = await asyncio.gather(*[_fetch_coin_ohlcv(t, iv) for t, iv in _chunk])
+            ohlcv_results.extend(_chunk_results)
+            if _bi + _BATCH < len(_all_ohlcv_tasks):
+                await asyncio.sleep(0.2)
         ohlcv_cache: dict[str, list] = {
             f"{t}:{iv}": data for t, iv, data in ohlcv_results
         }
@@ -1424,14 +1435,31 @@ class TradingScheduler:
                 if agent.needs_retrain:
                     agent.needs_retrain = False
                     agent._consecutive_losses = 0
-                    sim_log.push(agent.agent_id, f"[즉시재학습] 3연속손실 감지 — 모델 갱신 시작", "INFO")
+                    sim_log.push(agent.agent_id, f"[즉시재학습] 5연속손실 감지 — 모델 갱신 시작", "INFO")
                     import asyncio as _asyncio
-                    _asyncio.create_task(self._emergency_retrain(agent))
+
+                    async def _safe_retrain(a=agent):
+                        try:
+                            await self._emergency_retrain(a)
+                        except Exception as _e:
+                            logger.warning("[비상재학습] %s 태스크 예외: %s", a.agent_id, _e)
+
+                    _asyncio.create_task(_safe_retrain())
 
     async def _emergency_retrain(self, agent) -> None:
-        """3연속 손실 감지 시 해당 에이전트 즉시 재학습."""
+        """5연속 손실 감지 시 해당 에이전트 즉시 재학습 (하루 3회 제한)."""
         from backend.api import upbit as _upbit, kis as _kis
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
         try:
+            # 하루 횟수 확인 (날짜 바뀌면 리셋)
+            today = _dt.now(_ZI("Asia/Seoul")).strftime("%Y-%m-%d")
+            if agent._last_retrain_date != today:
+                agent._daily_retrain_count = 0
+                agent._last_retrain_date = today
+            agent._daily_retrain_count += 1
+            logger.info("[비상재학습] %s 시작 (오늘 %d회차)", agent.agent_id, agent._daily_retrain_count)
+
             if agent.market == "coin":
                 for _t in ["KRW-BTC", "KRW-ETH", "KRW-XRP"]:
                     try:

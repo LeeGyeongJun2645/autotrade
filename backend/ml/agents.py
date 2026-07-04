@@ -186,8 +186,10 @@ class SimAgent:
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
         self._trailing_mode: set[str] = set()    # 트레일링 활성화된 종목
-        self._consecutive_losses: int = 0        # 연속 손실 카운터 → 3회 시 재학습 트리거
+        self._consecutive_losses: int = 0        # 연속 손실 카운터 → 5회 시 재학습 트리거
         self.needs_retrain: bool = False          # 즉시 재학습 요청 플래그
+        self._daily_retrain_count: int = 0       # 당일 비상재학습 횟수 (최대 3회)
+        self._last_retrain_date: str = ""        # 마지막 재학습 날짜 (YYYY-MM-DD)
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -758,8 +760,13 @@ class SimAgent:
             self._consecutive_losses = 0
         else:
             self._consecutive_losses += 1
-            if self._consecutive_losses >= 3:
-                self.needs_retrain = True  # 3연속 손실 → 다음 주기에 즉시 재학습
+            if self._consecutive_losses >= 5:
+                today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+                if self._last_retrain_date != today:
+                    self._daily_retrain_count = 0
+                    self._last_retrain_date = today
+                if self._daily_retrain_count < 3:
+                    self.needs_retrain = True  # 5연속 손실 → 즉시 재학습 (하루 3회 제한)
         self._peak_price.pop(ticker, None)
         self._trailing_mode.discard(ticker)
         now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
