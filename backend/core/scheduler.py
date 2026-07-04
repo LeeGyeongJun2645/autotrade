@@ -62,6 +62,9 @@ _TICKER_BLACKLIST: frozenset[str] = frozenset({
     "KRW-ID",    "KRW-JTO",  "KRW-DKA",
     "KRW-EDGE",  "KRW-MET2", "KRW-IOTA",
     "KRW-SONIC", "KRW-SAND",
+    # 07-04 수정 후 데이터에서 저승률 확인된 종목 추가
+    "KRW-BLAST", "KRW-ELF",  "KRW-SAHARA",
+    "KRW-SOL",   "KRW-MANA",
 })
 
 def _is_blacklisted(symbol: str, agent) -> bool:
