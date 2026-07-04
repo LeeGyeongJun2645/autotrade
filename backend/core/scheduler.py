@@ -1331,8 +1331,8 @@ class TradingScheduler:
         # ATR이 유효하면(>0.1%) 시장 변동성에 자동 적응, 없으면 고정값 폴백
         atr_pct = agent._last_atr_pct
         if atr_pct > 0.001:
-            STOP_LOSS   = -(atr_pct * 1.5)          # ATR × 1.5 손절
-            tp_base     = atr_pct * 3.0              # ATR × 3.0 익절 (2:1 R:R → 손절 대비 2배 이상)
+            STOP_LOSS   = max(-(atr_pct * 1.5), -0.005)  # ATR×1.5, 최소 -0.5% (수수료 5배)
+            tp_base     = max(atr_pct * 3.0, 0.010)      # ATR×3.0, 최소 +1.0% (R:R 2:1 보장)
         else:
             STOP_LOSS   = -0.03
             tp_base     = 0.06

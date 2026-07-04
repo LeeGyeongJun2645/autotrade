@@ -818,6 +818,33 @@ class SimAgent:
             self._last_position_values[p["ticker"]] = pos.entry_price * pos.qty
         self.recent_trades = trades[:30]
 
+        # 재시작 시 recent_trades에서 연속손실 복구
+        consecutive = 0
+        for t in self.recent_trades:
+            if (t.get("profit_rate") or 0) < 0:
+                consecutive += 1
+            else:
+                break
+        self._consecutive_losses = consecutive
+
+        # 재시작 시 최근 SL 거래 기준 쿨다운 복구 (30분 이내 -0.3% 이하 손절)
+        from datetime import datetime as _dt, timedelta as _td
+        now_kst = _dt.now(ZoneInfo("Asia/Seoul"))
+        for t in self.recent_trades:
+            if (t.get("profit_rate") or 0) >= -0.003:
+                continue
+            traded_at_str = t.get("traded_at", "")
+            if not traded_at_str:
+                continue
+            try:
+                traded_at = _dt.fromisoformat(traded_at_str).replace(tzinfo=ZoneInfo("Asia/Seoul"))
+                if (now_kst - traded_at).total_seconds() < 1800:  # 30분 이내
+                    ticker = t.get("ticker", "")
+                    if ticker:
+                        self._cooldown_tickers[ticker] = (traded_at + _td(minutes=30)).isoformat()
+            except Exception:
+                pass
+
     # ── 직렬화 ─────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
