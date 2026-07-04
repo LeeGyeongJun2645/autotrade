@@ -62,9 +62,13 @@ _TICKER_BLACKLIST: frozenset[str] = frozenset({
     "KRW-ID",    "KRW-JTO",  "KRW-DKA",
     "KRW-EDGE",  "KRW-MET2", "KRW-IOTA",
     "KRW-SONIC", "KRW-SAND",
-    # 07-04 수정 후 데이터에서 저승률 확인된 종목 추가
+    # 07-04 추가
     "KRW-BLAST", "KRW-ELF",  "KRW-SAHARA",
     "KRW-SOL",   "KRW-MANA",
+    # 07-05 추가: EV 음수 + 저승률 확인
+    "KRW-PEPE",  "KRW-BERA", "KRW-SUI",
+    "KRW-BCH",   "KRW-VTHO",
+    "KRW-AI",    "KRW-MIRA",
 })
 
 def _is_blacklisted(symbol: str, agent) -> bool:
@@ -103,15 +107,9 @@ def _set_cooldown(symbol: str, agent) -> None:
 
 
 def _is_coin_night_risk() -> bool:
-    """코인 야간 고위험 시간대 (KST 00:00~03:00) — 변동성 폭발 구간."""
+    """코인 야간 고위험 시간대 (KST 01:00~04:59) — KST 00시는 WR=57.5%로 양호, 04시는 WR=34.4% 최악."""
     h = datetime.now(KST).hour
-    return 0 <= h < 3
-
-
-def _is_coin_afternoon_risk() -> bool:
-    """코인 오후 저승률 시간대 (KST 16:00~17:59) — 실거래 데이터 기준 -0.5%/거래."""
-    h = datetime.now(KST).hour
-    return 16 <= h < 18
+    return 1 <= h < 5
 
 
 def _is_stock_open_noise() -> bool:
@@ -1423,13 +1421,10 @@ class TradingScheduler:
             if agent.market == "coin" and _is_high_risk_window():
                 sim_log.push(agent.agent_id, f"[이벤트회피] {symbol} 매수 차단 (매크로 발표 ±2시간)", "INFO")
                 return
-            # 코인: 야간 고위험 시간대 (KST 00:00~03:00) 신규 매수 차단
+            # 코인: 야간 고위험 시간대 (KST 01:00~04:59) 신규 매수 차단
+            # KST 00시(WR=57.5%) 해제, KST 04시(WR=34.4%) 추가, KST 16-17시 해제(WR=52%)
             if agent.market == "coin" and _is_coin_night_risk():
-                sim_log.push(agent.agent_id, f"[야간차단] {symbol} 00~03시 변동성 폭발 구간", "INFO")
-                return
-            # 코인: 오후 저승률 시간대 (KST 16:00~17:59) 신규 매수 차단
-            if agent.market == "coin" and _is_coin_afternoon_risk():
-                sim_log.push(agent.agent_id, f"[오후차단] {symbol} 16~18시 저승률 구간", "INFO")
+                sim_log.push(agent.agent_id, f"[야간차단] {symbol} 01~04시 저승률 구간", "INFO")
                 return
             # 주식: 개장 첫 25분 노이즈 구간 신규 매수 차단
             if agent.market == "stock" and _is_stock_open_noise():
