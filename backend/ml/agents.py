@@ -104,7 +104,7 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI07",  5, 0.010, 0.62, "trend",    "coin",  3, "lgbm"),
     ("AI08",  5, 0.007, 0.62, "volume",   "coin",  5, "xgb"),
     ("AI09",  5, 0.012, 0.65, "all",      "coin",  8, "lgbm"),
-    ("AI10",  5, 0.008, 0.60, "trend",    "coin",  5, "xgb"),
+    ("AI10",  5, 0.008, 0.65, "trend",    "coin",  5, "xgb"),
     # 주식 전략 — 전부 LightGBM (histogram-based 분할이 불균형 5분봉 데이터에 더 안정적)
     ("AI11",  5, 0.006, 0.58, "all",      "stock", 3, "lgbm"),
     ("AI12",  5, 0.005, 0.60, "trend",    "stock", 5, "lgbm"),  # label 0.7→0.5% (양성레이블 확보)
@@ -561,17 +561,17 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        self.buy_threshold = round(min(max(_combined, 0.58), 0.72), 2)
+                        self.buy_threshold = round(min(max(_combined, 0.62), 0.72), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        self.buy_threshold = round(min(max(thr_b, 0.58), 0.72), 2)
+                        self.buy_threshold = round(min(max(thr_b, 0.62), 0.72), 2)
                     logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
                                  self.agent_id, val_acc * 100, self.buy_threshold, prec_b)
 
-            # 최소 임계값 — 주식은 0.55, 코인은 0.58 (주식 5분봉 확률분포가 낮음), 상한 0.72
-            _min_thr = 0.55 if self.market == "stock" else 0.58
+            # 최소 임계값 — 주식은 0.55, 코인은 0.62 (0.58은 너무 낮아 과다매수 유발)
+            _min_thr = 0.55 if self.market == "stock" else 0.62
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.72)
             self._model = clf
             self._scaler = scaler
