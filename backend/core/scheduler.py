@@ -130,9 +130,9 @@ def _is_coin_night_risk() -> bool:
 
 
 def _is_stock_open_noise() -> bool:
-    """주식 개장 첫 25분 (KST 09:00~09:25) — 개인 주문 집중 노이즈 구간."""
+    """주식 개장 첫 30분 (KST 09:00~09:30) — KOSPI 연구: 개장 직후 30분 수익률 음수."""
     now = datetime.now(KST)
-    return now.hour == 9 and now.minute < 25
+    return now.hour == 9 and now.minute < 30
 _OHLCV_SEM = asyncio.Semaphore(5)  # 업비트/KIS OHLCV 동시 요청 최대 5개 (429 방지)
 
 
@@ -1346,8 +1346,8 @@ class TradingScheduler:
         # ATR이 유효하면(>0.1%) 시장 변동성에 자동 적응, 없으면 고정값 폴백
         atr_pct = agent._last_atr_pct
         if atr_pct > 0.001:
-            STOP_LOSS   = max(-(atr_pct * 1.5), -0.005)  # ATR×1.5, 최소 -0.5% (수수료 5배)
-            tp_base     = max(atr_pct * 3.0, 0.010)      # ATR×3.0, 최소 +1.0% (R:R 2:1 보장)
+            STOP_LOSS   = max(-(atr_pct * 1.5), -0.005)  # ATR×1.5, 최소 -0.5%
+            tp_base     = max(atr_pct * 2.0, 0.010)      # ATR×2.0 (3.0→2.0: 레이블링과 정합, 빠른 익절)
         else:
             STOP_LOSS   = -0.03
             tp_base     = 0.06
@@ -1471,6 +1471,10 @@ class TradingScheduler:
             # 3연속 손실 → 매수 차단 후 재학습 예약 (다음 주기에 자동 처리)
             if agent.needs_retrain:
                 sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 3연속손실 — 매수 보류", "INFO")
+                return
+            # ADX 필터: 코인 횡보장(ADX<20) 진입 차단 — 추세 없는 구간에서 WR 급락 방지
+            if agent.market == "coin" and 0 < agent._last_adx_14 < 20:
+                sim_log.push(agent.agent_id, f"[ADX차단] {symbol} ADX={agent._last_adx_14:.1f}<20 횡보장", "INFO")
                 return
             # RVOL 필터: 거래량 1.5배 미만이면 포지션 50%로 줄임 (약한 신호 크기 축소)
             _vol_ratio = agent._last_vol_ratio

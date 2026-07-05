@@ -181,6 +181,7 @@ class SimAgent:
         self._last_position_values: dict[str, float] = {}  # ticker → 현재 평가액
         self._last_atr_pct: float = 0.0          # ATR 기반 동적 손익용 (predict()에서 업데이트)
         self._last_vol_ratio: float = 1.0        # 최근 거래량 비율 (vol/ma20) — RVOL 필터용
+        self._last_adx_14: float = 0.0           # ADX(14) — BUY 필터: 횡보장 진입 차단용
         self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
@@ -323,7 +324,7 @@ class SimAgent:
             )
             # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
-            # ADX 필터: 코인만 추세장 구간 학습 (주식은 predict()와 동일하게 필터 없음)
+            # ADX 필터: 코인만 추세장 구간 학습 — predict() BUY 필터(>=20)와 동일 임계값
             _adx_mask = (
                 feat_df["adx_14"] >= 20
                 if (self.market == "coin" and "adx_14" in feat_df.columns)
@@ -366,11 +367,11 @@ class SimAgent:
             raw_labels = np.zeros(len(close), dtype=int)
             for i in range(len(close) - LOOKAHEAD):
                 entry = close.iloc[i]
-                # 실제 _agent_execute 손익 기준 ATR×3.0 TP, ATR×1.5 SL 과 동일하게 맞춤
+                # _agent_execute 실제 손익 기준과 정합 (TP=ATR×2.0, SL=ATR×1.5)
+                # TP 3.0→2.0 변경: 양성 레이블 비율 ~14%→~33% 증가, 클래스 불균형 완화
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr = float(_atr_series.iloc[i])
-                    # ATR 기반 TP/SL — label_threshold 최소값 보장 (저변동성 구간 레이블 전멸 방지)
-                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)
+                    tp_pct = max(min(_atr * 2.0, 0.08), self.label_threshold)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -607,13 +608,13 @@ class SimAgent:
             )
             if full_df.empty:
                 return "hold", 0.5
-            # ATR / RVOL 캐싱 — _agent_execute에서 동적 손익 및 거래량 필터에 사용
+            # ATR / RVOL / ADX 캐싱 — _agent_execute에서 동적 손익 및 BUY 필터에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
             if "vol_ratio" in full_df.columns:
                 self._last_vol_ratio = float(full_df["vol_ratio"].iloc[-1])
-            # ADX 필터는 train()에서만 적용 (trending 구간 학습) — predict()에서 제거
-            # 횡보장에서 모델이 자연스럽게 낮은 확률을 출력하므로 별도 ADX 차단 불필요
+            if "adx_14" in full_df.columns:
+                self._last_adx_14 = float(full_df["adx_14"].iloc[-1])
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:
                 return "hold", 0.5
