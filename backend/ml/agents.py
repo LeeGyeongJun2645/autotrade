@@ -29,8 +29,8 @@ MODEL_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 INITIAL_CAPITAL    = 10_000_000.0  # 에이전트당 초기 가상 자금 (1000만원)
-POSITION_RATIO     = 0.5            # 잔액의 50%씩 사용
-MAX_OPEN_POSITIONS = 3              # 에이전트당 동시 최대 포지션 수
+POSITION_RATIO     = 0.15           # 잔액의 15%씩 사용 (0.5→0.15: 리스크 70% 축소)
+MAX_OPEN_POSITIONS = 2              # 에이전트당 동시 최대 포지션 수 (3→2)
 
 # ── 피처 세트 정의 ────────────────────────────────────────────────
 
@@ -232,7 +232,7 @@ class SimAgent:
         p = max(0.3, min(0.8, self.win_rate))
         b = 1.5   # 평균 이익 / 평균 손실 추정 (보수적)
         kelly = (p * b - (1 - p)) / b
-        return max(0.1, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 10~50% 범위
+        return max(0.05, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 5~15% 범위
 
     def _sharpe_weight(self) -> float:
         """최근 거래 수익률 기반 Sortino 비율 가중치.

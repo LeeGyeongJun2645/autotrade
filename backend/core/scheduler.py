@@ -109,6 +109,20 @@ def _set_cooldown(symbol: str, agent) -> None:
     agent._cooldown_tickers[symbol] = until
 
 
+_DAILY_LOSS_LIMIT = 0.03  # 일일 손실 한도 3% (에이전트별 독립 서킷 브레이커)
+
+def _is_daily_loss_exceeded(agent) -> bool:
+    """오늘 손실이 DAILY_LOSS_LIMIT(3%)를 넘으면 신규 매수 차단."""
+    from datetime import datetime as _dt
+    kst_today = _dt.now(KST).strftime("%Y-%m-%d")
+    today_pnl = sum(
+        (t.get("profit_rate") or 0)
+        for t in agent.recent_trades
+        if t.get("traded_at", "")[:10] == kst_today and t.get("action") == "SELL"
+    )
+    return today_pnl < -_DAILY_LOSS_LIMIT
+
+
 def _is_coin_night_risk() -> bool:
     """코인 야간 고위험 시간대 (KST 01:00~04:59) — KST 00시는 WR=57.5%로 양호, 04시는 WR=34.4% 최악."""
     h = datetime.now(KST).hour
@@ -1420,6 +1434,10 @@ class TradingScheduler:
                         sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
 
         if signal == "buy":
+            # 일일 손실 한도 서킷 브레이커 (에이전트별 독립, 3% 초과 시 당일 차단)
+            if _is_daily_loss_exceeded(agent):
+                sim_log.push(agent.agent_id, f"[서킷브레이커] {symbol} 오늘 손실 3% 초과 → 신규매수 차단", "WARN")
+                return
             # 코인: 매크로 이벤트 발표 ±2시간은 변동성 폭발 위험 → 신규 매수 차단
             if agent.market == "coin" and _is_high_risk_window():
                 sim_log.push(agent.agent_id, f"[이벤트회피] {symbol} 매수 차단 (매크로 발표 ±2시간)", "INFO")
