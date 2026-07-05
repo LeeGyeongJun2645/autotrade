@@ -125,6 +125,10 @@ async def init_db() -> None:
             "ALTER TABLE agent_stats ADD COLUMN feature_set     TEXT    DEFAULT 'all'",
             "ALTER TABLE agent_stats ADD COLUMN is_champion     INTEGER DEFAULT 0",
             "ALTER TABLE agent_trades ADD COLUMN entry_price    REAL",
+            # Meta-Labeling 학습용: BUY 시점 컨텍스트 저장
+            "ALTER TABLE agent_trades ADD COLUMN buy_prob       REAL",
+            "ALTER TABLE agent_trades ADD COLUMN buy_adx        REAL",
+            "ALTER TABLE agent_trades ADD COLUMN buy_vol_ratio  REAL",
         ]
         for sql in _migrations:
             try:

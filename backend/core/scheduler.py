@@ -161,6 +161,11 @@ class TradingScheduler:
         self._dca_state: dict[str, dict] = {}
         # 매수 진행 중 심볼 추적 (TOCTOU 중복매수 방지: 주문 후 포지션 등록 전 간격 보호)
         self._pending_buys: set[str] = set()
+        # KOSPI MIM (Morning Intraday Momentum): 개장 30분 방향 → 당일 필터
+        self._morning_direction: int = 0      # +1=상승, -1=하락, 0=미결정
+        self._morning_direction_date: str = ""
+        # 외국인 수급 캐시 (5분 TTL): {symbol: (data_dict, timestamp)}
+        self._investor_cache: dict[str, tuple[dict, float]] = {}
 
     # ── 종목 관리 ─────────────────────────────────────────────────
 
@@ -1119,6 +1124,29 @@ class TradingScheduler:
             except Exception:
                 kospi_ohlcv = []
 
+        # KOSPI MIM: 09:30~10:30 구간에 개장 방향 계산 (날짜 기준 1회)
+        _today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        if (is_market_open and kospi_ohlcv
+                and _today_str != self._morning_direction_date
+                and 9 <= datetime.now(KST).hour < 11):
+            try:
+                _sorted_k = sorted(kospi_ohlcv, key=lambda x: x["date"])
+                if len(_sorted_k) >= 6:  # 최소 30분(6봉) 데이터 필요
+                    _first_open = float(_sorted_k[0]["open"])
+                    _latest_close = float(_sorted_k[-1]["close"])
+                    if _latest_close > _first_open * 1.001:
+                        self._morning_direction = 1
+                        self._morning_direction_date = _today_str
+                        logger.info("[KOSPI MIM] 개장 상승(%+.2f%%) → 당일 BUY 허용",
+                                    (_latest_close / _first_open - 1) * 100)
+                    elif _latest_close < _first_open * 0.999:
+                        self._morning_direction = -1
+                        self._morning_direction_date = _today_str
+                        logger.info("[KOSPI MIM] 개장 하락(%+.2f%%) → 당일 BUY 억제",
+                                    (_latest_close / _first_open - 1) * 100)
+            except Exception:
+                pass
+
         if is_market_open and stock_symbols:
             async def _fetch_stock_ohlcv(sym: str, iv_min: int) -> tuple[str, int, list]:
                 async with _OHLCV_SEM:
@@ -1476,6 +1504,27 @@ class TradingScheduler:
             if agent.market == "coin" and 0 < agent._last_adx_14 < 20:
                 sim_log.push(agent.agent_id, f"[ADX차단] {symbol} ADX={agent._last_adx_14:.1f}<20 횡보장", "INFO")
                 return
+            # KOSPI MIM: 개장 30분 하락 방향 시 주식 당일 BUY 억제 (MDPI Finance 검증 전략)
+            if agent.market == "stock" and self._morning_direction == -1:
+                sim_log.push(agent.agent_id, f"[MIM차단] {symbol} KOSPI 개장 하락 → 당일 BUY 보류", "INFO")
+                return
+            # 외국인 수급: 외국인 500주+ 순매도 종목 BUY 차단 (주식 전용, 5분 TTL 캐시)
+            if agent.market == "stock":
+                import time as _time
+                _cached_inv = self._investor_cache.get(symbol)
+                _now_ts = _time.time()
+                if _cached_inv and _now_ts - _cached_inv[1] < 300:
+                    _inv = _cached_inv[0]
+                else:
+                    try:
+                        from backend.api.kis import _kis
+                        _inv = await _kis.get_investor_trend(symbol)
+                        self._investor_cache[symbol] = (_inv, _now_ts)
+                    except Exception:
+                        _inv = {"foreign_net_buy": 0}
+                if _inv.get("foreign_net_buy", 0) < -500:
+                    sim_log.push(agent.agent_id, f"[외국인차단] {symbol} 외국인 {_inv['foreign_net_buy']:,}주 순매도", "INFO")
+                    return
             # RVOL 필터: 거래량 1.5배 미만이면 포지션 50%로 줄임 (약한 신호 크기 축소)
             _vol_ratio = agent._last_vol_ratio
             _rvol_portion = 1.0 if _vol_ratio >= 1.5 else 0.5
@@ -1486,8 +1535,13 @@ class TradingScheduler:
             trade = agent.virtual_buy(symbol, price, portion=_portion)
             if trade:
                 await db.execute(
-                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
-                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
+                    """INSERT INTO agent_trades
+                       (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance,
+                        buy_prob, buy_adx, buy_vol_ratio)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty,
+                     trade.entry_price, trade.profit_rate, trade.balance,
+                     round(prob, 4), round(agent._last_adx_14, 2), round(agent._last_vol_ratio, 3)),
                 )
                 await db.execute(
                     "INSERT OR REPLACE INTO agent_positions (agent_id, ticker, entry_price, qty, entered_at) VALUES (?,?,?,?,?)",
@@ -1675,7 +1729,8 @@ class TradingScheduler:
             for agent in AGENTS.values():
                 async with db.execute(
                     """
-                    SELECT b.traded_at AS buy_at, s.profit_rate
+                    SELECT b.traded_at AS buy_at, b.buy_prob, b.buy_adx, b.buy_vol_ratio,
+                           s.profit_rate
                     FROM agent_trades b
                     INNER JOIN agent_trades s
                         ON  s.agent_id = b.agent_id
@@ -1738,10 +1793,25 @@ class TradingScheduler:
                 logger.exception("[Retrain][%s] 재학습 중 예외", agent.agent_id)
 
         logger.info("[Retrain] 완료: %d/20 에이전트 재학습", success)
+
+        # ── Meta-Labeling 2차 모델 학습 (buy_prob 데이터 30개+ 시 자동 학습) ──
+        meta_success = 0
+        for agent in AGENTS.values():
+            _meta_data = agent_trade_results.get(agent.agent_id, [])
+            _meta_valid = [t for t in _meta_data if t.get("buy_prob") is not None]
+            if len(_meta_valid) >= 30:
+                try:
+                    ok = await asyncio.to_thread(agent.train_meta, _meta_valid)
+                    if ok:
+                        meta_success += 1
+                except Exception as _me:
+                    logger.debug("[Retrain] %s Meta 학습 실패: %s", agent.agent_id, _me)
+
         try:
             await telegram.notify_message(
                 f"🔄 <b>AI 일일 재학습 완료 (06:05)</b>\n"
                 f"성공: {success}/20 에이전트\n"
+                f"Meta-Labeling: {meta_success}개 학습\n"
                 f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv_pool)}종목\n"
                 f"※ 전일 거래내역 sample_weight 반영 → 승률 지속 개선"
             )

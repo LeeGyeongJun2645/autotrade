@@ -182,6 +182,9 @@ class SimAgent:
         self._last_atr_pct: float = 0.0          # ATR 기반 동적 손익용 (predict()에서 업데이트)
         self._last_vol_ratio: float = 1.0        # 최근 거래량 비율 (vol/ma20) — RVOL 필터용
         self._last_adx_14: float = 0.0           # ADX(14) — BUY 필터: 횡보장 진입 차단용
+        self._meta_model: LGBMClassifier | None = None   # Meta-Labeling 2차 필터 모델
+        self._meta_scaler: StandardScaler | None = None
+        self._meta_path = MODEL_DIR / f"meta_agent_{agent_id}.pkl"
         self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
@@ -299,6 +302,70 @@ class SimAgent:
                 },
                 f,
             )
+
+    def load_meta_model(self) -> bool:
+        if not self._meta_path.exists():
+            return False
+        try:
+            with open(self._meta_path, "rb") as f:
+                data = pickle.load(f)
+            self._meta_model = data["model"]
+            self._meta_scaler = data["scaler"]
+            return True
+        except Exception:
+            self._meta_path.unlink(missing_ok=True)
+            return False
+
+    def train_meta(self, trade_results: list[dict]) -> bool:
+        """BUY 시점 컨텍스트 + 결과로 Meta-Labeling 2차 필터 모델 학습.
+
+        피처: buy_prob, hour_sin, hour_cos, buy_adx, buy_vol_ratio
+        레이블: profit_rate > 0 → 1 (성공), else 0 (실패)
+        데이터: agent_trades WHERE action='BUY' AND buy_prob IS NOT NULL
+        """
+        valid = [
+            t for t in trade_results
+            if t.get("buy_prob") is not None and t.get("profit_rate") is not None
+        ]
+        if len(valid) < 30:
+            return False
+        try:
+            X_rows = []
+            for t in valid:
+                h = 12
+                try:
+                    h = int(t.get("traded_at", "2000-01-01T12:00:00")[11:13])
+                except Exception:
+                    pass
+                X_rows.append([
+                    float(t["buy_prob"]),
+                    np.sin(2 * np.pi * h / 24),
+                    np.cos(2 * np.pi * h / 24),
+                    float(t.get("buy_adx", 25.0) or 25.0),
+                    float(t.get("buy_vol_ratio", 1.0) or 1.0),
+                ])
+            X = np.array(X_rows)
+            y = np.array([1 if (t.get("profit_rate") or 0) > 0 else 0 for t in valid])
+            if len(set(y)) < 2:
+                return False
+            scaler = StandardScaler()
+            X_s = scaler.fit_transform(X)
+            clf = LGBMClassifier(
+                n_estimators=100, max_depth=3, learning_rate=0.1,
+                scale_pos_weight=max(1.0, (y == 0).sum() / max((y == 1).sum(), 1)),
+                random_state=42, verbose=-1,
+            )
+            clf.fit(X_s, y)
+            self._meta_model = clf
+            self._meta_scaler = scaler
+            with open(self._meta_path, "wb") as f:
+                pickle.dump({"model": clf, "scaler": scaler}, f)
+            logger.info("[%s] Meta-Labeling 모델 학습 완료 (%d샘플, WR=%.1f%%)",
+                        self.agent_id, len(valid), y.mean() * 100)
+            return True
+        except Exception as e:
+            logger.debug("[%s] Meta 학습 실패: %s", self.agent_id, e)
+            return False
 
     # ── 학습 (동기 — asyncio.to_thread 로 호출) ─────────────────
 
@@ -647,6 +714,25 @@ class SimAgent:
             pass
 
         if prob >= self.buy_threshold:
+            # ── Meta-Labeling 2차 필터 ───────────────────────────────
+            # 1차 BUY 신호를 실제로 거래할지 2차 모델이 판단 (False Positive 감소)
+            if self._meta_model is not None and self._meta_scaler is not None:
+                try:
+                    _h = datetime.now(ZoneInfo("Asia/Seoul")).hour
+                    _meta_feat = np.array([[
+                        prob,
+                        np.sin(2 * np.pi * _h / 24),
+                        np.cos(2 * np.pi * _h / 24),
+                        self._last_adx_14,
+                        self._last_vol_ratio,
+                    ]])
+                    _meta_prob = float(
+                        self._meta_model.predict_proba(self._meta_scaler.transform(_meta_feat))[0, 1]
+                    )
+                    if _meta_prob < 0.5:
+                        return "hold", round(prob, 4)  # 메타 모델이 거부
+                except Exception:
+                    pass
             return "buy", round(prob, 4)
         if prob <= (1.0 - self.buy_threshold):
             return "sell", round(prob, 4)
