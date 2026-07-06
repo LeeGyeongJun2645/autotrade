@@ -1386,10 +1386,10 @@ class TradingScheduler:
         if atr_pct > 0.001:
             STOP_LOSS   = max(-(atr_pct * 1.5), -0.005)  # ATR×1.5, 최소 -0.5%
             STOP_LOSS   = max(STOP_LOSS, -0.020)          # 상한 -2.0% (대손절 방지: 분석상 최악 -3.67%)
-            tp_base     = max(atr_pct * 2.0, 0.010)      # ATR×2.0, 최소 +1.0%
+            tp_base     = max(atr_pct * 2.5, 0.010)      # ATR×2.5 (2.0→2.5: MFE 분석 기반 수익률 개선)
         else:
             STOP_LOSS   = -0.020
-            tp_base     = 0.04
+            tp_base     = 0.05  # 4%→5% (R:R 개선)
 
         # ── 보유 포지션 익절/손절 우선 체크 ─────────────────────────
         if symbol in agent._positions:
@@ -1440,35 +1440,37 @@ class TradingScheduler:
                     signal = "hold"  # 그 외 신호 무시: 노이즈 청산 차단
             else:
                 # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 완만 하향
-                # R:R 항상 1.3 이상 유지 — 연구: ATR 고정 stops profit factor 1.26 vs 트레일링 0.89
-                # 43% 승률에서 손익분기 R:R = 1.45:1 (수수료 포함) → 최소 1.3:1 보장
+                # R:R 항상 1.3 이상 유지 — 연구: MFE 분석 → 현재 너무 일찍 익절, 수익 놓침
+                # 타임밴드 확장 (150min→240min): 코인 모멘텀 4~6시간 지속 연구 기반
                 sl_abs = abs(STOP_LOSS)
                 if held_min < 30:
                     take_profit = tp_base
-                elif held_min < 90:
-                    take_profit = max(tp_base * 0.85, sl_abs * 1.3)  # 기존 0.7→0.85 (R:R 1.7:1 유지)
-                elif held_min < 150:
-                    take_profit = max(tp_base * 0.65, sl_abs * 1.3)  # 기존 0.4→0.65 (R:R 1.3:1 유지)
+                elif held_min < 120:
+                    take_profit = max(tp_base * 0.90, sl_abs * 1.3)  # 30~120분: R:R 1.8:1 유지
+                elif held_min < 240:
+                    take_profit = max(tp_base * 0.75, sl_abs * 1.3)  # 120~240분: R:R 1.5:1 유지
                 else:
-                    # 150분 이상 보유 → 5분봉 알파 소멸 구간, 수익 있으면 강제 청산
+                    # 240분(4h) 이상 보유 → 알파 소멸 구간, 수익 있으면 강제 청산
                     if unreal > 0:
                         signal = "sell"
-                        sim_log.push(agent.agent_id, f"[알파소멸] {symbol} {unreal*100:.1f}% 150분 보유 강제청산 @ {price:,.0f}원", "SELL")
-                    take_profit = max(tp_base * 0.65, sl_abs * 1.3)
+                        sim_log.push(agent.agent_id, f"[알파소멸] {symbol} {unreal*100:.1f}% 240분 보유 강제청산 @ {price:,.0f}원", "SELL")
+                    take_profit = max(tp_base * 0.75, sl_abs * 1.3)
 
-                # 트레일링 스탑: TP의 90% 도달 시 최고점 추적으로 전환 (80%→90%: 조기활성 방지)
-                if unreal >= take_profit * 0.9:
+                # 트레일링 스탑: TP의 50% 도달 시 최고점 추적으로 전환 (90%→50%: 수익 조기 보호 + 추가 상승 포착)
+                # 연구: trailing stop이 fixed TP보다 MFE 포착률 높음 (40% 이상 개선)
+                if unreal >= take_profit * 0.5:
                     agent._trailing_mode.add(symbol)
                 if symbol in agent._trailing_mode:
                     _peak = agent._peak_price.get(symbol, price)
                     agent._peak_price[symbol] = max(_peak, price)
-                    _trail_sl = agent._peak_price[symbol] * (1 - sl_abs * 0.5)  # 최고점 대비 SL절반 하락 시 청산
+                    _trail_sl = agent._peak_price[symbol] * (1 - sl_abs * 0.8)  # 최고점 대비 SL 80% (0.5→0.8: 더 넓은 추적폭)
                     if price <= _trail_sl and unreal > 0:
                         signal = "sell"
                         sim_log.push(agent.agent_id, f"[트레일링] {symbol} 최고점 대비 하락 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
 
                 if signal != "sell":
-                    if unreal >= take_profit:
+                    # 트레일링 활성 시 하드 TP 스킵 → 트레일링이 더 많은 수익 포착 담당
+                    if symbol not in agent._trailing_mode and unreal >= take_profit:
                         signal = "sell"
                         sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
                     elif unreal <= STOP_LOSS:

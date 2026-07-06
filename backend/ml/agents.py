@@ -434,11 +434,11 @@ class SimAgent:
             raw_labels = np.zeros(len(close), dtype=int)
             for i in range(len(close) - LOOKAHEAD):
                 entry = close.iloc[i]
-                # _agent_execute 실제 손익 기준과 정합 (TP=ATR×2.0, SL=ATR×1.5)
-                # TP 3.0→2.0 변경: 양성 레이블 비율 ~14%→~33% 증가, 클래스 불균형 완화
+                # _agent_execute 실제 손익 기준과 정합 (TP=ATR×2.5, SL=ATR×1.5)
+                # TP 2.0→2.5: 실행 TP 변경에 맞춰 학습 레이블 상향 (수익률 우선 전략)
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr = float(_atr_series.iloc[i])
-                    tp_pct = max(min(_atr * 2.0, 0.08), self.label_threshold)
+                    tp_pct = max(min(_atr * 2.5, 0.10), self.label_threshold)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -684,7 +684,7 @@ class SimAgent:
                 entry = close.iloc[i]
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr   = float(_atr_series.iloc[i])
-                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)
+                    tp_pct = max(min(_atr * 2.5, 0.10), self.label_threshold)  # 3.0→2.5: train() 정합
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -979,9 +979,12 @@ class SimAgent:
                     prob = max(0.01, prob - min((kimchi - 3.0) * 0.01, 0.05))
                 elif kimchi < -1.0:
                     prob = min(0.99, prob + min((-kimchi - 1.0) * 0.01, 0.03))
-                if abs(funding) > 0.001:
-                    fund_adj = min(abs(funding) * 20, 0.04) * (1 if funding > 0 else -1)
-                    prob = max(0.01, min(0.99, prob - fund_adj))
+                # 펀딩비: 양수(롱 쏠림) → 확률 하향 / 강한 음수(숏 쏠림) → 반등 가능성 → 소폭 상향
+                # 연구: 펀딩 >+50% APR 3일+ = 롱 과열 징후, <-50% APR = 바닥 신호
+                if funding > 0.002:  # +0.2% 이상 롱 쏠림
+                    prob = max(0.01, prob - min(funding * 15, 0.04))
+                elif funding < -0.003:  # -0.3% 이하 강한 숏 쏠림 → 반등 가능
+                    prob = min(0.99, prob + min(abs(funding) * 8, 0.02))
             except Exception:
                 pass
 
