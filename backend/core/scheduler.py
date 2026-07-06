@@ -1514,11 +1514,44 @@ class TradingScheduler:
                 # 연구: BTC 도미넌스 > 60% + 상승 추세 = 알트코인 자금 BTC로 이탈
                 if signal != "sell" and agent.market == "coin" and unreal > 0 and held_min > 20:
                     try:
-                        from backend.ml.news import get_crypto_market_context
                         _mkt = _scheduler_mkt_cache.get("ctx")
                         if _mkt and _mkt.get("btc_dominance", 58.0) > 62.0 and not symbol.startswith("KRW-BTC"):
                             signal = "sell"
                             sim_log.push(agent.agent_id, f"[BTC도미넌스] {symbol} BTC지배율>{_mkt['btc_dominance']:.1f}% 알트이탈→익절", "SELL")
+                    except Exception:
+                        pass
+
+                # ── 뉴스 감성 기반 홀딩/청산 판단 ───────────────────────────────
+                # 매수 후 보유 중인 종목의 뉴스를 계속 확인:
+                #   - 뉴스 악화(score < -0.5) + 수익 있음 → 조기 익절
+                #   - 뉴스 매우 나쁨(score < -0.7) → 손실 중에도 청산
+                #   - 뉴스 강한 호재(score > 0.6) → TP 기준 10% 완화 (더 오를 것으로 판단)
+                if signal != "sell" and held_min >= 15:
+                    try:
+                        from backend.ml.news import get_cached_score, get_sentiment_score
+                        _ns = get_cached_score(symbol)
+                        if _ns is None:
+                            # 캐시 없으면 실시간 뉴스 분석 (보유 종목 우선 갱신)
+                            try:
+                                _ns = await get_sentiment_score(symbol)
+                            except Exception:
+                                _ns = None
+                        if _ns is not None:
+                            if _ns < -0.5 and unreal > 0:
+                                # 뉴스 악화 + 수익 있음 → 지금 파는 게 낫다
+                                signal = "sell"
+                                sim_log.push(agent.agent_id,
+                                    f"[뉴스악화익절] {symbol} 뉴스점수={_ns:.2f} 수익{unreal*100:.1f}% → 청산", "SELL")
+                            elif _ns < -0.7:
+                                # 뉴스가 매우 나쁨 → 손실이어도 추가 하락 전에 청산
+                                signal = "sell"
+                                sim_log.push(agent.agent_id,
+                                    f"[뉴스위험청산] {symbol} 뉴스점수={_ns:.2f}(극악) {unreal*100:.1f}% → 강제청산", "SELL")
+                            elif _ns > 0.6 and symbol not in agent._trailing_mode:
+                                # 뉴스 강한 호재 → TP를 10% 올려서 더 오를 때까지 홀딩
+                                take_profit = take_profit * 1.10
+                                sim_log.push(agent.agent_id,
+                                    f"[뉴스호재홀딩] {symbol} 뉴스점수={_ns:.2f} → TP+10% {take_profit*100:.1f}%까지 홀딩", "INFO")
                     except Exception:
                         pass
 
