@@ -369,13 +369,25 @@ async def trigger_portfolio_snapshot():
 
 # ── 뉴스 헤드라인 ───────────────────────────────────────────────
 
+@app.get("/news/feed", tags=["News"])
+async def get_all_news_feed(category: str | None = Query(default=None)):
+    """코인+주식+DART 공시 통합 뉴스 피드 (10분 캐시).
+
+    category: 'coin' | 'stock' | 'dart' | None(전체)
+    """
+    from backend.ml.news import get_news_feed
+    items = await get_news_feed()
+    if category:
+        items = [it for it in items if it["category"] == category]
+    return items
+
+
 @app.get("/news/{symbol}/headlines", tags=["News"])
 async def get_news_headlines(symbol: str):
     """심볼의 뉴스 헤드라인 + 감성점수. 캐시 없으면 실시간 수집 후 반환."""
     from backend.ml.news import get_headlines, get_cached_score, get_sentiment_score
     headlines = get_headlines(symbol)
     score = get_cached_score(symbol)
-    # 캐시 없으면 실시간 수집 (최초 요청 또는 TTL 만료 시)
     if not headlines:
         try:
             score = await get_sentiment_score(symbol)

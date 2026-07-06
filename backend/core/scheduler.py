@@ -1257,7 +1257,7 @@ class TradingScheduler:
                                 continue
                             _oi_ref    = btc_oi_hist    if btc_oi_hist    else None
                             _taker_ref = btc_taker_hist if btc_taker_hist else None
-                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref)
+                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref, ticker=ticker)
                             await self._agent_execute(db, agent, ticker, signal, prob, price)
 
                     else:
@@ -1294,7 +1294,7 @@ class TradingScheduler:
                             price = stock_prices.get(symbol, 0.0)
                             if price <= 0:
                                 continue
-                            signal, prob = agent.predict(ohlcv, kospi_ohlcv=kospi_ohlcv or None)
+                            signal, prob = agent.predict(ohlcv, kospi_ohlcv=kospi_ohlcv or None, ticker=symbol)
                             await self._agent_execute(db, agent, symbol, signal, prob, price)
 
                     # agent_stats upsert
@@ -1539,6 +1539,17 @@ class TradingScheduler:
                 if _inv.get("foreign_net_buy", 0) < -500:
                     sim_log.push(agent.agent_id, f"[외국인차단] {symbol} 외국인 {_inv['foreign_net_buy']:,}주 순매도", "INFO")
                     return
+            # 뉴스 감성 필터: -0.5 이하 강한 부정 뉴스 → BUY 차단 (캐시 없으면 통과)
+            try:
+                from backend.ml.news import get_cached_score, get_sentiment_score
+                _ns = get_cached_score(symbol)
+                if _ns is None:
+                    _ns = await get_sentiment_score(symbol)
+                if _ns is not None and _ns < -0.5:
+                    sim_log.push(agent.agent_id, f"[뉴스차단] {symbol} 감성점수={_ns:.2f} 부정뉴스 급락우려", "WARN")
+                    return
+            except Exception:
+                pass
             # RVOL 필터: 거래량 1.5배 미만이면 포지션 50%로 줄임 (약한 신호 크기 축소)
             _vol_ratio = agent._last_vol_ratio
             _rvol_portion = 1.0 if _vol_ratio >= 1.5 else 0.5

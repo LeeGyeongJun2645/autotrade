@@ -863,6 +863,7 @@ class SimAgent:
         kospi_ohlcv: list[dict] | None = None,
         oi_hist: list[dict] | None = None,
         taker_hist: list[dict] | None = None,
+        ticker: str = "",
     ) -> tuple[str, float]:
         """(signal, buy_prob) 반환. 모델 없으면 ('hold', 0.5)."""
         if self._model is None and not self.load_model():
@@ -875,6 +876,7 @@ class SimAgent:
                 kospi_ohlcv=kospi_ohlcv,
                 oi_hist=oi_hist or (self._cached_oi_hist or None),
                 taker_hist=taker_hist or (self._cached_taker_hist or None),
+                ticker=ticker if ticker else "",
             )
             if full_df.empty:
                 return "hold", 0.5

@@ -132,16 +132,19 @@ FEATURE_NAMES = [
     "session_phase",      # 0=개장(~09:30) / 1=오전 / 2=점심 / 3=오후마감 (기존 3개 이진 대비 압축)
     "ret_since_open",     # 당일 시가 대비 현재 수익률 (장중 누적 모멘텀)
     "intraday_reversal",  # 오전 강세(+1%↑) AND 마감 구간 → 반전 패턴 (1=반전 가능성)
+    # ── 뉴스 감성 ────────────────────────────────────────────────────
+    "news_score",  # 종목 뉴스 감성 점수 -1.0~+1.0 (캐시 없으면 0.0)
 ]
 
 
 def compute_features(
     ohlcv_list: list[dict],
     funding_rates: list[dict] | None = None,
-    btc_ohlcv: list[dict] | None = None,     # BTC 상관관계용 (코인 에이전트, 주식·BTC본인은 None)
-    kospi_ohlcv: list[dict] | None = None,    # KOSPI 연동용 (주식 에이전트, 코인은 None)
-    oi_hist: list[dict] | None = None,        # BTC 선물 OI 히스토리 (코인 에이전트, 주식은 None)
-    taker_hist: list[dict] | None = None,     # BTC 선물 Taker 비율 히스토리 (코인 에이전트, 주식은 None)
+    btc_ohlcv: list[dict] | None = None,
+    kospi_ohlcv: list[dict] | None = None,
+    oi_hist: list[dict] | None = None,
+    taker_hist: list[dict] | None = None,
+    ticker: str = "",                          # 뉴스 감성 조회용 종목 코드
 ) -> pd.DataFrame:
     """OHLCV 리스트 → Feature DataFrame 변환.
 
@@ -598,6 +601,14 @@ def compute_features(
             "orb_position": 0.5, "orb_breakout": 0.0, "orb_high_pct": 0.0,
             "session_phase": 1.0, "ret_since_open": 0.0, "intraday_reversal": 0.0,
         }, index=df.index)], axis=1)
+
+    # 뉴스 감성 점수 (캐시된 값, 없으면 0.0)
+    try:
+        from backend.ml.news import get_cached_score
+        _ns = get_cached_score(ticker) if ticker else None
+        df["news_score"] = float(_ns) if _ns is not None else 0.0
+    except Exception:
+        df["news_score"] = 0.0
 
     _pre_drop = df[FEATURE_NAMES].copy()
     # 전체가 NaN인 컬럼(가격 변동 없는 종목의 bb_pband 등) → 0으로 대체 후 dropna

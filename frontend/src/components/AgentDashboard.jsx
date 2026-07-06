@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api.js'
+import HoldingChart from './HoldingChart.jsx'
 
 // ── 상수 ────────────────────────────────────────────────────────
 const FEAT_COLOR = {
@@ -858,6 +859,9 @@ export default function AgentDashboard({ agents }) {
 
   return (
     <div className="space-y-6">
+
+      {/* 보유 종목 차트 */}
+      <HoldingChart agents={agents} />
 
       {/* 전체 요약 헤더 */}
       <div className="bg-gray-800 rounded-xl border border-gray-700 p-5">

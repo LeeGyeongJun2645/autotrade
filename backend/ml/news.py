@@ -270,6 +270,77 @@ async def get_sentiment_score(symbol: str, token: str | None = None) -> float:  
     return score
 
 
+# ── 통합 뉴스 피드 캐시 ──────────────────────────────────────────
+_news_feed_cache: list[dict] = []
+_news_feed_expires: float = 0.0
+_NEWS_FEED_TTL = 600  # 10분
+
+_DART_RSS   = "https://dart.fss.or.kr/rss/api.do?mdex=1"
+_STOCK_RSS  = [
+    ("연합뉴스",   "https://www.yna.co.kr/rss/economy.xml"),
+    ("한국경제",   "https://www.hankyung.com/rss/economy"),
+    ("머니투데이", "https://rss.mt.co.kr/mt/010/010010/010010000.xml"),
+]
+_COIN_RSS   = [
+    ("CoinDesk",      "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ("CoinTelegraph", "https://cointelegraph.com/rss"),
+    ("코인데스크KR",   "https://www.coindeskkorea.com/feed/"),
+]
+
+
+def _fetch_feed_items(url: str, source: str, category: str, limit: int = 12) -> list[dict]:
+    """RSS → 뉴스 아이템 리스트 (동기)."""
+    try:
+        feed = feedparser.parse(url, request_headers={"User-Agent": "AutoTrade/1.0"})
+        items = []
+        for e in feed.entries[:limit]:
+            pub = (e.get("published") or e.get("updated") or "")[:25]
+            title = e.get("title", "").strip()
+            if title:
+                items.append({
+                    "title":     title,
+                    "url":       e.get("link", ""),
+                    "published": pub,
+                    "source":    source,
+                    "category":  category,
+                })
+        return items
+    except Exception as exc:
+        logger.debug("[뉴스피드] %s 실패: %s", source, exc)
+        return []
+
+
+async def get_news_feed() -> list[dict]:
+    """코인+주식+DART 공시 통합 뉴스 피드 (10분 캐시).
+
+    category 필드: 'coin' | 'stock' | 'dart'
+    """
+    global _news_feed_cache, _news_feed_expires
+    now = time.time()
+    if _news_feed_cache and now < _news_feed_expires:
+        return _news_feed_cache
+
+    feeds: list[tuple[str, str, str]] = [
+        (_DART_RSS, "DART공시", "dart"),
+        *[(url, src, "stock") for src, url in _STOCK_RSS],
+        *[(url, src, "coin")  for src, url in _COIN_RSS],
+    ]
+    results = await asyncio.gather(
+        *[asyncio.to_thread(_fetch_feed_items, url, src, cat) for url, src, cat in feeds],
+        return_exceptions=True,
+    )
+    all_items: list[dict] = []
+    for r in results:
+        if isinstance(r, list):
+            all_items.extend(r)
+
+    all_items.sort(key=lambda x: x.get("published", ""), reverse=True)
+    _news_feed_cache = all_items[:150]
+    _news_feed_expires = now + _NEWS_FEED_TTL
+    logger.info("[뉴스피드] %d개 수집 완료", len(_news_feed_cache))
+    return _news_feed_cache
+
+
 def get_headlines(symbol: str) -> list[str]:
     """캐시된 뉴스 헤드라인 반환. 캐시 만료 또는 없으면 빈 리스트."""
     entry = _headlines_cache.get(symbol)
