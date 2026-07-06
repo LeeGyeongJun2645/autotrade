@@ -29,8 +29,8 @@ MODEL_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 INITIAL_CAPITAL    = 10_000_000.0  # 에이전트당 초기 가상 자금 (1000만원)
-POSITION_RATIO     = 0.5            # 잔액의 50%씩 사용
-MAX_OPEN_POSITIONS = 3              # 에이전트당 동시 최대 포지션 수
+POSITION_RATIO     = 0.15           # 잔액의 15%씩 사용 (0.5→0.15: 리스크 70% 축소)
+MAX_OPEN_POSITIONS = 2              # 에이전트당 동시 최대 포지션 수 (3→2)
 
 # ── 피처 세트 정의 ────────────────────────────────────────────────
 
@@ -104,7 +104,7 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI07",  5, 0.010, 0.62, "trend",    "coin",  3, "lgbm"),
     ("AI08",  5, 0.007, 0.62, "volume",   "coin",  5, "xgb"),
     ("AI09",  5, 0.012, 0.65, "all",      "coin",  8, "lgbm"),
-    ("AI10",  5, 0.008, 0.60, "trend",    "coin",  5, "xgb"),
+    ("AI10",  5, 0.008, 0.65, "trend",    "coin",  5, "xgb"),
     # 주식 전략 — 전부 LightGBM (histogram-based 분할이 불균형 5분봉 데이터에 더 안정적)
     ("AI11",  5, 0.006, 0.58, "all",      "stock", 3, "lgbm"),
     ("AI12",  5, 0.005, 0.60, "trend",    "stock", 5, "lgbm"),  # label 0.7→0.5% (양성레이블 확보)
@@ -181,6 +181,10 @@ class SimAgent:
         self._last_position_values: dict[str, float] = {}  # ticker → 현재 평가액
         self._last_atr_pct: float = 0.0          # ATR 기반 동적 손익용 (predict()에서 업데이트)
         self._last_vol_ratio: float = 1.0        # 최근 거래량 비율 (vol/ma20) — RVOL 필터용
+        self._last_adx_14: float = 0.0           # ADX(14) — BUY 필터: 횡보장 진입 차단용
+        self._meta_model: LGBMClassifier | None = None   # Meta-Labeling 2차 필터 모델
+        self._meta_scaler: StandardScaler | None = None
+        self._meta_path = MODEL_DIR / f"meta_agent_{agent_id}.pkl"
         self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
@@ -232,7 +236,7 @@ class SimAgent:
         p = max(0.3, min(0.8, self.win_rate))
         b = 1.5   # 평균 이익 / 평균 손실 추정 (보수적)
         kelly = (p * b - (1 - p)) / b
-        return max(0.1, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 10~50% 범위
+        return max(0.05, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 5~15% 범위
 
     def _sharpe_weight(self) -> float:
         """최근 거래 수익률 기반 Sortino 비율 가중치.
@@ -299,6 +303,70 @@ class SimAgent:
                 f,
             )
 
+    def load_meta_model(self) -> bool:
+        if not self._meta_path.exists():
+            return False
+        try:
+            with open(self._meta_path, "rb") as f:
+                data = pickle.load(f)
+            self._meta_model = data["model"]
+            self._meta_scaler = data["scaler"]
+            return True
+        except Exception:
+            self._meta_path.unlink(missing_ok=True)
+            return False
+
+    def train_meta(self, trade_results: list[dict]) -> bool:
+        """BUY 시점 컨텍스트 + 결과로 Meta-Labeling 2차 필터 모델 학습.
+
+        피처: buy_prob, hour_sin, hour_cos, buy_adx, buy_vol_ratio
+        레이블: profit_rate > 0 → 1 (성공), else 0 (실패)
+        데이터: agent_trades WHERE action='BUY' AND buy_prob IS NOT NULL
+        """
+        valid = [
+            t for t in trade_results
+            if t.get("buy_prob") is not None and t.get("profit_rate") is not None
+        ]
+        if len(valid) < 30:
+            return False
+        try:
+            X_rows = []
+            for t in valid:
+                h = 12
+                try:
+                    h = int(t.get("traded_at", "2000-01-01T12:00:00")[11:13])
+                except Exception:
+                    pass
+                X_rows.append([
+                    float(t["buy_prob"]),
+                    np.sin(2 * np.pi * h / 24),
+                    np.cos(2 * np.pi * h / 24),
+                    float(t.get("buy_adx", 25.0) or 25.0),
+                    float(t.get("buy_vol_ratio", 1.0) or 1.0),
+                ])
+            X = np.array(X_rows)
+            y = np.array([1 if (t.get("profit_rate") or 0) > 0 else 0 for t in valid])
+            if len(set(y)) < 2:
+                return False
+            scaler = StandardScaler()
+            X_s = scaler.fit_transform(X)
+            clf = LGBMClassifier(
+                n_estimators=100, max_depth=3, learning_rate=0.1,
+                scale_pos_weight=max(1.0, (y == 0).sum() / max((y == 1).sum(), 1)),
+                random_state=42, verbose=-1,
+            )
+            clf.fit(X_s, y)
+            self._meta_model = clf
+            self._meta_scaler = scaler
+            with open(self._meta_path, "wb") as f:
+                pickle.dump({"model": clf, "scaler": scaler}, f)
+            logger.info("[%s] Meta-Labeling 모델 학습 완료 (%d샘플, WR=%.1f%%)",
+                        self.agent_id, len(valid), y.mean() * 100)
+            return True
+        except Exception as e:
+            logger.debug("[%s] Meta 학습 실패: %s", self.agent_id, e)
+            return False
+
     # ── 학습 (동기 — asyncio.to_thread 로 호출) ─────────────────
 
     def train(
@@ -323,7 +391,7 @@ class SimAgent:
             )
             # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
-            # ADX 필터: 코인만 추세장 구간 학습 (주식은 predict()와 동일하게 필터 없음)
+            # ADX 필터: 코인만 추세장 구간 학습 — predict() BUY 필터(>=20)와 동일 임계값
             _adx_mask = (
                 feat_df["adx_14"] >= 20
                 if (self.market == "coin" and "adx_14" in feat_df.columns)
@@ -366,11 +434,11 @@ class SimAgent:
             raw_labels = np.zeros(len(close), dtype=int)
             for i in range(len(close) - LOOKAHEAD):
                 entry = close.iloc[i]
-                # 실제 _agent_execute 손익 기준 ATR×3.0 TP, ATR×1.5 SL 과 동일하게 맞춤
+                # _agent_execute 실제 손익 기준과 정합 (TP=ATR×2.0, SL=ATR×1.5)
+                # TP 3.0→2.0 변경: 양성 레이블 비율 ~14%→~33% 증가, 클래스 불균형 완화
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr = float(_atr_series.iloc[i])
-                    # ATR 기반 TP/SL — label_threshold 최소값 보장 (저변동성 구간 레이블 전멸 방지)
-                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)
+                    tp_pct = max(min(_atr * 2.0, 0.08), self.label_threshold)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -561,17 +629,17 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        self.buy_threshold = round(min(max(_combined, 0.58), 0.72), 2)
+                        self.buy_threshold = round(min(max(_combined, 0.62), 0.72), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        self.buy_threshold = round(min(max(thr_b, 0.58), 0.72), 2)
+                        self.buy_threshold = round(min(max(thr_b, 0.62), 0.72), 2)
                     logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
                                  self.agent_id, val_acc * 100, self.buy_threshold, prec_b)
 
-            # 최소 임계값 — 주식은 0.55, 코인은 0.58 (주식 5분봉 확률분포가 낮음), 상한 0.72
-            _min_thr = 0.55 if self.market == "stock" else 0.58
+            # 최소 임계값 — 주식은 0.55, 코인은 0.62 (0.58은 너무 낮아 과다매수 유발)
+            _min_thr = 0.55 if self.market == "stock" else 0.62
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.72)
             self._model = clf
             self._scaler = scaler
@@ -810,13 +878,13 @@ class SimAgent:
             )
             if full_df.empty:
                 return "hold", 0.5
-            # ATR / RVOL 캐싱 — _agent_execute에서 동적 손익 및 거래량 필터에 사용
+            # ATR / RVOL / ADX 캐싱 — _agent_execute에서 동적 손익 및 BUY 필터에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
             if "vol_ratio" in full_df.columns:
                 self._last_vol_ratio = float(full_df["vol_ratio"].iloc[-1])
-            # ADX 필터는 train()에서만 적용 (trending 구간 학습) — predict()에서 제거
-            # 횡보장에서 모델이 자연스럽게 낮은 확률을 출력하므로 별도 ADX 차단 불필요
+            if "adx_14" in full_df.columns:
+                self._last_adx_14 = float(full_df["adx_14"].iloc[-1])
             feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
             if feat_df.empty:
                 return "hold", 0.5
@@ -849,6 +917,25 @@ class SimAgent:
             pass
 
         if prob >= self.buy_threshold:
+            # ── Meta-Labeling 2차 필터 ───────────────────────────────
+            # 1차 BUY 신호를 실제로 거래할지 2차 모델이 판단 (False Positive 감소)
+            if self._meta_model is not None and self._meta_scaler is not None:
+                try:
+                    _h = datetime.now(ZoneInfo("Asia/Seoul")).hour
+                    _meta_feat = np.array([[
+                        prob,
+                        np.sin(2 * np.pi * _h / 24),
+                        np.cos(2 * np.pi * _h / 24),
+                        self._last_adx_14,
+                        self._last_vol_ratio,
+                    ]])
+                    _meta_prob = float(
+                        self._meta_model.predict_proba(self._meta_scaler.transform(_meta_feat))[0, 1]
+                    )
+                    if _meta_prob < 0.5:
+                        return "hold", round(prob, 4)  # 메타 모델이 거부
+                except Exception:
+                    pass
             return "buy", round(prob, 4)
         if prob <= (1.0 - self.buy_threshold):
             return "sell", round(prob, 4)
@@ -1020,6 +1107,33 @@ class SimAgent:
             # 재시작 시 매수가 기준으로 초기화 → 다음 틱에 실시간 가격으로 갱신
             self._last_position_values[p["ticker"]] = pos.entry_price * pos.qty
         self.recent_trades = trades[:30]
+
+        # 재시작 시 recent_trades에서 연속손실 복구
+        consecutive = 0
+        for t in self.recent_trades:
+            if (t.get("profit_rate") or 0) < 0:
+                consecutive += 1
+            else:
+                break
+        self._consecutive_losses = consecutive
+
+        # 재시작 시 최근 SL 거래 기준 쿨다운 복구 (30분 이내 -0.3% 이하 손절)
+        from datetime import datetime as _dt, timedelta as _td
+        now_kst = _dt.now(ZoneInfo("Asia/Seoul"))
+        for t in self.recent_trades:
+            if (t.get("profit_rate") or 0) >= -0.003:
+                continue
+            traded_at_str = t.get("traded_at", "")
+            if not traded_at_str:
+                continue
+            try:
+                traded_at = _dt.fromisoformat(traded_at_str).replace(tzinfo=ZoneInfo("Asia/Seoul"))
+                if (now_kst - traded_at).total_seconds() < 1800:  # 30분 이내
+                    ticker = t.get("ticker", "")
+                    if ticker:
+                        self._cooldown_tickers[ticker] = (traded_at + _td(minutes=30)).isoformat()
+            except Exception:
+                pass
 
     # ── 직렬화 ─────────────────────────────────────────────────
 
