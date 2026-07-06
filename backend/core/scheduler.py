@@ -72,6 +72,10 @@ _TICKER_BLACKLIST: frozenset[str] = frozenset({
     # 07-05 2차 추가: 누적 EV < -0.1% 확인 종목
     "KRW-CHIP",  "KRW-ONDO", "KRW-NEAR",
     "KRW-MEGA",  "KRW-GAME2",
+    # 07-06 추가: 거래내역 분석 WR<35% 또는 대손절 반복 종목
+    "KRW-LINK",  "KRW-AWE",  "KRW-TRUMP",
+    "KRW-ELSA",  "KRW-GAS",  "KRW-RED",
+    "KRW-BIRB",  "KRW-ZBT",  "KRW-AQT",
 })
 
 def _is_blacklisted(symbol: str, agent) -> bool:
@@ -124,9 +128,14 @@ def _is_daily_loss_exceeded(agent) -> bool:
 
 
 def _is_coin_night_risk() -> bool:
-    """코인 야간 고위험 시간대 (KST 01:00~04:59) — KST 00시는 WR=57.5%로 양호, 04시는 WR=34.4% 최악."""
+    """코인 저승률 시간대 차단 (거래내역 분석 기반).
+
+    KST 01~04시: WR 30.8~41.4% (야간 저유동성)
+    KST 09시: WR=35.5% (아시아 개장 노이즈)
+    KST 12시: WR=37.7% (점심 저유동성)
+    """
     h = datetime.now(KST).hour
-    return 1 <= h < 5
+    return h in {1, 2, 3, 4, 9, 12}
 
 
 def _is_stock_open_noise() -> bool:
@@ -1376,10 +1385,11 @@ class TradingScheduler:
         atr_pct = agent._last_atr_pct
         if atr_pct > 0.001:
             STOP_LOSS   = max(-(atr_pct * 1.5), -0.005)  # ATR×1.5, 최소 -0.5%
-            tp_base     = max(atr_pct * 2.0, 0.010)      # ATR×2.0 (3.0→2.0: 레이블링과 정합, 빠른 익절)
+            STOP_LOSS   = max(STOP_LOSS, -0.020)          # 상한 -2.0% (대손절 방지: 분석상 최악 -3.67%)
+            tp_base     = max(atr_pct * 2.0, 0.010)      # ATR×2.0, 최소 +1.0%
         else:
-            STOP_LOSS   = -0.03
-            tp_base     = 0.06
+            STOP_LOSS   = -0.020
+            tp_base     = 0.04
 
         # ── 보유 포지션 익절/손절 우선 체크 ─────────────────────────
         if symbol in agent._positions:
@@ -1416,15 +1426,18 @@ class TradingScheduler:
                 signal = "sell"
                 sim_log.push(agent.agent_id, f"[8h강제청산] {symbol} {held_min:.0f}분 보유 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
 
-            # 최소 보유 5분: 진입 직후 노이즈 손절 방지 (ATR×1.8 긴급 손절만)
-            if held_min < 5:
-                extreme_sl = STOP_LOSS * 1.2  # ATR×1.8 (기존 2.25에서 축소 — 급락 시 빠른 컷)
+            # 최소 보유 10분: 진입 직후 신호 기반 조기 청산 완전 차단
+            # 분석: 0~10분 청산 WR=38.2%(최악) → 노이즈 신호에 의한 손절이 주원인
+            if held_min < 10:
+                extreme_sl = STOP_LOSS * 1.5  # ATR×2.25 (급락 시에만 즉시 손절)
                 if unreal >= tp_base:
                     signal = "sell"
-                    sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) @ {price:,.0f}원", "SELL")
+                    sim_log.push(agent.agent_id, f"[즉시익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) @ {price:,.0f}원", "SELL")
                 elif unreal <= extreme_sl:
                     signal = "sell"
-                    sim_log.push(agent.agent_id, f"[급락손절] {symbol} {unreal*100:.1f}% (ATR×1.8={extreme_sl*100:.1f}%) @ {price:,.0f}원", "SELL")
+                    sim_log.push(agent.agent_id, f"[급락손절] {symbol} {unreal*100:.1f}% (ATR×2.25={extreme_sl*100:.1f}%) @ {price:,.0f}원", "SELL")
+                else:
+                    signal = "hold"  # 그 외 신호 무시: 노이즈 청산 차단
             else:
                 # 시간 경과 하향 ROI: 오래 묶일수록 익절 기준 완만 하향
                 # R:R 항상 1.3 이상 유지 — 연구: ATR 고정 stops profit factor 1.26 vs 트레일링 0.89
@@ -1474,7 +1487,7 @@ class TradingScheduler:
             # 코인: 야간 고위험 시간대 (KST 01:00~04:59) 신규 매수 차단
             # KST 00시(WR=57.5%) 해제, KST 04시(WR=34.4%) 추가, KST 16-17시 해제(WR=52%)
             if agent.market == "coin" and _is_coin_night_risk():
-                sim_log.push(agent.agent_id, f"[야간차단] {symbol} 01~04시 저승률 구간", "INFO")
+                sim_log.push(agent.agent_id, f"[시간차단] {symbol} 저승률 시간대(01~04/09/12시)", "INFO")
                 return
             # 주식: 개장 첫 25분 노이즈 구간 신규 매수 차단
             if agent.market == "stock" and _is_stock_open_noise():
