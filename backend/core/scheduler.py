@@ -1555,6 +1555,42 @@ class TradingScheduler:
                     except Exception:
                         pass
 
+                # ── 종합 지속성 점수: 모든 기술 지표 통합 판단 ──────────────────
+                # RSI·MACD·ADX·거래량·MTF·HA·BB·OI·Taker·펀딩비·BTC상관 종합
+                # score < -0.4 + 수익 있음 → 조기 익절
+                # score < -0.6            → 손실이어도 추가 하락 차단 청산
+                # score >  0.5            → TP를 15% 완화(홀딩 연장)
+                if signal != "sell" and held_min >= 20:
+                    try:
+                        _ohlcv_for_cont = getattr(agent, "_last_ohlcv_cache", {}).get(symbol)
+                        if _ohlcv_for_cont and len(_ohlcv_for_cont) >= 30:
+                            _btc_for_cont = (
+                                self._btc_ohlcv_cache if agent.market == "coin" else None
+                            )
+                            _cont_score, _cont_reasons = agent.continuation_score(
+                                ohlcv_list=_ohlcv_for_cont,
+                                btc_ohlcv=_btc_for_cont,
+                                ticker=symbol,
+                            )
+                            _reason_str = " | ".join(_cont_reasons[:4]) if _cont_reasons else ""
+                            if _cont_score < -0.6:
+                                signal = "sell"
+                                sim_log.push(agent.agent_id,
+                                    f"[종합판단청산] {symbol} 지속성={_cont_score:.2f} {_reason_str} → 강제청산",
+                                    "SELL")
+                            elif _cont_score < -0.4 and unreal > 0:
+                                signal = "sell"
+                                sim_log.push(agent.agent_id,
+                                    f"[종합판단익절] {symbol} 지속성={_cont_score:.2f} 수익{unreal*100:.1f}% {_reason_str} → 조기익절",
+                                    "SELL")
+                            elif _cont_score > 0.5 and symbol not in agent._trailing_mode:
+                                take_profit = take_profit * 1.15
+                                sim_log.push(agent.agent_id,
+                                    f"[종합판단홀딩] {symbol} 지속성={_cont_score:.2f} {_reason_str} → TP+15% {take_profit*100:.1f}%",
+                                    "INFO")
+                    except Exception:
+                        pass
+
         if signal == "buy":
             # 일일 손실 한도 서킷 브레이커 (에이전트별 독립, 3% 초과 시 당일 차단)
             if _is_daily_loss_exceeded(agent):

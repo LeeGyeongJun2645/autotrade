@@ -188,6 +188,7 @@ class SimAgent:
         self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
+        self._last_ohlcv_cache: dict[str, list[dict]] = {}  # 종목별 최신 OHLCV (continuation_score 용)
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
         self._trailing_mode: set[str] = set()    # 트레일링 활성화된 종목
         self._consecutive_losses: int = 0        # 연속 손실 카운터 → 5회 시 재학습 트리거
@@ -854,6 +855,183 @@ class SimAgent:
             logger.warning("[%s] train_multi 실패: %s", self.agent_id, e)
             return False
 
+    # ── 보유 포지션 지속성 분석 ──────────────────────────────────
+
+    def continuation_score(
+        self,
+        ohlcv_list: list[dict],
+        btc_ohlcv: list[dict] | None = None,
+        oi_hist: list[dict] | None = None,
+        taker_hist: list[dict] | None = None,
+        ticker: str = "",
+    ) -> tuple[float, list[str]]:
+        """보유 포지션의 상승 지속 가능성 종합 평가.
+
+        모든 보유 가능한 지표(기술적·모멘텀·거래량·시장구조·캔들)를 활용해
+        '더 오를지(양수) / 반전할지(음수)' 판단.
+
+        Returns:
+            (score, reasons): score -1.0~+1.0, reasons = 판단 근거 목록
+        """
+        try:
+            full_df = compute_features(
+                ohlcv_list,
+                funding_rates=self._cached_funding_rates or None,
+                btc_ohlcv=btc_ohlcv,
+                oi_hist=oi_hist or (self._cached_oi_hist or None),
+                taker_hist=taker_hist or (self._cached_taker_hist or None),
+                ticker=ticker,
+            )
+        except Exception:
+            return 0.0, []
+
+        if full_df.empty or len(full_df) < 5:
+            return 0.0, []
+
+        row   = full_df.iloc[-1]
+        prev  = full_df.iloc[-2] if len(full_df) >= 2 else row
+        prev3 = full_df.iloc[-4] if len(full_df) >= 4 else prev
+
+        score: float = 0.0
+        reasons: list[str] = []
+
+        def _g(col: str, default: float = 0.0) -> float:
+            try:
+                v = row.get(col, default) if hasattr(row, "get") else getattr(row, col, default)
+                return float(v) if v is not None and not np.isnan(float(v)) else default
+            except Exception:
+                return default
+
+        # ── 1. 모멘텀: RSI ─────────────────────────────────────
+        rsi = _g("rsi_9")
+        if rsi > 80:
+            score -= 0.30; reasons.append(f"RSI과매수({rsi:.0f}>80 극단)")
+        elif rsi > 75:
+            score -= 0.15; reasons.append(f"RSI과매수({rsi:.0f}>75)")
+        elif 50 < rsi <= 65:
+            score += 0.15; reasons.append(f"RSI모멘텀({rsi:.0f} 50~65 적정)")
+        elif rsi < 35:
+            score -= 0.20; reasons.append(f"RSI모멘텀소실({rsi:.0f}<35)")
+
+        # ── 2. MACD 방향 ────────────────────────────────────────
+        macd_now  = _g("macd_diff")
+        macd_prev = float(prev.get("macd_diff", 0) if hasattr(prev, "get") else 0)
+        if macd_now > 0 and macd_now > macd_prev:
+            score += 0.20; reasons.append(f"MACD상승지속({macd_now:.4f}↑)")
+        elif macd_now > 0 and macd_now < macd_prev:
+            score -= 0.10; reasons.append("MACD모멘텀약화(양→감소)")
+        elif macd_prev > 0 and macd_now <= 0:
+            score -= 0.25; reasons.append("MACD음전환(모멘텀반전)")
+
+        # ── 3. ADX: 추세 강도 ────────────────────────────────────
+        adx = _g("adx_14")
+        if adx > 30:
+            score += 0.15; reasons.append(f"ADX강한추세({adx:.0f}>30)")
+        elif adx < 15:
+            score -= 0.15; reasons.append(f"ADX횡보({adx:.0f}<15 추세없음)")
+
+        # ── 4. 거래량: 모멘텀 참여도 ─────────────────────────────
+        vol_ratio = _g("vol_ratio", 1.0)
+        if vol_ratio > 2.0:
+            score += 0.15; reasons.append(f"RVOL강(x{vol_ratio:.1f} 기관참여)")
+        elif vol_ratio > 1.3:
+            score += 0.08; reasons.append(f"RVOL양호(x{vol_ratio:.1f})")
+        elif vol_ratio < 0.5:
+            score -= 0.20; reasons.append(f"RVOL급감(x{vol_ratio:.1f} 모멘텀소멸)")
+        elif vol_ratio < 0.8:
+            score -= 0.10; reasons.append(f"RVOL약(x{vol_ratio:.1f})")
+
+        # ── 5. 멀티타임프레임 정렬 ────────────────────────────────
+        mtf_align = _g("mtf_align")
+        if mtf_align >= 3:
+            score += 0.20; reasons.append("MTF3개타임프레임강세정렬")
+        elif mtf_align == 2:
+            score += 0.10; reasons.append("MTF2개타임프레임강세")
+        elif mtf_align == 0:
+            score -= 0.20; reasons.append("MTF전타임프레임하락")
+
+        # ── 6. 헤이킨 아시 캔들 ──────────────────────────────────
+        ha_streak = _g("ha_bull_streak")
+        ha_no_lower = _g("ha_no_lower_shadow")
+        ha_color = _g("ha_color")
+        if ha_streak >= 3 and ha_no_lower:
+            score += 0.15; reasons.append(f"HA강세지속({ha_streak:.0f}봉연속양봉·아래꼬리없음)")
+        elif ha_streak >= 2:
+            score += 0.08; reasons.append(f"HA양봉지속({ha_streak:.0f}봉)")
+        elif ha_color == 0 and ha_no_lower == 0:  # 음봉 + 아래꼬리 없음 → 하락세
+            score -= 0.15; reasons.append("HA음봉·아래꼬리없음(하락지속)")
+
+        # ── 7. 볼린저 밴드 위치 ───────────────────────────────────
+        bb_pband = _g("bb_pband", 0.5)
+        if bb_pband > 0.95:
+            score -= 0.20; reasons.append(f"BB상단초과({bb_pband:.2f} 과매수)")
+        elif bb_pband > 0.80:
+            score -= 0.08; reasons.append(f"BB상단근접({bb_pband:.2f})")
+        elif 0.4 < bb_pband <= 0.7:
+            score += 0.08; reasons.append(f"BB중심권({bb_pband:.2f} 상승여력)")
+
+        # ── 8. OI + Taker (코인 전용) ─────────────────────────────
+        oi_chg = _g("oi_change_pct")
+        taker  = _g("taker_buy_ratio", 0.5)
+        if oi_chg > 0.01 and taker > 0.55:
+            score += 0.15; reasons.append(f"OI증가({oi_chg*100:.1f}%)+매수우세({taker:.2f})")
+        elif oi_chg < -0.02:
+            score -= 0.10; reasons.append(f"OI감소({oi_chg*100:.1f}% 롱청산)")
+        if taker < 0.42:
+            score -= 0.10; reasons.append(f"Taker매도우세({taker:.2f})")
+
+        # ── 9. 펀딩비 (코인 전용) ────────────────────────────────
+        funding = _g("funding_rate")
+        if funding > 0.003:
+            score -= 0.20; reasons.append(f"펀딩비과열(+{funding*100:.2f}% 롱쏠림)")
+        elif funding < -0.002:
+            score += 0.10; reasons.append(f"펀딩비역(−{abs(funding)*100:.2f}% 숏스퀴즈가능)")
+
+        # ── 10. BTC 상관 (알트 전용) ─────────────────────────────
+        btc_ret5 = _g("btc_ret_5")
+        if btc_ret5 < -0.02 and ticker and not ticker.startswith("KRW-BTC"):
+            score -= 0.15; reasons.append(f"BTC급락({btc_ret5*100:.1f}% 알트동조하락)")
+        elif btc_ret5 > 0.015:
+            score += 0.08; reasons.append(f"BTC강세({btc_ret5*100:.1f}% 알트견인)")
+
+        # ── 11. 이치모쿠 클라우드 구조 ───────────────────────────
+        above_cloud = _g("ichi_above_cloud")
+        cloud_green = _g("ichi_cloud_green")
+        if above_cloud == 1 and cloud_green == 1:
+            score += 0.10; reasons.append("이치모쿠구름위+상승구름(강세구조)")
+        elif above_cloud == 0:
+            score -= 0.10; reasons.append("이치모쿠구름아래(약세구조)")
+
+        # ── 12. 캔들 패턴 ────────────────────────────────────────
+        shooting_star  = _g("is_shooting_star")
+        bearish_engulf = _g("is_bearish_engulf")
+        hammer         = _g("is_hammer")
+        bull_engulf    = _g("is_bullish_engulf")
+        if shooting_star:
+            score -= 0.15; reasons.append("슈팅스타(고점반전캔들)")
+        if bearish_engulf:
+            score -= 0.15; reasons.append("하락장악형(반전캔들)")
+        if hammer:
+            score += 0.10; reasons.append("망치형(반등캔들)")
+        if bull_engulf:
+            score += 0.10; reasons.append("상승장악형(강세캔들)")
+
+        # ── 13. VWAP 위치 ────────────────────────────────────────
+        vwap_cross = _g("vwap_cross")
+        vwap_ratio = _g("vwap_ratio")
+        if vwap_cross == 1 and vwap_ratio > 0.005:
+            score += 0.08; reasons.append(f"VWAP위+괴리({vwap_ratio*100:.1f}% 기관매집)")
+        elif vwap_cross == 0:
+            score -= 0.10; reasons.append("VWAP아래(기관기준선이탈)")
+
+        # ── 14. 피봇 포인트 (R1 도달) ────────────────────────────
+        dist_r1 = _g("dist_to_r1")
+        if 0 < dist_r1 < 0.005:
+            score -= 0.10; reasons.append(f"R1저항선근접({dist_r1*100:.2f}% 이내)")
+
+        score = float(np.clip(score, -1.0, 1.0))
+        return score, reasons
+
     # ── 예측 ────────────────────────────────────────────────────
 
     def predict(
@@ -868,6 +1046,8 @@ class SimAgent:
         """(signal, buy_prob) 반환. 모델 없으면 ('hold', 0.5)."""
         if self._model is None and not self.load_model():
             return "hold", 0.5
+        if ticker and ohlcv_list:
+            self._last_ohlcv_cache[ticker] = ohlcv_list
         try:
             full_df = compute_features(
                 ohlcv_list,
