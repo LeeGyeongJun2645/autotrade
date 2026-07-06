@@ -550,6 +550,8 @@ def compute_features(
 
     # ── ORB + 장중 세션 피처 (주식 전용: kospi_ohlcv 있을 때만, 코인=0) ──
     # kospi_ohlcv 가 None 이면 코인 에이전트 → 전부 중립값
+    # df.copy()로 단편화 해소 (100+ 컬럼 추가 후 PerformanceWarning 방지)
+    df = df.copy()
     if kospi_ohlcv is not None:
         try:
             _h_idx = df.index.hour
