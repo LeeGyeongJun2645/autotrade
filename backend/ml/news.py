@@ -287,23 +287,65 @@ _COIN_RSS   = [
     ("코인데스크KR",   "https://www.coindeskkorea.com/feed/"),
 ]
 
+# 코인 뉴스 필터: 이 키워드 중 하나라도 포함돼야 코인 기사로 인정
+_COIN_KEYWORDS = {
+    # 코인 일반
+    "bitcoin", "btc", "ethereum", "eth", "crypto", "blockchain", "altcoin", "defi",
+    "nft", "web3", "token", "staking", "wallet", "exchange", "binance", "upbit",
+    "coinbase", "solana", "ripple", "xrp", "cardano", "polkadot", "avalanche",
+    # 한국어
+    "비트코인", "이더리움", "암호화폐", "가상화폐", "블록체인", "디파이", "코인",
+    "알트코인", "스테이킹", "지갑", "거래소", "업비트", "빗썸", "코빗",
+    "채굴", "채굴기", "해시", "토큰", "디앱", "스마트계약", "에어드롭",
+    # 주요 코인명
+    "솔라나", "리플", "도지", "에이다", "폴카닷", "아발란체", "링크",
+    "이오스", "트론", "라이트코인", "시바", "페페", "수이", "앱토스",
+    # 시장 용어
+    "반감기", "불장", "베어장", "펌핑", "덤핑", "청산", "선물", "현물",
+    "김치프리미엄", "공포탐욕", "온체인", "레버리지", "펀딩", "ohlcv",
+}
 
-def _fetch_feed_items(url: str, source: str, category: str, limit: int = 12) -> list[dict]:
-    """RSS → 뉴스 아이템 리스트 (동기)."""
+# 주식 뉴스 필터: 이 키워드 중 하나라도 포함돼야 주식 기사로 인정
+_STOCK_KEYWORDS = {
+    "주식", "증시", "코스피", "코스닥", "주가", "etf", "펀드", "채권",
+    "금리", "환율", "외환", "달러", "엔화", "위안화", "fed", "fomc",
+    "기업", "실적", "공시", "상장", "배당", "자사주", "ipo", "공모",
+    "반도체", "삼성", "sk", "현대", "lg", "카카오", "네이버", "셀트리온",
+    "증권", "은행", "보험", "금융", "투자", "펀드", "시총", "per", "pbr",
+    "stock", "market", "nasdaq", "s&p", "dow", "nikkei", "kospi",
+}
+
+
+def _is_relevant(title: str, category: str) -> bool:
+    """카테고리에 맞는 키워드가 제목에 포함돼 있는지 확인."""
+    t = title.lower()
+    if category == "coin":
+        return any(kw in t for kw in _COIN_KEYWORDS)
+    if category == "stock":
+        return any(kw in t for kw in _STOCK_KEYWORDS)
+    return True  # dart는 필터 없음
+
+
+def _fetch_feed_items(url: str, source: str, category: str, limit: int = 25) -> list[dict]:
+    """RSS → 뉴스 아이템 리스트 (동기). 카테고리별 키워드 필터 적용."""
     try:
         feed = feedparser.parse(url, request_headers={"User-Agent": "AutoTrade/1.0"})
         items = []
         for e in feed.entries[:limit]:
             pub = (e.get("published") or e.get("updated") or "")[:25]
             title = e.get("title", "").strip()
-            if title:
-                items.append({
-                    "title":     title,
-                    "url":       e.get("link", ""),
-                    "published": pub,
-                    "source":    source,
-                    "category":  category,
-                })
+            if not title:
+                continue
+            # 관련 없는 기사 필터링 (코인 피드에서 드라마/스포츠 기사 제거)
+            if not _is_relevant(title, category):
+                continue
+            items.append({
+                "title":     title,
+                "url":       e.get("link", ""),
+                "published": pub,
+                "source":    source,
+                "category":  category,
+            })
         return items
     except Exception as exc:
         logger.debug("[뉴스피드] %s 실패: %s", source, exc)
