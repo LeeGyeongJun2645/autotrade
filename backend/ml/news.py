@@ -355,3 +355,62 @@ def get_cached_score(symbol: str) -> float | None:
     if entry and time.time() < entry[1]:
         return entry[0]
     return None
+
+
+# ── 시장 구조 데이터 캐시 (CoinGecko 무료 API) ───────────────────
+_MARKET_DATA_CACHE: dict = {}
+_MARKET_DATA_EXPIRES: float = 0.0
+_MARKET_DATA_TTL = 600  # 10분
+
+
+async def get_crypto_market_context() -> dict:
+    """BTC 도미넌스, 알트코인 시즌 지수, Fear & Greed를 통합 반환.
+
+    Returns:
+        {
+          "btc_dominance": float,    # BTC 시총 점유율 0~100
+          "total_market_cap_usd": float,
+          "altcoin_season": bool,    # True = 알트 시즌 (BTC 도미넌스 < 50%)
+          "fear_greed": int,         # 0(극도공포) ~ 100(극도탐욕)
+          "fear_greed_label": str,   # "Extreme Fear" | "Fear" | "Neutral" | "Greed" | "Extreme Greed"
+        }
+    """
+    global _MARKET_DATA_CACHE, _MARKET_DATA_EXPIRES
+    now = time.time()
+    if now < _MARKET_DATA_EXPIRES and _MARKET_DATA_CACHE:
+        return _MARKET_DATA_CACHE
+
+    result: dict = {
+        "btc_dominance": 58.0,
+        "total_market_cap_usd": 0.0,
+        "altcoin_season": False,
+        "fear_greed": 50,
+        "fear_greed_label": "Neutral",
+    }
+
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        # CoinGecko /global (무료, 인증 불필요)
+        try:
+            resp = await client.get("https://api.coingecko.com/api/v3/global")
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                btc_dom = data.get("market_cap_percentage", {}).get("btc", 58.0)
+                result["btc_dominance"] = round(float(btc_dom), 2)
+                result["total_market_cap_usd"] = float(data.get("total_market_cap", {}).get("usd", 0))
+                result["altcoin_season"] = btc_dom < 50.0
+        except Exception as e:
+            logger.debug("[시장데이터] CoinGecko global 실패: %s", e)
+
+        # Alternative.me Fear & Greed (무료, 인증 불필요)
+        try:
+            resp = await client.get("https://api.alternative.me/fng/?limit=1")
+            if resp.status_code == 200:
+                fng_data = resp.json().get("data", [{}])[0]
+                result["fear_greed"] = int(fng_data.get("value", 50))
+                result["fear_greed_label"] = fng_data.get("value_classification", "Neutral")
+        except Exception as e:
+            logger.debug("[시장데이터] Alternative.me FNG 실패: %s", e)
+
+    _MARKET_DATA_CACHE = result
+    _MARKET_DATA_EXPIRES = now + _MARKET_DATA_TTL
+    return result

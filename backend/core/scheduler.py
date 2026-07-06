@@ -144,6 +144,30 @@ def _is_stock_open_noise() -> bool:
     return now.hour == 9 and now.minute < 30
 _OHLCV_SEM = asyncio.Semaphore(5)  # 업비트/KIS OHLCV 동시 요청 최대 5개 (429 방지)
 
+# 시장 구조 캐시 (BTC 도미넌스, Fear & Greed): 10분 TTL, 전역 공유
+_scheduler_mkt_cache: dict = {}
+_scheduler_mkt_expires: float = 0.0
+
+
+async def _refresh_market_context() -> None:
+    """BTC 도미넌스 + Fear & Greed 갱신 (10분마다 스케줄러에서 호출)."""
+    global _scheduler_mkt_cache, _scheduler_mkt_expires
+    import time
+    if time.time() < _scheduler_mkt_expires:
+        return
+    try:
+        from backend.ml.news import get_crypto_market_context
+        ctx = await get_crypto_market_context()
+        _scheduler_mkt_cache["ctx"] = ctx
+        _scheduler_mkt_expires = time.time() + 600
+        logger.info(
+            "[시장] BTC도미넌스=%.1f%% F&G=%d(%s) 알트시즌=%s",
+            ctx["btc_dominance"], ctx["fear_greed"], ctx["fear_greed_label"],
+            "YES" if ctx["altcoin_season"] else "NO",
+        )
+    except Exception as e:
+        logger.debug("[시장] 시장 컨텍스트 갱신 실패: %s", e)
+
 
 class TradingScheduler:
     """자동매매 스케줄러.
@@ -390,6 +414,15 @@ class TradingScheduler:
             self._portfolio_snapshot,
             CronTrigger(hour=16, minute=0, timezone=KST),
             id="portfolio_snapshot",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # BTC 도미넌스 + Fear & Greed 갱신: 10분마다 (코인 보유 포지션 청산 판단용)
+        self._scheduler.add_job(
+            _refresh_market_context,
+            CronTrigger(minute="*/10", timezone=KST),
+            id="market_context",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -1476,6 +1509,18 @@ class TradingScheduler:
                     elif unreal <= STOP_LOSS:
                         signal = "sell"
                         sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
+
+                # ── BTC 도미넌스 급등 시 알트코인 조기 청산 (시장 구조 모니터링) ───
+                # 연구: BTC 도미넌스 > 60% + 상승 추세 = 알트코인 자금 BTC로 이탈
+                if signal != "sell" and agent.market == "coin" and unreal > 0 and held_min > 20:
+                    try:
+                        from backend.ml.news import get_crypto_market_context
+                        _mkt = _scheduler_mkt_cache.get("ctx")
+                        if _mkt and _mkt.get("btc_dominance", 58.0) > 62.0 and not symbol.startswith("KRW-BTC"):
+                            signal = "sell"
+                            sim_log.push(agent.agent_id, f"[BTC도미넌스] {symbol} BTC지배율>{_mkt['btc_dominance']:.1f}% 알트이탈→익절", "SELL")
+                    except Exception:
+                        pass
 
         if signal == "buy":
             # 일일 손실 한도 서킷 브레이커 (에이전트별 독립, 3% 초과 시 당일 차단)

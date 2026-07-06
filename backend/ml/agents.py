@@ -918,6 +918,41 @@ class SimAgent:
         except Exception:
             pass
 
+        # ── 보유 중 종목 차트 모니터링: RSI 과매수 + MACD 반전 → 조기 익절 ────
+        # 연구: RSI>75 + MACD histogram 음전환 = 모멘텀 소진, 수익률 하락 신호
+        # 매수 후 차트를 계속 보면서 "다 올라왔다" 싶으면 파는 전략
+        if ticker and ticker in self._positions:
+            try:
+                _held_pos = self._positions[ticker]
+                _now_kst  = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+                _entered  = datetime.fromisoformat(_held_pos.entered_at).replace(tzinfo=None)
+                _held_min = (_now_kst - _entered).total_seconds() / 60
+
+                if _held_min >= 30 and len(full_df) >= 5:
+                    _rsi_now   = float(full_df["rsi_9"].iloc[-1])
+                    _rsi_prev  = float(full_df["rsi_9"].iloc[-3])
+                    _macd_now  = float(full_df["macd_diff"].iloc[-1])
+                    _macd_prev = float(full_df["macd_diff"].iloc[-2])
+
+                    # RSI 과매수 구간(>75) + MACD 히스토그램 음전환 → 모멘텀 소진
+                    _rsi_overbought = _rsi_now > 75
+                    _macd_turning   = _macd_prev > 0 and _macd_now < 0  # 양→음 전환
+
+                    # RSI 다이버전스: 가격 고점 갱신하는데 RSI는 오히려 낮아짐
+                    _rsi_diverge = _rsi_now > 70 and _rsi_now < _rsi_prev - 3
+
+                    if _rsi_overbought and _macd_turning:
+                        from backend.core import sim_log
+                        sim_log.push(self.agent_id, f"[차트모니터링] {ticker} RSI={_rsi_now:.1f}(과매수)+MACD반전→조기익절신호", "SELL")
+                        return "sell", round(max(prob, 0.6), 4)
+
+                    if _rsi_diverge and _macd_turning:
+                        from backend.core import sim_log
+                        sim_log.push(self.agent_id, f"[차트모니터링] {ticker} RSI다이버전스({_rsi_prev:.1f}→{_rsi_now:.1f})+MACD반전→익절신호", "SELL")
+                        return "sell", round(max(prob, 0.55), 4)
+            except Exception:
+                pass
+
         if prob >= self.buy_threshold:
             # ── Meta-Labeling 2차 필터 ───────────────────────────────
             # 1차 BUY 신호를 실제로 거래할지 2차 모델이 판단 (False Positive 감소)
