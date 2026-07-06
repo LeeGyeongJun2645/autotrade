@@ -754,6 +754,51 @@ function AnalysisPanel() {
   )
 }
 
+
+// ── 전체 포지션 한눈에 보기 ─────────────────────────────────────
+function PositionsOverview({ agents }) {
+  const holding = (agents ?? []).filter(a => Object.keys(a.positions ?? {}).length > 0)
+  if (holding.length === 0) return null
+  const totalPositions = holding.reduce((s, a) => s + Object.keys(a.positions).length, 0)
+
+  return (
+    <div className="bg-gray-800 rounded-xl border border-yellow-700/40 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <span className="font-bold text-white text-sm">
+          📍 현재 보유 포지션 &mdash; {holding.length}개 에이전트 &middot; {totalPositions}종목
+        </span>
+        <span className="text-xs text-gray-500">SSE 실시간 갱신</span>
+      </div>
+      <div className="space-y-2">
+        {holding.map(agent => (
+          <div key={agent.agent_id} className="flex items-start gap-3 text-xs">
+            <span className="w-20 font-bold text-gray-300 pt-0.5 shrink-0">{agent.agent_id}</span>
+            <div className="flex flex-wrap gap-1.5">
+              {Object.entries(agent.positions).map(([ticker, pos]) => {
+                const pnl = pos.unrealized_pnl_pct ?? 0
+                const entMin = pos.entered_at ? pos.entered_at.slice(11, 16) : ''
+                return (
+                  <div key={ticker}
+                    className={`flex items-center gap-1 px-2 py-0.5 rounded-full border font-mono text-xs
+                      ${pnl >= 0.3 ? 'bg-green-900/50 border-green-700/60 text-green-300'
+                      : pnl <= -0.3 ? 'bg-red-900/50 border-red-700/60 text-red-300'
+                      : 'bg-gray-700/60 border-gray-600/60 text-gray-300'}`}>
+                    <span className="font-bold">{ticker.replace('KRW-', '')}</span>
+                    <span className={`ml-0.5 ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {pnl >= 0 ? '+' : ''}{pnl.toFixed(1)}%
+                    </span>
+                    {entMin && <span className="text-gray-500 text-[10px] ml-0.5">{entMin}</span>}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ── 리셋 버튼 ─────────────────────────────────────────────────────
 function ResetButton() {
   const [busy,   setBusy]   = useState(false)
@@ -852,6 +897,9 @@ export default function AgentDashboard({ agents }) {
           </div>
         </div>
       </div>
+
+      {/* 전체 포지션 한눈에 보기 */}
+      <PositionsOverview agents={agents ?? []} />
 
       {/* 앙상블 실매매 신호 추적 — 맨 위 */}
       {ensembleAgents.length > 0 && (

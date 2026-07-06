@@ -1256,25 +1256,26 @@ class TradingScheduler:
                         if not is_market_open:
                             continue
                         agent.update_position_values(stock_prices)
-                        # 모델 없으면 대표 종목(삼성전자)으로 즉석 학습 시도
+                        # 모델 없으면 전체 종목 데이터로 즉석 multi-stock 학습 시도
                         # 학습 데이터는 에이전트 간 공유 (_otf_stock_ohlcv) — API 중복 호출 방지
                         if agent._model is None and not agent.load_model():
-                            _train_sym = next((s for s in ["005930", "000660", "035420"] if s in stock_symbols), None) \
-                                         or (stock_symbols[0] if stock_symbols else "005930")
-                            if _train_sym:
-                                # OTF 학습: 이번 틱에 이미 fetched된 데이터 재사용 → 추가 API 콜 0
-                                if _train_sym not in _otf_stock_ohlcv:
-                                    _otf_stock_ohlcv[_train_sym] = (
-                                        stock_ohlcv_cache.get(f"{_train_sym}:{agent.interval_min}")
-                                        or self._stock_train_cache.get(f"{_train_sym}:{agent.interval_min}", [])
+                            # 이번 틱 캐시에서 모든 종목 OHLCV 수집 (없으면 _stock_train_cache 폴백)
+                            for _sym in stock_symbols:
+                                if _sym not in _otf_stock_ohlcv:
+                                    _otf_stock_ohlcv[_sym] = (
+                                        stock_ohlcv_cache.get(f"{_sym}:{agent.interval_min}")
+                                        or self._stock_train_cache.get(f"{_sym}:{agent.interval_min}", [])
                                     )
-                                if not _otf_kospi_ohlcv:
-                                    _otf_kospi_ohlcv[:] = kospi_ohlcv or self._kospi_train_cache or []
-                                _tr_ohlcv = _otf_stock_ohlcv.get(_train_sym, [])
-                                _kospi_tr = _otf_kospi_ohlcv
-                                if _tr_ohlcv:
-                                    async with agent._train_lock:
-                                        await asyncio.to_thread(agent.train, _tr_ohlcv, None, None, _kospi_tr)
+                            if not _otf_kospi_ohlcv:
+                                _otf_kospi_ohlcv[:] = kospi_ohlcv or self._kospi_train_cache or []
+                            _kospi_tr = _otf_kospi_ohlcv
+                            # 유효 데이터 있는 종목만 선별
+                            _ohlcv_by_sym = {s: v for s, v in _otf_stock_ohlcv.items() if len(v) >= 50}
+                            if _ohlcv_by_sym:
+                                async with agent._train_lock:
+                                    await asyncio.to_thread(
+                                        agent.train_multi, _ohlcv_by_sym, _kospi_tr
+                                    )
                         for symbol in stock_symbols:
                             ohlcv = stock_ohlcv_cache.get(f"{symbol}:{agent.interval_min}", [])
                             if not ohlcv:
@@ -1651,32 +1652,26 @@ class TradingScheduler:
         if not coin_ohlcv:
             logger.error("[Retrain] 코인 학습 데이터 수집 전부 실패 — 코인 에이전트 재학습 건너뜀")
 
-        # 주식 에이전트별로 다른 종목 데이터를 할당해 앙상블 다양성 확보
-        stock_ohlcv_pool: list[list[dict]] = []
+        # 주식 학습 데이터 수집 (symbol → ohlcv 딕셔너리)
+        _stock_retrain_map: dict[str, list[dict]] = {}
         for symbol in STOCK_SYMBOLS:
             # 1순위: 틱 캐시 재사용 (API 콜 0)
             _cached = self._stock_train_cache.get(f"{symbol}:5", [])
             if len(_cached) >= 50:
-                stock_ohlcv_pool.append(list(_cached))
+                _stock_retrain_map[symbol] = list(_cached)
                 logger.info("[Retrain] 주식 학습 데이터(캐시): %s (%d봉)", symbol, len(_cached))
                 continue
             # 2순위: 캐시 없으면 최소 API 호출 (100봉 = ~17콜)
             try:
                 _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=100)
                 if len(_tmp) >= 50:
-                    stock_ohlcv_pool.append(_tmp)
+                    _stock_retrain_map[symbol] = _tmp
                     logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉)", symbol, len(_tmp))
             except Exception as e:
                 logger.warning("[Retrain] 주식 OHLCV 수집 실패 (%s): %s", symbol, e)
-        stock_ohlcv = stock_ohlcv_pool[0] if stock_ohlcv_pool else []
-
-        # 주식 에이전트별 종목 순환 배정 (round-robin)
-        _stock_agents = [a for a in AGENTS.values() if a.market == "stock"]
-        _stock_data_map: dict[str, list[dict]] = {}
-        for _i, _sa in enumerate(_stock_agents):
-            _stock_data_map[_sa.agent_id] = (
-                stock_ohlcv_pool[_i % len(stock_ohlcv_pool)] if stock_ohlcv_pool else []
-            )
+        # 하위 호환: pool/map 변수 유지 (텔레그램 알림 등에서 참조)
+        stock_ohlcv_pool = list(_stock_retrain_map.values())
+        stock_ohlcv      = stock_ohlcv_pool[0] if stock_ohlcv_pool else []
 
         # ── 코인 펀딩비 히스토리 수집 (BTC 대표값, 50봉 = 약 16일치) ──
         from backend.api.binance import get_historical_funding_rates
@@ -1760,11 +1755,13 @@ class TradingScheduler:
                         sum(1 for r in rows if float(r["profit_rate"] or 0) > 0),
                     )
 
+        # 주식 에이전트 재학습용 multi-stock 딕셔너리 (위에서 이미 구성됨)
+        _stock_ohlcv_by_sym = _stock_retrain_map
+
         # ── 에이전트별 재학습 ────────────────────────────────────
         success = 0
         for agent in AGENTS.values():
-            data = coin_ohlcv if agent.market == "coin" else _stock_data_map.get(agent.agent_id, stock_ohlcv)
-            fr   = coin_funding if agent.market == "coin" else None
+            fr         = coin_funding if agent.market == "coin" else None
             _btc_ref   = btc_train_ohlcv  if agent.market == "coin"  else None
             _kospi_ref = kospi_train_ohlcv if agent.market == "stock" else None
             _oi_ref    = btc_oi_train      if agent.market == "coin"  else None
@@ -1775,15 +1772,25 @@ class TradingScheduler:
                     agent._cached_oi_hist    = btc_oi_train
                 if btc_taker_train:
                     agent._cached_taker_hist = btc_taker_train
-            if not data:
-                logger.warning("[Retrain][%s] 학습 데이터 없음, 스킵", agent.agent_id)
-                continue
             _trade_res = agent_trade_results.get(agent.agent_id) or None
             try:
                 async with agent._train_lock:
-                    trained = await asyncio.to_thread(
-                        agent.train, data, fr, _btc_ref, _kospi_ref, _oi_ref, _taker_ref, _trade_res
-                    )
+                    if agent.market == "stock":
+                        # 전체 종목 데이터 풀링으로 학습 (분포 다양성 확보)
+                        if not _stock_ohlcv_by_sym:
+                            logger.warning("[Retrain][%s] 주식 학습 데이터 없음, 스킵", agent.agent_id)
+                            continue
+                        trained = await asyncio.to_thread(
+                            agent.train_multi, _stock_ohlcv_by_sym, _kospi_ref
+                        )
+                    else:
+                        data = coin_ohlcv
+                        if not data:
+                            logger.warning("[Retrain][%s] 코인 학습 데이터 없음, 스킵", agent.agent_id)
+                            continue
+                        trained = await asyncio.to_thread(
+                            agent.train, data, fr, _btc_ref, None, _oi_ref, _taker_ref, _trade_res
+                        )
                 if trained:
                     success += 1
                     logger.info("[Retrain][%s] 재학습 완료", agent.agent_id)

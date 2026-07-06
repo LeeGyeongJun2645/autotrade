@@ -406,10 +406,15 @@ def compute_features(
             _ki["date"] = pd.to_datetime(_ki["date"].astype(str).str[:19])
             _ki = _ki.set_index("date").sort_index()
             _ki_close   = _ki["close"].astype(float).reindex(df.index, method="ffill")
-            _ki_ret5    = _ki_close.pct_change(5)
-            _stock_ret5 = close.pct_change(5)
-            df["kospi_ret_5"]  = _ki_ret5
-            df["kospi_rel_str"] = _stock_ret5 - _ki_ret5
+            # KOSPI 시간대와 주식 시간대 불일치 시 (전행 NaN) → 0으로 대체
+            if _ki_close.isna().all():
+                df["kospi_ret_5"]  = 0.0
+                df["kospi_rel_str"] = 0.0
+            else:
+                _ki_ret5    = _ki_close.pct_change(5).fillna(0.0)
+                _stock_ret5 = close.pct_change(5).fillna(0.0)
+                df["kospi_ret_5"]  = _ki_ret5
+                df["kospi_rel_str"] = _stock_ret5 - _ki_ret5
         except Exception:
             df["kospi_ret_5"]  = 0.0
             df["kospi_rel_str"] = 0.0
@@ -545,6 +550,8 @@ def compute_features(
 
     # ── ORB + 장중 세션 피처 (주식 전용: kospi_ohlcv 있을 때만, 코인=0) ──
     # kospi_ohlcv 가 None 이면 코인 에이전트 → 전부 중립값
+    # df.copy()로 단편화 해소 (100+ 컬럼 추가 후 PerformanceWarning 방지)
+    df = df.copy()
     if kospi_ohlcv is not None:
         try:
             _h_idx = df.index.hour
@@ -592,4 +599,9 @@ def compute_features(
             "session_phase": 1.0, "ret_since_open": 0.0, "intraday_reversal": 0.0,
         }, index=df.index)], axis=1)
 
-    return df[FEATURE_NAMES].dropna()
+    _pre_drop = df[FEATURE_NAMES].copy()
+    # 전체가 NaN인 컬럼(가격 변동 없는 종목의 bb_pband 등) → 0으로 대체 후 dropna
+    for _c in FEATURE_NAMES:
+        if _pre_drop[_c].isna().all():
+            _pre_drop[_c] = 0.0
+    return _pre_drop.dropna()

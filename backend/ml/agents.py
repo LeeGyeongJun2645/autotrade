@@ -651,6 +651,209 @@ class SimAgent:
             logger.warning("[%s] 학습 실패: %s", self.agent_id, e)
             return False
 
+    def _build_labeled_segment(
+        self,
+        ohlcv_list: list[dict],
+        kospi_ohlcv: list[dict] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """단일 종목 OHLCV → (X, y) 배열 반환. 실패/샘플 부족 시 None."""
+        try:
+            feat_df = compute_features(ohlcv_list, kospi_ohlcv=kospi_ohlcv)
+            _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
+            feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
+            if len(feat_df) < 30:
+                return None
+            _atr_series = _atr_full.reindex(feat_df.index) if _atr_full is not None else None
+
+            _ohlcv_dates = pd.to_datetime([str(c["date"])[:19] for c in reversed(ohlcv_list)])
+            close_all = pd.Series(
+                [float(c["close"]) for c in reversed(ohlcv_list)], index=_ohlcv_dates,
+            )
+            close_all = close_all[~close_all.index.duplicated(keep="last")]
+            close = close_all.reindex(feat_df.index).reset_index(drop=True)
+            if close.isna().any():
+                return None
+            feat_df = feat_df.reset_index(drop=True)
+            if _atr_series is not None:
+                _atr_series = _atr_series.reset_index(drop=True)
+
+            LOOKAHEAD   = self.lookahead
+            NOISE_FLOOR = 0.001
+            raw_labels  = np.zeros(len(close), dtype=int)
+            for i in range(len(close) - LOOKAHEAD):
+                entry = close.iloc[i]
+                if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
+                    _atr   = float(_atr_series.iloc[i])
+                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)
+                    sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
+                else:
+                    tp_pct = self.label_threshold
+                    sl_pct = self.label_threshold * 0.5
+                tp, sl = entry * (1 + tp_pct), entry * (1 - sl_pct)
+                for j in range(1, LOOKAHEAD + 1):
+                    p = close.iloc[i + j]
+                    if p >= tp:
+                        raw_labels[i] = 1
+                        break
+                    if p <= sl:
+                        break
+
+            label      = pd.Series(raw_labels)
+            next_close = close.shift(-LOOKAHEAD)
+            ret        = (next_close / close - 1).fillna(0)
+
+            feat_df = feat_df.iloc[:-LOOKAHEAD]
+            label   = label.iloc[:-LOOKAHEAD]
+            ret     = ret.iloc[:-LOOKAHEAD]
+            min_len = min(len(feat_df), len(label))
+            feat_df = feat_df.iloc[:min_len]
+            label   = label.iloc[:min_len]
+            ret     = ret.iloc[:min_len]
+
+            clear_mask = (label == 1) | (ret.abs() >= NOISE_FLOOR)
+            feat_df    = feat_df[clear_mask.values]
+            label      = label[clear_mask.values]
+
+            if len(feat_df) < 30 or len(set(label.values)) < 2:
+                return None
+            return feat_df.values, label.values.astype(int)
+        except Exception as e:
+            logger.debug("[%s] _build_labeled_segment 실패: %s", self.agent_id, e)
+            return None
+
+    def train_multi(
+        self,
+        ohlcv_by_symbol: dict[str, list[dict]],
+        kospi_ohlcv: list[dict] | None = None,
+    ) -> bool:
+        """여러 종목 OHLCV를 풀링해 단일 모델 학습 (주식 에이전트 전용)."""
+        try:
+            all_X: list[np.ndarray] = []
+            all_y: list[np.ndarray] = []
+            for sym, ohlcv_list in ohlcv_by_symbol.items():
+                if len(ohlcv_list) < 50:
+                    continue
+                seg = self._build_labeled_segment(ohlcv_list, kospi_ohlcv)
+                if seg is None:
+                    continue
+                all_X.append(seg[0])
+                all_y.append(seg[1])
+                logger.debug("[%s] train_multi: %s %d샘플", self.agent_id, sym, len(seg[0]))
+
+            if not all_X:
+                logger.warning("[%s] train_multi: 유효 종목 없음", self.agent_id)
+                return False
+
+            X = np.concatenate(all_X, axis=0)
+            y = np.concatenate(all_y, axis=0)
+
+            if len(X) < 50 or len(set(y.tolist())) < 2:
+                logger.warning("[%s] train_multi 스킵: 풀링 후 %d샘플 / 클래스 %d",
+                               self.agent_id, len(X), len(set(y.tolist())))
+                return False
+
+            GAP = self.lookahead
+            if len(X) >= 400:
+                VAL_SIZE = min(200, max(len(X) // 6, 30))
+                _two_win = len(X) > 2 * VAL_SIZE + 2 * GAP + 100
+            else:
+                VAL_SIZE = max(15, len(X) // 8)
+                _two_win = False
+            if _two_win:
+                _t_end  = len(X) - 2 * VAL_SIZE - 2 * GAP
+                X_train = X[:_t_end];    y_train = y[:_t_end]
+                _a0     = _t_end + GAP;  _a1     = _a0 + VAL_SIZE
+                X_val_a = X[_a0:_a1];   y_val_a = y[_a0:_a1]
+                X_val   = X[_a1 + GAP:]; y_val   = y[_a1 + GAP:]
+            elif len(X) > VAL_SIZE + GAP + 50:
+                X_train = X[:-(VAL_SIZE + GAP)]; y_train = y[:-(VAL_SIZE + GAP)]
+                X_val   = X[-VAL_SIZE:];          y_val   = y[-VAL_SIZE:]
+                X_val_a = None;                   y_val_a = None
+            else:
+                X_train = X;    y_train = y
+                X_val   = None; y_val   = None
+                X_val_a = None; y_val_a = None
+                _two_win = False
+
+            weights = np.ones(len(X_train))
+            if len(X_train) > 500:
+                weights[-500:] = 2.0
+
+            scaler = StandardScaler()
+            X_train_s = scaler.fit_transform(X_train)
+
+            n_neg     = int((y_train == 0).sum())
+            n_pos     = int((y_train == 1).sum())
+            scale_pos = n_neg / n_pos if n_pos > 0 else 1.0
+
+            _mcs = max(10, min(30, len(X_train) // 10))
+            if self.model_type == "lgbm":
+                clf = LGBMClassifier(
+                    n_estimators=200, max_depth=3, learning_rate=0.05,
+                    subsample=0.8, colsample_bytree=0.8, min_child_samples=_mcs,
+                    reg_alpha=0.1, reg_lambda=2.0, scale_pos_weight=scale_pos,
+                    random_state=42, n_jobs=-1, verbose=-1,
+                )
+            else:
+                clf = XGBClassifier(
+                    n_estimators=200, max_depth=3, learning_rate=0.05,
+                    subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
+                    gamma=0.1, reg_alpha=0.1, reg_lambda=2.0, scale_pos_weight=scale_pos,
+                    eval_metric="logloss", random_state=42, n_jobs=-1,
+                )
+            fit_kwargs: dict = {"sample_weight": weights}
+            if self.model_type != "lgbm":
+                fit_kwargs["verbose"] = False
+            clf.fit(X_train_s, y_train, **fit_kwargs)
+
+            if X_val is not None and len(X_val) > 0:
+                _val_s    = scaler.transform(X_val)
+                _val_prob = clf.predict_proba(_val_s)[:, 1]
+                val_acc   = clf.score(_val_s, y_val)
+                if val_acc < 0.50:
+                    logger.warning("[%s] train_multi WF검증 %.1f%% < 50%% → 실패", self.agent_id, val_acc * 100)
+                    return False
+
+                from sklearn.metrics import precision_score as _ps
+                _init_thr = self.buy_threshold
+
+                def _find_best_thr(prob_arr: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
+                    best_thr, best_prec = _init_thr, 0.0
+                    for _t in np.arange(0.50, 0.75, 0.01):
+                        _p = (prob_arr >= _t).astype(int)
+                        if _p.sum() < max(5, len(y_true) // 20):
+                            continue
+                        if (y_true == 1).sum() > 0 and float(_p[y_true == 1].mean()) < 0.10:
+                            continue
+                        _prec = _ps(y_true, _p, zero_division=0)
+                        if _prec > best_prec:
+                            best_prec, best_thr = _prec, float(_t)
+                    return best_thr, best_prec
+
+                thr_b, prec_b = _find_best_thr(_val_prob, y_val)
+                if _two_win and X_val_a is not None and len(X_val_a) > 0:
+                    _va_prob = clf.predict_proba(scaler.transform(X_val_a))[:, 1]
+                    thr_a, _ = _find_best_thr(_va_prob, y_val_a)
+                    if prec_b > 0:
+                        _combined = 0.6 * thr_b + 0.4 * thr_a
+                        self.buy_threshold = round(min(max(_combined, 0.58), 0.72), 2)
+                else:
+                    if prec_b > 0:
+                        self.buy_threshold = round(min(max(thr_b, 0.58), 0.72), 2)
+
+            _min_thr = 0.55 if self.market == "stock" else 0.58
+            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.72)
+            self._model   = clf
+            self._scaler  = scaler
+            self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+            self.save_model()
+            logger.warning("[%s] train_multi 완료 (%d종목 풀링, %d샘플, thr=%.2f)",
+                           self.agent_id, len(all_X), len(X), self.buy_threshold)
+            return True
+        except Exception as e:
+            logger.warning("[%s] train_multi 실패: %s", self.agent_id, e)
+            return False
+
     # ── 예측 ────────────────────────────────────────────────────
 
     def predict(
