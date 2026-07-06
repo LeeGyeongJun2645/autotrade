@@ -97,14 +97,14 @@ AGENT_CONFIGS: list[tuple] = [
     # 코인 홀수 → LightGBM / 짝수 → XGBoost (앙상블 다양성 극대화)
     ("AI01",  5, 0.006, 0.58, "all",      "coin",  3, "lgbm"),  # 단기 공격형
     ("AI02",  5, 0.007, 0.63, "momentum", "coin",  5, "xgb"),
-    ("AI03",  5, 0.008, 0.58, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
+    ("AI03",  5, 0.008, 0.62, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
     ("AI04",  5, 0.007, 0.62, "volume",   "coin",  3, "xgb"),
     ("AI05",  5, 0.010, 0.60, "all",      "coin",  5, "lgbm"),
     ("AI06",  5, 0.008, 0.65, "momentum", "coin",  8, "xgb"),
     ("AI07",  5, 0.010, 0.62, "trend",    "coin",  3, "lgbm"),
     ("AI08",  5, 0.007, 0.62, "volume",   "coin",  5, "xgb"),
     ("AI09",  5, 0.012, 0.65, "all",      "coin",  8, "lgbm"),
-    ("AI10",  5, 0.008, 0.65, "trend",    "coin",  5, "xgb"),
+    ("AI10",  5, 0.008, 0.70, "trend",    "coin",  5, "xgb"),
     # 주식 전략 — 전부 LightGBM (histogram-based 분할이 불균형 5분봉 데이터에 더 안정적)
     ("AI11",  5, 0.006, 0.58, "all",      "stock", 3, "lgbm"),
     ("AI12",  5, 0.005, 0.60, "trend",    "stock", 5, "lgbm"),  # label 0.7→0.5% (양성레이블 확보)
