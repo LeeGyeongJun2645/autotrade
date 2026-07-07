@@ -197,11 +197,12 @@ def _is_coin_night_risk() -> bool:
     """코인 저승률 시간대 차단 (거래내역 분석 기반).
 
     KST 01~04시: WR 30.8~41.4% (야간 저유동성)
+    KST 05~06시: 미국 장 마감 후 (UTC 20~21시) 유동성 공백
     KST 09시: WR=35.5% (아시아 개장 노이즈)
     KST 12시: WR=37.7% (점심 저유동성)
     """
     h = datetime.now(KST).hour
-    return h in {1, 2, 3, 4, 9, 12}
+    return h in {1, 2, 3, 4, 5, 6, 9, 12}
 
 
 def _is_stock_open_noise() -> bool:
@@ -252,6 +253,7 @@ class TradingScheduler:
         self._use_atr_risk: bool = False  # 에이전트 검증 완료 시 True → 실매매도 ATR 동적 손익 적용
         self._btc_oi_hist:    list[dict] = []  # BTC 선물 OI 히스토리 캐시 (코인 에이전트 전체 공유)
         self._btc_taker_hist: list[dict] = []  # BTC 선물 Taker 비율 히스토리 캐시
+        self._btc_ls_hist:    list[dict] = []  # BTC 글로벌 L/S 비율 히스토리 캐시 (코인 전용)
         self._btc_ohlcv_cache: list[dict] = []  # BTC 5분봉 OHLCV 캐시 (ML 게이트 BTC 상관관계용)
         self._stock_train_cache: dict[str, list] = {}  # 최근 틱에서 수집한 주식 OHLCV (재학습 재사용)
         self._kospi_train_cache: list[dict] = []       # 최근 틱 KOSPI OHLCV (재학습 재사용)
@@ -613,10 +615,11 @@ class TradingScheduler:
             btc_ohlcv  = self._btc_ohlcv_cache if market == "coin" else None
             oi_hist    = self._btc_oi_hist      if market == "coin" else None
             taker_hist = self._btc_taker_hist   if market == "coin" else None
+            ls_hist    = self._btc_ls_hist      if market == "coin" else None
             signal, prob = await predict_ensemble(
                 ohlcv_5min, ticker=symbol, market=market,
                 btc_ohlcv=btc_ohlcv,
-                oi_hist=oi_hist, taker_hist=taker_hist,
+                oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist,
             )
             approved = signal == "buy"
             n = len(trained)
@@ -1208,18 +1211,21 @@ class TradingScheduler:
         except Exception:
             coin_prices = {}
 
-        # BTC 선물 OI + Taker 히스토리 (코인 에이전트 전체 공유, 5분 TTL)
-        from backend.api.binance import get_open_interest_hist, get_taker_ratio_hist
+        # BTC 선물 OI + Taker + L/S 히스토리 (코인 에이전트 전체 공유, 5분 TTL)
+        from backend.api.binance import get_open_interest_hist, get_taker_ratio_hist, get_ls_ratio_hist
         try:
-            btc_oi_hist, btc_taker_hist = await asyncio.gather(
+            btc_oi_hist, btc_taker_hist, btc_ls_hist = await asyncio.gather(
                 get_open_interest_hist("BTCUSDT", period="5m", limit=200),
                 get_taker_ratio_hist("BTCUSDT", period="5m", limit=200),
+                get_ls_ratio_hist("BTCUSDT", period="5m", limit=200),
             )
             self._btc_oi_hist    = btc_oi_hist
             self._btc_taker_hist = btc_taker_hist
+            self._btc_ls_hist    = btc_ls_hist
         except Exception:
             btc_oi_hist    = self._btc_oi_hist
             btc_taker_hist = self._btc_taker_hist
+            btc_ls_hist    = self._btc_ls_hist
 
         # 주식 OHLCV + 현재가도 병렬 프리패치
         stock_intervals = list({a.interval_min for a in AGENTS.values() if a.market == "stock"})
@@ -1358,7 +1364,8 @@ class TradingScheduler:
                                 continue
                             _oi_ref    = btc_oi_hist    if btc_oi_hist    else None
                             _taker_ref = btc_taker_hist if btc_taker_hist else None
-                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref, ticker=ticker)
+                            _ls_ref    = btc_ls_hist    if btc_ls_hist    else None
+                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref, ls_hist=_ls_ref, ticker=ticker)
                             await self._agent_execute(db, agent, ticker, signal, prob, price)
 
                     else:
@@ -1451,6 +1458,7 @@ class TradingScheduler:
                                 btc_ohlcv=self._btc_ohlcv_cache if _ea.market == "coin" else None,
                                 oi_hist=btc_oi_hist if _ea.market == "coin" else None,
                                 taker_hist=btc_taker_hist if _ea.market == "coin" else None,
+                                ls_hist=btc_ls_hist if _ea.market == "coin" else None,
                             )
                         except Exception:
                             continue
@@ -1943,18 +1951,21 @@ class TradingScheduler:
             except Exception:
                 logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
 
-        # ── BTC 선물 OI + Taker 히스토리 (코인 에이전트 학습용) ─────
-        from backend.api.binance import get_open_interest_hist, get_taker_ratio_hist
+        # ── BTC 선물 OI + Taker + L/S 히스토리 (코인 에이전트 학습용) ──
+        from backend.api.binance import get_open_interest_hist, get_taker_ratio_hist, get_ls_ratio_hist
         btc_oi_train:    list[dict] = []
         btc_taker_train: list[dict] = []
+        btc_ls_train:    list[dict] = []
         try:
-            btc_oi_train, btc_taker_train = await asyncio.gather(
+            btc_oi_train, btc_taker_train, btc_ls_train = await asyncio.gather(
                 get_open_interest_hist("BTCUSDT", period="5m", limit=500),
                 get_taker_ratio_hist("BTCUSDT", period="5m", limit=500),
+                get_ls_ratio_hist("BTCUSDT", period="5m", limit=500),
             )
-            logger.info("[Retrain] BTC OI: %d개, Taker비율: %d개", len(btc_oi_train), len(btc_taker_train))
+            logger.info("[Retrain] BTC OI: %d개, Taker비율: %d개, L/S비율: %d개",
+                        len(btc_oi_train), len(btc_taker_train), len(btc_ls_train))
         except Exception:
-            logger.warning("[Retrain] BTC OI/Taker 데이터 수집 실패")
+            logger.warning("[Retrain] BTC OI/Taker/L/S 데이터 수집 실패")
 
         # ── 에이전트 거래 결과 조회 (수익/손실 패턴 흡수용) ─────────
         import aiosqlite
@@ -2014,6 +2025,8 @@ class TradingScheduler:
                     agent._cached_oi_hist    = btc_oi_train
                 if btc_taker_train:
                     agent._cached_taker_hist = btc_taker_train
+                if btc_ls_train:
+                    agent._cached_ls_hist    = btc_ls_train
             _trade_res = agent_trade_results.get(agent.agent_id) or None
             try:
                 async with agent._train_lock:

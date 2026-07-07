@@ -188,6 +188,7 @@ class SimAgent:
         self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
+        self._cached_ls_hist: list[dict] = []         # BTC 글로벌 L/S 비율 히스토리 캐시 (코인 전용)
         self._last_ohlcv_cache: dict[str, list[dict]] = {}  # 종목별 최신 OHLCV (continuation_score 용)
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
         self._trailing_mode: set[str] = set()    # 트레일링 활성화된 종목
@@ -462,7 +463,7 @@ class SimAgent:
                 # TP 2.0→2.5: 실행 TP 변경에 맞춰 학습 레이블 상향 (수익률 우선 전략)
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr = float(_atr_series.iloc[i])
-                    tp_pct = max(min(_atr * 2.5, 0.10), self.label_threshold)
+                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -708,7 +709,7 @@ class SimAgent:
                 entry = close.iloc[i]
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr   = float(_atr_series.iloc[i])
-                    tp_pct = max(min(_atr * 2.5, 0.10), self.label_threshold)  # 3.0→2.5: train() 정합
+                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)  # ATR×3.0: scheduler TP와 정합
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -1067,6 +1068,7 @@ class SimAgent:
         kospi_ohlcv: list[dict] | None = None,
         oi_hist: list[dict] | None = None,
         taker_hist: list[dict] | None = None,
+        ls_hist: list[dict] | None = None,
         ticker: str = "",
     ) -> tuple[str, float]:
         """(signal, buy_prob) 반환. 모델 없으면 ('hold', 0.5)."""
@@ -1083,6 +1085,7 @@ class SimAgent:
                 oi_hist=oi_hist or (self._cached_oi_hist or None),
                 taker_hist=taker_hist or (self._cached_taker_hist or None),
                 ticker=ticker if ticker else "",
+                ls_hist=ls_hist or (self._cached_ls_hist or None),
             )
             if full_df.empty:
                 return "hold", 0.5
@@ -1489,6 +1492,7 @@ async def predict_ensemble(
     kospi_ohlcv: list[dict] | None = None,
     oi_hist: list[dict] | None = None,
     taker_hist: list[dict] | None = None,
+    ls_hist: list[dict] | None = None,
 ) -> tuple[str, float]:
     """가중 앙상블 게이트 — 전 에이전트 동적 투표 + 실시간 보정.
 
@@ -1560,7 +1564,7 @@ async def predict_ensemble(
             if agent.feature_set == "all":
                 weight *= 1.3
 
-        sig, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
+        sig, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist)
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight
         total_weight  += weight

@@ -142,6 +142,32 @@ FEATURE_NAMES = [
     "supertrend_bull",  # 1=상승 추세(SuperTrend 아래), 0=하락 추세(SuperTrend 위)
     # ── 미국 시장 세션 ────────────────────────────────────────────────
     "is_us_session",  # UTC 13~21시(KST 22~06시) = 1: 미국 시장 최고 유동성 구간
+    # ── CVD 다이버전스 ────────────────────────────────────────────────
+    "cvd_div_5",         # 5봉 가격 방향 vs CVD 방향 불일치 (단기 다이버전스)
+    "cvd_div_20",        # 20봉 가격 방향 vs CVD 방향 불일치 (중기 다이버전스)
+    # ── BB + Keltner Channel 스퀴즈 ──────────────────────────────────
+    "bb_inside_kc",      # BB 상하단이 KC 안쪽 → 스퀴즈 (강한 움직임 대기)
+    "kc_squeeze_bars",   # 스퀴즈 지속 봉 수 (많을수록 에너지 축적)
+    # ── StochRSI K/D 교차 ────────────────────────────────────────────
+    "stoch_rsi_k",       # StochRSI K선 (3봉 SMA of raw stochrsi)
+    "stoch_rsi_d",       # StochRSI D선 (3봉 SMA of K)
+    "stoch_rsi_cross",   # K가 D를 상향 돌파 → 1 (단기 모멘텀 전환)
+    # ── 코인 ORB (UTC 00:00 기준, 첫 30분 범위) ──────────────────────
+    "coin_orb_pos",      # (close - 00:00 저가) / (고가 - 저가): 0~1 위치
+    "coin_orb_bull",     # 코인 ORB 상단 돌파 → 1
+    # ── EMA 5-8-13 Ribbon ────────────────────────────────────────────
+    "ema_align_score",   # EMA5>EMA8>EMA13 순 정렬 점수 (0~3, 3=완전 정배열)
+    "ema_spread_ratio",  # (EMA5 - EMA13) / EMA13: ribbon 펼침 강도
+    # ── RSI 히든 다이버전스 ──────────────────────────────────────────
+    "hidden_bull_div",   # RSI 저점↑ + 가격 저점↓ → 숨은 상승 다이버전스 (추세 지속)
+    "hidden_bear_div",   # RSI 고점↓ + 가격 고점↑ → 숨은 하락 다이버전스 (추세 지속)
+    # ── Volume Profile POC 거리 ──────────────────────────────────────
+    "dist_to_poc_pct",   # (close / POC가격 - 1): 60봉 거래량 가중 POC 대비 거리
+    "above_poc",         # close > POC → 1 (지지 vs 저항 판단)
+    # ── 롱/숏 비율 (코인 전용, BTC 선물 기준) ───────────────────────
+    "ls_ratio",          # 롱 계좌 비율 (0.5=균등, >0.65=과도한 롱)
+    "ls_extreme_long",   # ls_ratio > 0.65 → 1 (과열 롱, 역추세 신호)
+    "ls_extreme_short",  # ls_ratio < 0.35 → 1 (과열 숏, 반등 신호)
 ]
 
 
@@ -153,6 +179,7 @@ def compute_features(
     oi_hist: list[dict] | None = None,
     taker_hist: list[dict] | None = None,
     ticker: str = "",                          # 뉴스 감성 조회용 종목 코드
+    ls_hist: list[dict] | None = None,         # 바이낸스 글로벌 L/S 비율 히스토리
 ) -> pd.DataFrame:
     """OHLCV 리스트 → Feature DataFrame 변환.
 
@@ -182,6 +209,12 @@ def compute_features(
     macd            = trend.MACD(close, window_fast=12, window_slow=26, window_sign=9)
     df["macd_diff"] = macd.macd_diff()
     df["stoch_rsi"] = momentum.StochRSIIndicator(close, window=14).stochrsi()
+    # ── StochRSI K/D (3봉 SMA 평활, 교차 신호) ─────────────────────
+    _srsi_k = df["stoch_rsi"].rolling(3, min_periods=1).mean()
+    _srsi_d = _srsi_k.rolling(3, min_periods=1).mean()
+    df["stoch_rsi_k"]    = _srsi_k.fillna(0.5)
+    df["stoch_rsi_d"]    = _srsi_d.fillna(0.5)
+    df["stoch_rsi_cross"] = ((_srsi_k > _srsi_d) & (_srsi_k.shift(1) <= _srsi_d.shift(1))).astype(float)
     df["williams_r"]= momentum.WilliamsRIndicator(high, low, close, lbp=14).williams_r()
     df["mfi_14"]    = volume.MFIIndicator(high, low, close, vol, window=14).money_flow_index()
     df["roc_10"]    = momentum.ROCIndicator(close, window=10).roc()
@@ -190,6 +223,26 @@ def compute_features(
     df["ret_5d"]    = close.pct_change(5)
     df["ret_10d"]   = close.pct_change(10)
     df["ret_20d"]   = close.pct_change(20)
+
+    # ── RSI 히든 다이버전스 (20봉 lookback) ─────────────────────────
+    try:
+        _rsi_hd = df["rsi_9"]
+        _lb     = 20
+        _price_low_prev  = low.rolling(_lb).min().shift(1)
+        _rsi_low_prev    = _rsi_hd.rolling(_lb).min().shift(1)
+        _price_high_prev = high.rolling(_lb).max().shift(1)
+        _rsi_high_prev   = _rsi_hd.rolling(_lb).max().shift(1)
+        # 숨은 상승: 가격 저점↓ + RSI 저점↑ + RSI < 50 (하락 후 추세 지속 예상)
+        df["hidden_bull_div"] = (
+            (low < _price_low_prev) & (_rsi_hd > _rsi_low_prev) & (_rsi_hd < 50)
+        ).astype(float)
+        # 숨은 하락: 가격 고점↑ + RSI 고점↓ + RSI > 50 (상승 후 추세 지속 예상)
+        df["hidden_bear_div"] = (
+            (high > _price_high_prev) & (_rsi_hd < _rsi_high_prev) & (_rsi_hd > 50)
+        ).astype(float)
+    except Exception:
+        df["hidden_bull_div"] = 0.0
+        df["hidden_bear_div"] = 0.0
 
     # ── 추세 ──────────────────────────────────────────────────────
     ma5  = trend.SMAIndicator(close, window=5).sma_indicator()
@@ -215,6 +268,15 @@ def compute_features(
     ema9   = trend.EMAIndicator(close, window=9).ema_indicator()
     ema21  = trend.EMAIndicator(close, window=21).ema_indicator()
     df["ema9_cross_ema21"] = (ema9 > ema21).astype(float)
+
+    # ── EMA 5-8-13 Ribbon (단기 추세 정렬 강도) ─────────────────────
+    _ema5  = trend.EMAIndicator(close, window=5).ema_indicator()
+    _ema8  = trend.EMAIndicator(close, window=8).ema_indicator()
+    _ema13 = trend.EMAIndicator(close, window=13).ema_indicator()
+    df["ema_align_score"]  = (
+        (_ema5 > _ema8).astype(int) + (_ema8 > _ema13).astype(int) + (_ema5 > _ema13).astype(int)
+    ).astype(float)
+    df["ema_spread_ratio"] = ((_ema5 - _ema13) / _ema13.replace(0, np.nan)).fillna(0.0)
 
     # ── VWAP (20봉 롤링) + ±2σ 밴드 ─────────────────────────────
     typical_price = (high + low + close) / 3
@@ -254,6 +316,17 @@ def compute_features(
     _bb_wband_ma = _bb_wband.rolling(20).mean()
     df["bb_squeeze"] = (_bb_wband <= _bb_wband_ma * 0.85).astype(float)  # 폭 수축 → 돌파 대기
 
+    # ── BB + Keltner Channel 이중 스퀴즈 (LazyBear 방식) ────────────
+    # KC: EMA20 ± ATR×1.5 — BB가 KC 안에 들어올수록 강한 돌파 임박 신호
+    _kc_mid    = trend.EMAIndicator(close, window=20).ema_indicator()
+    _kc_upper  = _kc_mid + atr * 1.5
+    _kc_lower  = _kc_mid - atr * 1.5
+    _bb_upper  = bb.bollinger_hband()
+    _bb_lower  = bb.bollinger_lband()
+    _squeeze   = (_bb_upper <= _kc_upper) & (_bb_lower >= _kc_lower)
+    df["bb_inside_kc"]    = _squeeze.astype(float)
+    df["kc_squeeze_bars"] = _squeeze.astype(int).rolling(20, min_periods=1).sum().clip(0, 20).astype(float)
+
     # ── 거래량 ────────────────────────────────────────────────────
     vol_ma20          = vol.rolling(20).mean()
     df["vol_ratio"]   = vol / vol_ma20.replace(0, np.nan)
@@ -264,6 +337,32 @@ def compute_features(
     obv_ma5           = obv.rolling(5).mean()
     df["obv_change"]  = (obv - obv_ma5) / (obv_ma5.abs() + 1e-9)
     df["cmf_20"]      = volume.ChaikinMoneyFlowIndicator(high, low, close, vol, window=20).chaikin_money_flow()
+
+    # ── Volume Profile POC (60봉 거래량 최다 가격대 대비 현재가 거리) ──
+    try:
+        _poc_win  = 60
+        _n_bins   = 20
+        _poc_arr  = np.full(len(df), np.nan)
+        _c_arr    = close.values
+        _v_arr    = vol.values
+        for _pi in range(_poc_win - 1, len(df)):
+            _sc = _c_arr[_pi - _poc_win + 1 : _pi + 1]
+            _sv = _v_arr[_pi - _poc_win + 1 : _pi + 1]
+            _lo_p, _hi_p = _sc.min(), _sc.max()
+            if _hi_p <= _lo_p:
+                _poc_arr[_pi] = _sc[-1]
+                continue
+            _bins     = np.linspace(_lo_p, _hi_p, _n_bins + 1)
+            _bidx     = np.clip(np.digitize(_sc, _bins) - 1, 0, _n_bins - 1)
+            _bin_vol  = np.bincount(_bidx, weights=_sv, minlength=_n_bins)
+            _best_bin = int(_bin_vol.argmax())
+            _poc_arr[_pi] = (_bins[_best_bin] + _bins[_best_bin + 1]) / 2
+        _poc_s = pd.Series(_poc_arr, index=df.index)
+        df["dist_to_poc_pct"] = (close / _poc_s.replace(0, np.nan) - 1).fillna(0.0)
+        df["above_poc"]       = (close > _poc_s).astype(float)
+    except Exception:
+        df["dist_to_poc_pct"] = 0.0
+        df["above_poc"]       = 0.5
 
     # ── 기타 ──────────────────────────────────────────────────────
     df["cci_20"] = trend.CCIIndicator(high, low, close, window=20).cci()
@@ -492,6 +591,27 @@ def compute_features(
     # 20봉 MA로 평활화 (원시 Taker 비율 노이즈 제거)
     df["taker_ma20"] = df["taker_buy_ratio"].rolling(20, min_periods=5).mean().fillna(0.5)
 
+    # ── 롱/숏 비율 (코인 전용: BTC 선물 기준, else 0.5) ──────────────
+    if ls_hist:
+        try:
+            _ls = pd.DataFrame(ls_hist)
+            _ls["ts"] = pd.to_datetime(
+                _ls["timestamp"].astype(float), unit="ms", utc=True
+            ).dt.tz_convert("Asia/Seoul").dt.tz_localize(None)
+            _ls = _ls.set_index("ts").sort_index()
+            _lr = _ls["longAccount"].astype(float).reindex(df.index, method="ffill").fillna(0.5)
+            df["ls_ratio"]         = _lr
+            df["ls_extreme_long"]  = (_lr > 0.65).astype(float)
+            df["ls_extreme_short"] = (_lr < 0.35).astype(float)
+        except Exception:
+            df["ls_ratio"]         = 0.5
+            df["ls_extreme_long"]  = 0.0
+            df["ls_extreme_short"] = 0.0
+    else:
+        df["ls_ratio"]         = 0.5
+        df["ls_extreme_long"]  = 0.0
+        df["ls_extreme_short"] = 0.0
+
     # ── 헤이킨 아시 (재귀 계산: ha_open = (prev_ha_open + prev_ha_close) / 2) ──
     _ha_close  = (open_ + high + low + close) / 4
     _hc_arr    = _ha_close.values
@@ -532,6 +652,18 @@ def compute_features(
     df["ofi_5"]    = (_vol_delta.rolling(5).sum()  / _vr5).fillna(0.0)
     df["ofi_20"]   = (_vol_delta.rolling(20).sum() / _vr20).fillna(0.0)
     df["cvd_ratio"] = (_vol_delta.rolling(60).sum() / _vr60).fillna(0.0)
+
+    # ── CVD 다이버전스 (가격 방향 vs 누적 볼륨 델타 방향 불일치) ────
+    _cvd_dir_5  = np.sign(df["cvd_ratio"] - df["cvd_ratio"].shift(5))
+    _cvd_dir_20 = np.sign(df["cvd_ratio"] - df["cvd_ratio"].shift(20))
+    _price_dir_5  = np.sign(close.pct_change(5))
+    _price_dir_20 = np.sign(close.pct_change(20))
+    df["cvd_div_5"]  = (
+        (_price_dir_5 != _cvd_dir_5) & (_price_dir_5 != 0) & (_cvd_dir_5 != 0)
+    ).astype(float)
+    df["cvd_div_20"] = (
+        (_price_dir_20 != _cvd_dir_20) & (_price_dir_20 != 0) & (_cvd_dir_20 != 0)
+    ).astype(float)
 
     # ── Yang-Zhang 변동성 (overnight gap 포함, GK 대비 14배 효율) ──
     # 주식 overnight 갭 + crypto micro-gap 모두 포착 (GK는 연속 시장 가정)
@@ -621,19 +753,42 @@ def compute_features(
             # intraday_reversal: 오전 강세(+1%↑) AND 오후 마감 구간 → 반전 신호
             _closing_zone = _h_idx >= 14
             df["intraday_reversal"] = ((df["ret_since_open"] > 0.01) & _closing_zone).astype(float)
+            # 주식: 코인 ORB 피처 → 중립값 (try 성공 시)
+            df["coin_orb_pos"]  = 0.5
+            df["coin_orb_bull"] = 0.0
         except Exception:
             df = pd.concat([df, pd.DataFrame({
                 "orb_position": 0.5, "orb_breakout": 0.0, "orb_high_pct": 0.0,
                 "orb_vol_confirm": 0.0,
                 "session_phase": 1.0, "ret_since_open": 0.0, "intraday_reversal": 0.0,
             }, index=df.index)], axis=1)
+        # 주식: 코인 ORB 피처 → 중립값 (try/except 공통)
+        df["coin_orb_pos"]  = 0.5
+        df["coin_orb_bull"] = 0.0
     else:
-        # 코인: 해당 없음 → 중립값
+        # 코인: 주식 ORB 피처 → 중립값, 코인 ORB (UTC 00:00 기준) 별도 계산
         df = pd.concat([df, pd.DataFrame({
             "orb_position": 0.5, "orb_breakout": 0.0, "orb_high_pct": 0.0,
             "orb_vol_confirm": 0.0,
             "session_phase": 1.0, "ret_since_open": 0.0, "intraday_reversal": 0.0,
         }, index=df.index)], axis=1)
+
+        # ── 코인 ORB (UTC 00:00 기준 첫 30분 범위) ──────────────────
+        try:
+            _utc_h_c  = (df.index.hour - 9) % 24    # KST naive → UTC 근사
+            _utc_m_c  = df.index.minute
+            _date_utc = (df.index - pd.Timedelta(hours=9)).date
+            _c_orb_mask = (_utc_h_c == 0) & (_utc_m_c < 30)
+            _corb_h = df["high"].where(_c_orb_mask).groupby(_date_utc).transform("max")
+            _corb_l = df["low"].where(_c_orb_mask).groupby(_date_utc).transform("min")
+            _corb_h = _corb_h.groupby(_date_utc).ffill()
+            _corb_l = _corb_l.groupby(_date_utc).ffill()
+            _corb_range = (_corb_h - _corb_l).replace(0, np.nan)
+            df["coin_orb_pos"]  = ((close - _corb_l) / _corb_range).clip(0, 2).fillna(0.5)
+            df["coin_orb_bull"] = (close > _corb_h.fillna(0)).astype(float)
+        except Exception:
+            df["coin_orb_pos"]  = 0.5
+            df["coin_orb_bull"] = 0.0
 
     # 뉴스 감성 점수 (캐시된 값, 없으면 0.0)
     try:
