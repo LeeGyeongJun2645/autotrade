@@ -1125,14 +1125,14 @@ class SimAgent:
         except Exception:
             pass
 
-        # ── MTF 정렬 필터: 3개 타임프레임 모두 불일치 시 신호 억제 ───
-        # 펀딩률은 predict_live / predict_ensemble 에서 라이브 데이터로 처리 (이중 적용 방지)
+        # ── MTF 정렬 필터: 3개 타임프레임 모두 하락 정렬 시 하드 차단 ───
+        # mtf_align==0: 15분·1시간·4시간 전부 하락 정렬 → 단기 반등이라도 매수 금지
         try:
             if "mtf_align" in full_df.columns:
                 _align = float(full_df["mtf_align"].iloc[-1])
-                if _align == 0.0:  # 15분·1시간·4시간 방향 전부 불일치
-                    prob = max(0.01, min(0.99, prob * 0.85))
-                elif _align == 3.0:  # 전부 일치 → 강화
+                if _align == 0.0:  # 전 타임프레임 하락 정렬 → 하드 차단
+                    return "hold", round(prob * 0.5, 4)
+                elif _align == 3.0:  # 전부 상승 정렬 → 강화
                     prob = max(0.01, min(0.99, prob * 1.08))
         except Exception:
             pass
