@@ -191,7 +191,15 @@ class SimAgent:
         self._cached_ls_hist: list[dict] = []         # BTC 글로벌 L/S 비율 히스토리 캐시 (코인 전용)
         self._last_ohlcv_cache: dict[str, list[dict]] = {}  # 종목별 최신 OHLCV (continuation_score 용)
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
-        self._trailing_mode: set[str] = set()    # 트레일링 활성화된 종목
+        self._trailing_mode: set[str] = set()
+        # ── MFE/MAE 기반 동적 TP 배수 ─────────────────────────────────
+        self._dynamic_tp_mult: float = 3.0       # R비율 분석 후 재학습 시 자동 갱신 (2.5~3.5)
+        # ── 부분 청산 Scale-out (ATR×1.5 도달 시 40% 매도) ────────────
+        self._partial_tp_price: dict[str, float] = {}  # 종목별 1차 TP 목표가
+        self._partial_tp_done: set[str] = set()         # 1차 청산 완료 종목 추적
+        # ── SHAP 피처 가지치기 ──────────────────────────────────────────
+        self._low_importance_feats: set[str] = set()   # 중요도 0.5% 미만 피처 (재학습 시 갱신)
+        self._trained_feature_names: list[str] = []   # 현재 모델이 학습된 피처 목록 (predict 일관성)
         self._consecutive_losses: int = 0        # 연속 손실 카운터 → 5회 시 재학습 트리거
         self.needs_retrain: bool = False          # 즉시 재학습 요청 플래그
         self._daily_retrain_count: int = 0       # 당일 비상재학습 횟수 (최대 3회)
@@ -422,7 +430,9 @@ class SimAgent:
                 if (self.market == "coin" and "adx_14" in feat_df.columns)
                 else None
             )
-            feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
+            _train_cols = [c for c in self.feature_names
+                           if c in feat_df.columns and c not in self._low_importance_feats]
+            feat_df = feat_df[_train_cols].dropna()
             if _adx_mask is not None:
                 feat_df = feat_df[_adx_mask.reindex(feat_df.index, fill_value=False)]
             # ATR도 feat_df 인덱스에 맞춰 정렬
@@ -619,6 +629,29 @@ class SimAgent:
                 fit_kwargs["verbose"] = False
             clf.fit(X_train_s, y_train, **fit_kwargs)
 
+            # ── SHAP 피처 중요도 분석 (built-in importances, shap 라이브러리 불필요) ──
+            try:
+                _active_feats = [c for c in self.feature_names if c in feat_df.columns]
+                _imp  = clf.feature_importances_
+                _tot  = _imp.sum()
+                if _tot > 0 and len(_imp) == len(_active_feats):
+                    _imp_pct = _imp / _tot
+                    _imp_map = dict(zip(_active_feats, _imp_pct))
+                    _sorted_imp = sorted(_imp_map.items(), key=lambda x: x[1], reverse=True)
+                    logger.info("[%s] 피처중요도 TOP5: %s | BOTTOM5: %s",
+                                self.agent_id,
+                                [(k, f"{v:.1%}") for k, v in _sorted_imp[:5]],
+                                [(k, f"{v:.2%}") for k, v in _sorted_imp[-5:]])
+                    # 0.5% 미만 피처 → 저중요도 목록 갱신 (최소 30개 남기도록 제한)
+                    _low = {k for k, v in _imp_map.items() if v < 0.005}
+                    if len(_active_feats) - len(_low) >= 30:
+                        self._low_importance_feats = _low
+                        if _low:
+                            logger.debug("[%s] 저중요도 피처 %d개 다음 학습 제외 예정",
+                                         self.agent_id, len(_low))
+            except Exception:
+                pass
+
             # Purged Walk-Forward 검증 — 정밀도(승률) 기반으로 평가
             if X_val is not None and len(X_val) > 0:
                 _val_s    = scaler.transform(X_val)
@@ -668,6 +701,7 @@ class SimAgent:
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.75)
             self._model = clf
             self._scaler = scaler
+            self._trained_feature_names = list(feat_df.columns)  # predict() 피처 일관성 보장
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
             self.save_model()
             logger.warning("[%s] 모델 학습 완료 (%d샘플, X_train=%d, thr=%.2f)", self.agent_id, len(X), len(X_train), self.buy_threshold)
@@ -1096,7 +1130,11 @@ class SimAgent:
                 self._last_vol_ratio = float(full_df["vol_ratio"].iloc[-1])
             if "adx_14" in full_df.columns:
                 self._last_adx_14 = float(full_df["adx_14"].iloc[-1])
-            feat_df = full_df[[c for c in self.feature_names if c in full_df.columns]].dropna()
+            # 학습 시 사용된 피처 목록 우선 사용 (SHAP 가지치기 일관성)
+            _pred_cols = (self._trained_feature_names
+                          if self._trained_feature_names
+                          else [c for c in self.feature_names if c in full_df.columns])
+            feat_df = full_df[[c for c in _pred_cols if c in full_df.columns]].dropna()
             if feat_df.empty:
                 return "hold", 0.5
             X_last_df = feat_df.iloc[[-1]]
@@ -1334,8 +1372,32 @@ class SimAgent:
                     self.needs_retrain = True  # 5연속 손실 → 즉시 재학습 (하루 3회 제한)
         self._peak_price.pop(ticker, None)
         self._trailing_mode.discard(ticker)
+        self._partial_tp_price.pop(ticker, None)
+        self._partial_tp_done.discard(ticker)
         now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         trade = AgentTrade(self.agent_id, ticker, "SELL", price, pos.qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
+        self._push_recent(trade)
+        return trade
+
+    def virtual_partial_sell(self, ticker: str, price: float, ratio: float = 0.40) -> AgentTrade | None:
+        """부분 청산 (Scale-out): ratio 비율만큼 매도하고 나머지는 계속 보유.
+
+        잔량 pos.qty * (1-ratio) 가 _positions에 남으므로 이후 full sell 가능.
+        """
+        pos = self._positions.get(ticker)
+        if pos is None:
+            return None
+        sell_qty = pos.qty * ratio
+        if sell_qty <= 0:
+            return None
+        actual_sell = price * 0.9995
+        proceeds    = sell_qty * actual_sell
+        profit_rate = (actual_sell - pos.entry_price) / pos.entry_price
+        self._balance += proceeds
+        pos.qty -= sell_qty             # 잔량 갱신 (포지션 유지)
+        self._partial_tp_done.add(ticker)
+        now   = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
+        trade = AgentTrade(self.agent_id, ticker, "SELL_PARTIAL", price, sell_qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
         self._push_recent(trade)
         return trade
 

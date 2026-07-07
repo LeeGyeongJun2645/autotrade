@@ -179,6 +179,15 @@ def _set_cooldown(symbol: str, agent) -> None:
     agent._cooldown_tickers[symbol] = until
 
 
+def _compute_r_ratio(trades: list[dict]) -> float:
+    """최근 거래 결과에서 R비율(avg_win / avg_loss) 계산."""
+    wins  = [t["profit_rate"] for t in trades if (t.get("profit_rate") or 0) > 0]
+    losses = [abs(t["profit_rate"]) for t in trades if (t.get("profit_rate") or 0) < 0]
+    if not wins or not losses:
+        return 1.0
+    return (sum(wins) / len(wins)) / (sum(losses) / len(losses))
+
+
 _DAILY_LOSS_LIMIT = 0.03  # 일일 손실 한도 3% (에이전트별 독립 서킷 브레이커)
 
 def _is_daily_loss_exceeded(agent) -> bool:
@@ -260,6 +269,8 @@ class TradingScheduler:
         # DCA 분할매수 상태: {symbol: {"stage": 1~3, "total_budget": float}}
         # stage 1=1차완료, 2=2차완료, 3=3차완료(전량매수)
         self._dca_state: dict[str, dict] = {}
+        # 실제 포지션 부분 청산 상태 (Upbit/KIS 실물)
+        self._partial_tp_state: dict[str, dict] = {}  # ticker → {"target": price, "done": bool}
         # 매수 진행 중 심볼 추적 (TOCTOU 중복매수 방지: 주문 후 포지션 등록 전 간격 보호)
         self._pending_buys: set[str] = set()
         # KOSPI MIM (Morning Intraday Momentum): 개장 30분 방향 → 당일 필터
@@ -409,6 +420,7 @@ class TradingScheduler:
             logger.warning("[좀비포지션] %s DB에 있으나 실잔고 없음 → 제거", symbol)
             async with self._lock:
                 self._positions.pop(symbol, None)
+                self._partial_tp_state.pop(symbol, None)
             await delete_position(symbol)
             sim_log.push(symbol, f"좀비 포지션 제거 (서버 재시작 사이 청산된 것으로 추정)", "SELL")
 
@@ -753,6 +765,7 @@ class TradingScheduler:
                 _saved_dca = self._dca_state.get(symbol)
                 self._positions.pop(symbol)
                 self._dca_state.pop(symbol, None)
+                self._partial_tp_state.pop(symbol, None)
 
             qty = max(1, round(position.qty))
             await kis.place_sell_order(symbol, qty)
@@ -875,6 +888,11 @@ class TradingScheduler:
             if exit_signal.should_exit:
                 await self._execute_upbit_sell(ticker, position, exit_signal.reason, current_price)
                 return
+
+            # ── 부분 청산 Scale-out: ATR×1.5 도달 시 40% 선익절 ──
+            _pts = self._partial_tp_state.get(ticker)
+            if (_pts and not _pts["done"] and current_price >= _pts["target"]):
+                await self._execute_upbit_partial_sell(ticker, position, current_price)
 
             # OI 극단값 강제 청산 (롱 쏠림 + 고펀딩비 = 강제청산 폭발 위험)
             # OI 5봉 변화율 > 3% AND 펀딩비 > 0.003 (0.3%) → 롱 포지션 미리 청산
@@ -1011,6 +1029,13 @@ class TradingScheduler:
                 async with self._lock:
                     self._positions[ticker] = position
                     self._dca_state[ticker] = {"stage": 1, "total_budget": total_budget}
+                    # 부분 청산 1차 목표가 (ATR×1.5)
+                    if sl_rate is not None and sl_rate != 0:
+                        _atr_est = abs(sl_rate) / 1.5  # sl_rate = -(atr*1.5) 역산
+                        self._partial_tp_state[ticker] = {
+                            "target": current_price * (1 + _atr_est * 1.5),
+                            "done": False,
+                        }
                 await upsert_position(ticker, "UPBIT", position)
                 await insert_trade(ticker, "UPBIT", "BUY", qty, current_price, strategy_name, signal.reason)
                 sim_log.push(ticker, f"매수 체결 {qty:.6f} @ {current_price:,.0f}원 | 손절 {position.stop_loss_price:,.0f}", "BUY")
@@ -1066,6 +1091,40 @@ class TradingScheduler:
         except Exception:
             logger.exception("[Upbit][%s] DCA %d차 추가매수 실패", ticker, next_stage)
 
+    async def _execute_upbit_partial_sell(
+        self,
+        ticker: str,
+        position: Position,
+        current_price: float,
+    ) -> None:
+        """Upbit 실제 포지션 부분 청산 (40%). ATR×1.5 도달 시 선익절, 나머지 홀딩."""
+        try:
+            sell_qty = position.qty * 0.40
+            if sell_qty * current_price < 5_000:
+                return
+            await upbit.place_sell_order(ticker, sell_qty)
+            profit_rate = (current_price - position.entry_price) / position.entry_price
+            async with self._lock:
+                if ticker not in self._positions:
+                    return
+                position.qty -= sell_qty
+                self._positions[ticker] = position
+                _pts = self._partial_tp_state.get(ticker)
+                if _pts:
+                    _pts["done"] = True
+            await upsert_position(ticker, "UPBIT", position)
+            await insert_trade(ticker, "UPBIT", "SELL_PARTIAL", sell_qty, current_price,
+                               position.strategy, f"부분청산40% +{profit_rate*100:.1f}%")
+            sim_log.push(ticker,
+                f"[부분청산40%] {sell_qty:.6f} @ {current_price:,.0f}원 +{profit_rate*100:.1f}%", "BUY")
+            await telegram.notify_message(
+                f"🔀 <b>부분청산(40%)</b> {ticker}\n"
+                f"매도: {sell_qty:.6f} @ {current_price:,.0f}원\n"
+                f"수익: +{profit_rate*100:.1f}% | 잔여 {position.qty:.6f} 홀딩 중"
+            )
+        except Exception:
+            logger.exception("[Upbit][%s] 부분청산 실패", ticker)
+
     async def _execute_upbit_sell(
         self,
         ticker: str,
@@ -1084,6 +1143,7 @@ class TradingScheduler:
                 _saved_dca_upbit = self._dca_state.get(ticker)
                 self._positions.pop(ticker)
                 self._dca_state.pop(ticker, None)
+                self._partial_tp_state.pop(ticker, None)
 
             await upbit.place_sell_order(ticker, position.qty)
             _order_placed = True  # 이 시점부터 복구 불가
@@ -1495,7 +1555,7 @@ class TradingScheduler:
         if atr_pct > 0.001:
             STOP_LOSS   = max(-(atr_pct * 1.5), -0.005)  # ATR×1.5, 최소 -0.5%
             STOP_LOSS   = max(STOP_LOSS, -0.020)          # 상한 -2.0% (대손절 방지: 분석상 최악 -3.67%)
-            tp_base     = max(atr_pct * 3.0, 0.012)      # ATR×3.0 (리서치: BTC 백테스트 PF 1.72 최적 배수)
+            tp_base     = max(atr_pct * agent._dynamic_tp_mult, 0.012)  # 동적 배수 (R비율 기반, 기본 3.0)
         else:
             STOP_LOSS   = -0.020
             tp_base     = 0.05  # 4%→5% (R:R 개선)
@@ -1564,6 +1624,25 @@ class TradingScheduler:
                         signal = "sell"
                         sim_log.push(agent.agent_id, f"[알파소멸] {symbol} {unreal*100:.1f}% 240분 보유 강제청산 @ {price:,.0f}원", "SELL")
                     take_profit = max(tp_base * 0.75, sl_abs * 1.3)
+
+                # ── 부분 청산 Scale-out: ATR×1.5 도달 시 40% 선익절, 나머지 ATR×3.0까지 홀딩 ──
+                _partial_target = agent._partial_tp_price.get(symbol, 0)
+                if (_partial_target > 0
+                        and price >= _partial_target
+                        and symbol not in agent._partial_tp_done):
+                    _ptrade = agent.virtual_partial_sell(symbol, price, 0.40)
+                    if _ptrade:
+                        await db.execute(
+                            "INSERT INTO agent_trades (agent_id, ticker, action, price, qty,"
+                            " entry_price, profit_rate, balance, traded_at)"
+                            " VALUES (?,?,?,?,?,?,?,?,?)",
+                            (_ptrade.agent_id, _ptrade.ticker, _ptrade.action, _ptrade.price,
+                             _ptrade.qty, _ptrade.entry_price, _ptrade.profit_rate,
+                             _ptrade.balance, _ptrade.traded_at),
+                        )
+                        sim_log.push(agent.agent_id,
+                            f"[부분청산40%] {symbol} @ {price:,.0f}원 +{(_ptrade.profit_rate or 0)*100:.1f}%",
+                            "BUY")
 
                 # 트레일링 스탑: TP의 50% 도달 시 최고점 추적으로 전환 (90%→50%: 수익 조기 보호 + 추가 상승 포착)
                 # 연구: trailing stop이 fixed TP보다 MFE 포착률 높음 (40% 이상 개선)
@@ -1789,6 +1868,9 @@ class TradingScheduler:
                     (trade.agent_id, trade.ticker, trade.price, trade.qty, trade.traded_at),
                 )
                 sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%} / 진입{_portion*100:.0f}%)", "BUY")
+                # 부분 청산 1차 목표가 설정 (ATR×1.5), ATR 없으면 미설정
+                if atr_pct > 0.001:
+                    agent._partial_tp_price[symbol] = price * (1 + atr_pct * 1.5)
 
         elif signal == "sell" and symbol in agent._positions:
             trade = agent.virtual_sell(symbol, price)
@@ -2055,6 +2137,21 @@ class TradingScheduler:
                 logger.exception("[Retrain][%s] 재학습 중 예외", agent.agent_id)
 
         logger.info("[Retrain] 완료: %d/22 에이전트 재학습 (AI01-AI20 + ENSEMBLE_COIN/STOCK)", success)
+
+        # ── MFE/MAE 기반 동적 TP 배수 갱신 (R비율 분석) ─────────────────────
+        for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
+            _trades_for_r = agent_trade_results.get(agent.agent_id, [])
+            if len(_trades_for_r) >= 10:
+                _r = _compute_r_ratio(_trades_for_r)
+                if _r < 1.0:
+                    agent._dynamic_tp_mult = 2.5
+                elif _r < 1.5:
+                    agent._dynamic_tp_mult = 2.75
+                elif _r < 2.5:
+                    agent._dynamic_tp_mult = 3.0
+                else:
+                    agent._dynamic_tp_mult = 3.5
+                logger.debug("[Retrain][%s] R비율=%.2f → TP배수=%.2f", agent.agent_id, _r, agent._dynamic_tp_mult)
 
         # ── Meta-Labeling 2차 모델 학습 (buy_prob 데이터 30개+ 시 자동 학습) ──
         meta_success = 0
