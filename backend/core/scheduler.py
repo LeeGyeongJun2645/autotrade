@@ -1678,11 +1678,12 @@ class TradingScheduler:
                 await db.execute(
                     """INSERT INTO agent_trades
                        (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance,
-                        buy_prob, buy_adx, buy_vol_ratio)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        buy_prob, buy_adx, buy_vol_ratio, traded_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty,
                      trade.entry_price, trade.profit_rate, trade.balance,
-                     round(prob, 4), round(agent._last_adx_14, 2), round(agent._last_vol_ratio, 3)),
+                     round(prob, 4), round(agent._last_adx_14, 2), round(agent._last_vol_ratio, 3),
+                     trade.traded_at),
                 )
                 await db.execute(
                     "INSERT OR REPLACE INTO agent_positions (agent_id, ticker, entry_price, qty, entered_at) VALUES (?,?,?,?,?)",
@@ -1695,8 +1696,8 @@ class TradingScheduler:
             if trade:
                 pct = (trade.profit_rate or 0) * 100
                 await db.execute(
-                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance) VALUES (?,?,?,?,?,?,?,?)",
-                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance),
+                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance, traded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance, trade.traded_at),
                 )
                 # 포지션 영속성: 청산 시 제거
                 await db.execute(
