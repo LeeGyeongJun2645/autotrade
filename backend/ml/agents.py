@@ -1137,6 +1137,18 @@ class SimAgent:
         except Exception:
             pass
 
+        # ── 펀딩레이트 극단값 하드게이트 (코인 전용) ──────────────────────
+        # >0.1%(0.001): 롱 과열 → 롱 진입 차단. <-0.05%(-0.0005): 숏 과포화 → 롱 유리
+        try:
+            if "funding_rate" in full_df.columns:
+                _fr = float(full_df["funding_rate"].iloc[-1])
+                if _fr > 0.001:   # 0.1% 이상 = 롱 과열 → 신규 롱 차단
+                    return "hold", round(prob * 0.4, 4)
+                elif _fr < -0.0005:  # -0.05% 이하 = 숏 과포화 → 롱 우호적
+                    prob = min(0.99, prob * 1.05)
+        except Exception:
+            pass
+
         # ── 보유 중 종목 차트 모니터링: RSI 과매수 + MACD 반전 → 조기 익절 ────
         # 연구: RSI>75 + MACD histogram 음전환 = 모멘텀 소진, 수익률 하락 신호
         # 매수 후 차트를 계속 보면서 "다 올라왔다" 싶으면 파는 전략
@@ -1562,7 +1574,12 @@ async def predict_ensemble(
         try:
             from backend.ml.model import _get_fear_greed
             fg = await _get_fear_greed()
-            final_prob = max(0.01, min(0.99, final_prob - fg * 0.04))
+            if fg > 80:    # 극단 탐욕: 과열 → 신규 롱 강한 억제
+                final_prob = max(0.01, final_prob * 0.65)
+            elif fg < 20:  # 극단 공포: 역추세 매수 기회 → 소폭 강화
+                final_prob = min(0.99, final_prob * 1.20)
+            else:           # 일반 구간: 선형 감소 (탐욕일수록 조심)
+                final_prob = max(0.01, min(0.99, final_prob - (fg - 50) * 0.001))
         except Exception:
             pass
         try:

@@ -37,6 +37,8 @@ FEATURE_NAMES = [
     # ── VWAP ──────────────────────────────
     "vwap_ratio",        # (close/VWAP20) - 1 : 현재가 vs 거래량가중평균 괴리율
     "vwap_cross",        # close > VWAP20 이면 1 (추세 방향)
+    "vwap_upper2_dist",  # (close/VWAP+2σ) - 1: 상단 밴드까지 거리 (음수=이미 돌파)
+    "vwap_lower2_dist",  # (close/VWAP-2σ) - 1: 하단 밴드 대비 위치 (양수=지지 위)
     # ── 변동성 ────────────────────────────
     "bb_pband",
     "atr_pct",
@@ -99,6 +101,7 @@ FEATURE_NAMES = [
     "oi_change_pct",        # OI 5봉 변화율 (포지션 쌓임 = 추세 확신)
     "oi_price_diverge",     # OI↑+가격↓=숏증가(약세) / OI↑+가격↑=롱증가(강세) 불일치 여부
     "taker_buy_ratio",      # Taker 매수 비율 (>0.5 = 공격적 매수 우세)
+    "taker_ma20",           # Taker 비율 20봉 MA (원시값 노이즈 제거)
     # ── 헤이킨 아시 (노이즈 제거 캔들, 추세 지속성 포착) ───────────
     "ha_color",             # HA 봉 색깔 (1=양봉, 0=음봉)
     "ha_no_lower_shadow",   # HA 아래꼬리 없음 → 강한 상승 지속 신호
@@ -128,12 +131,17 @@ FEATURE_NAMES = [
     "orb_position",    # (close - orb_low) / (orb_high - orb_low): 09:00~09:30 범위 내 위치 (0~1)
     "orb_breakout",    # 1=상단 돌파 / -1=하단 돌파 / 0=범위 내
     "orb_high_pct",    # close / orb_high - 1: 상단 대비 거리
+    "orb_vol_confirm", # ORB 상단 돌파 AND 거래량 2배 이상 동반 (고확률 ORB 필터)
     # ── 장중 세션 구조 — 주식 전용, 코인=0 ──────────────────────────
     "session_phase",      # 0=개장(~09:30) / 1=오전 / 2=점심 / 3=오후마감 (기존 3개 이진 대비 압축)
     "ret_since_open",     # 당일 시가 대비 현재 수익률 (장중 누적 모멘텀)
     "intraday_reversal",  # 오전 강세(+1%↑) AND 마감 구간 → 반전 패턴 (1=반전 가능성)
     # ── 뉴스 감성 ────────────────────────────────────────────────────
     "news_score",  # 종목 뉴스 감성 점수 -1.0~+1.0 (캐시 없으면 0.0)
+    # ── SuperTrend (동적 ATR 방향 지표) ─────────────────────────────
+    "supertrend_bull",  # 1=상승 추세(SuperTrend 아래), 0=하락 추세(SuperTrend 위)
+    # ── 미국 시장 세션 ────────────────────────────────────────────────
+    "is_us_session",  # UTC 13~21시(KST 22~06시) = 1: 미국 시장 최고 유동성 구간
 ]
 
 
@@ -208,11 +216,16 @@ def compute_features(
     ema21  = trend.EMAIndicator(close, window=21).ema_indicator()
     df["ema9_cross_ema21"] = (ema9 > ema21).astype(float)
 
-    # ── VWAP (20봉 롤링) ─────────────────────────────────────────
+    # ── VWAP (20봉 롤링) + ±2σ 밴드 ─────────────────────────────
     typical_price = (high + low + close) / 3
     vwap_20       = (typical_price * vol).rolling(20).sum() / vol.rolling(20).sum().replace(0, np.nan)
     df["vwap_ratio"] = close / vwap_20 - 1
     df["vwap_cross"] = (close > vwap_20).astype(float)
+    _vwap_std        = typical_price.rolling(20).std().fillna(0)
+    _vwap_upper2     = vwap_20 + 2 * _vwap_std
+    _vwap_lower2     = vwap_20 - 2 * _vwap_std
+    df["vwap_upper2_dist"] = (close / _vwap_upper2.replace(0, np.nan) - 1).fillna(0.0)
+    df["vwap_lower2_dist"] = (close / _vwap_lower2.replace(0, np.nan) - 1).fillna(0.0)
 
     # ── 앵커드 VWAP (당일 시가 기준, 기관 매매 참조선) ──────────
     _tp_av     = (df["high"] + df["low"] + df["close"]) / 3
@@ -476,6 +489,8 @@ def compute_features(
             df["taker_buy_ratio"] = 0.5
     else:
         df["taker_buy_ratio"] = 0.5
+    # 20봉 MA로 평활화 (원시 Taker 비율 노이즈 제거)
+    df["taker_ma20"] = df["taker_buy_ratio"].rolling(20, min_periods=5).mean().fillna(0.5)
 
     # ── 헤이킨 아시 (재귀 계산: ha_open = (prev_ha_open + prev_ha_close) / 2) ──
     _ha_close  = (open_ + high + low + close) / 4
@@ -587,6 +602,10 @@ def compute_features(
             df.loc[close > _orb_h.fillna(0), "orb_breakout"] = 1.0
             df.loc[(close < _orb_l.fillna(float("inf"))) & _orb_l.notna(), "orb_breakout"] = -1.0
             df["orb_high_pct"] = (close / _orb_h.replace(0, np.nan) - 1).fillna(0.0)
+            # ORB 거래량 확인: 상단 돌파 + 거래량 2배 이상 (고확률 진짜 돌파 필터)
+            df["orb_vol_confirm"] = (
+                (df["orb_breakout"] == 1.0) & (vol >= vol_ma20 * 2)
+            ).astype(float)
 
             # session_phase: 0=개장(~09:30) / 1=오전(09:30~11:30) / 2=점심(11:30~13:00) / 3=오후(13:00~)
             _sp = pd.Series(0.0, index=df.index)
@@ -605,12 +624,14 @@ def compute_features(
         except Exception:
             df = pd.concat([df, pd.DataFrame({
                 "orb_position": 0.5, "orb_breakout": 0.0, "orb_high_pct": 0.0,
+                "orb_vol_confirm": 0.0,
                 "session_phase": 1.0, "ret_since_open": 0.0, "intraday_reversal": 0.0,
             }, index=df.index)], axis=1)
     else:
         # 코인: 해당 없음 → 중립값
         df = pd.concat([df, pd.DataFrame({
             "orb_position": 0.5, "orb_breakout": 0.0, "orb_high_pct": 0.0,
+            "orb_vol_confirm": 0.0,
             "session_phase": 1.0, "ret_since_open": 0.0, "intraday_reversal": 0.0,
         }, index=df.index)], axis=1)
 
@@ -621,6 +642,38 @@ def compute_features(
         df["news_score"] = float(_ns) if _ns is not None else 0.0
     except Exception:
         df["news_score"] = 0.0
+
+    # ── SuperTrend (ATR 기반 동적 추세 방향 지표, period=10, mult=3.0) ─
+    try:
+        _st_atr = volatility.AverageTrueRange(high, low, close, window=10).average_true_range().values
+        _hl2    = ((high + low) / 2).values
+        _close_arr = close.values
+        n = len(_close_arr)
+        _basic_up = _hl2 + 3.0 * _st_atr
+        _basic_dn = _hl2 - 3.0 * _st_atr
+        _final_up = _basic_up.copy()
+        _final_dn = _basic_dn.copy()
+        _st_dir   = np.ones(n)
+        for _i in range(1, n):
+            if np.isnan(_st_atr[_i]):
+                _final_up[_i] = _basic_up[_i]
+                _final_dn[_i] = _basic_dn[_i]
+                _st_dir[_i]   = _st_dir[_i - 1]
+                continue
+            _final_up[_i] = _basic_up[_i] if (_basic_up[_i] < _final_up[_i-1] or _close_arr[_i-1] > _final_up[_i-1]) else _final_up[_i-1]
+            _final_dn[_i] = _basic_dn[_i] if (_basic_dn[_i] > _final_dn[_i-1] or _close_arr[_i-1] < _final_dn[_i-1]) else _final_dn[_i-1]
+            if _st_dir[_i-1] == -1.0:
+                _st_dir[_i] = 1.0 if _close_arr[_i] > _final_up[_i] else -1.0
+            else:
+                _st_dir[_i] = -1.0 if _close_arr[_i] < _final_dn[_i] else 1.0
+        df["supertrend_bull"] = pd.Series((_st_dir == 1.0).astype(float), index=df.index)
+    except Exception:
+        df["supertrend_bull"] = 0.5
+
+    # ── 미국 시장 세션 피처 (UTC 13~21시 = KST 22~06시, 최고 유동성) ──
+    # df.index는 KST naive → UTC 변환 후 시간 비교
+    _utc_hour = (df.index.hour - 9) % 24   # KST → UTC 근사 (naive index 기준)
+    df["is_us_session"] = ((_utc_hour >= 13) & (_utc_hour < 21)).astype(float)
 
     _pre_drop = df[FEATURE_NAMES].copy()
     # 전체가 NaN인 컬럼(가격 변동 없는 종목의 bb_pband 등) → 0으로 대체 후 dropna

@@ -1487,7 +1487,7 @@ class TradingScheduler:
         if atr_pct > 0.001:
             STOP_LOSS   = max(-(atr_pct * 1.5), -0.005)  # ATR×1.5, 최소 -0.5%
             STOP_LOSS   = max(STOP_LOSS, -0.020)          # 상한 -2.0% (대손절 방지: 분석상 최악 -3.67%)
-            tp_base     = max(atr_pct * 2.5, 0.010)      # ATR×2.5 (2.0→2.5: MFE 분석 기반 수익률 개선)
+            tp_base     = max(atr_pct * 3.0, 0.012)      # ATR×3.0 (리서치: BTC 백테스트 PF 1.72 최적 배수)
         else:
             STOP_LOSS   = -0.020
             tp_base     = 0.05  # 4%→5% (R:R 개선)
@@ -1583,7 +1583,7 @@ class TradingScheduler:
                 if signal != "sell" and agent.market == "coin" and unreal > 0 and held_min > 20:
                     try:
                         _mkt = _scheduler_mkt_cache.get("ctx")
-                        if _mkt and _mkt.get("btc_dominance", 58.0) > 62.0 and not symbol.startswith("KRW-BTC"):
+                        if _mkt and _mkt.get("btc_dominance", 58.0) > 60.0 and not symbol.startswith("KRW-BTC"):
                             signal = "sell"
                             sim_log.push(agent.agent_id, f"[BTC도미넌스] {symbol} BTC지배율>{_mkt['btc_dominance']:.1f}% 알트이탈→익절", "SELL")
                     except Exception:
