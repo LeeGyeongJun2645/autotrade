@@ -1801,22 +1801,28 @@ class TradingScheduler:
             logger.error("[Retrain] 코인 학습 데이터 수집 전부 실패 — 코인 에이전트 재학습 건너뜀")
 
         # 주식 학습 데이터 수집 (symbol → ohlcv 딕셔너리)
+        # 1순위: _agent_tick 이 누적한 틱 캐시 전체 활용 (재시작 후 25분 이상 경과 시 50종목 데이터)
         _stock_retrain_map: dict[str, list[dict]] = {}
-        for symbol in STOCK_SYMBOLS:
-            # 1순위: 틱 캐시 재사용 (API 콜 0)
-            _cached = self._stock_train_cache.get(f"{symbol}:5", [])
-            if len(_cached) >= 50:
-                _stock_retrain_map[symbol] = list(_cached)
-                logger.info("[Retrain] 주식 학습 데이터(캐시): %s (%d봉)", symbol, len(_cached))
-                continue
-            # 2순위: 캐시 없으면 최소 API 호출 (100봉 = ~17콜)
-            try:
-                _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=100)
-                if len(_tmp) >= 50:
-                    _stock_retrain_map[symbol] = _tmp
-                    logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉)", symbol, len(_tmp))
-            except Exception as e:
-                logger.warning("[Retrain] 주식 OHLCV 수집 실패 (%s): %s", symbol, e)
+        for _k, _v in self._stock_train_cache.items():
+            sym = _k.split(":")[0]
+            if len(_v) >= 50 and sym not in _stock_retrain_map:
+                _stock_retrain_map[sym] = list(_v)
+        if _stock_retrain_map:
+            logger.info("[Retrain] 주식 학습 데이터(틱캐시): %d종목", len(_stock_retrain_map))
+        else:
+            # 2순위: 캐시 없으면(재시작 직후) 대표 종목 API 직접 조회, 최대 3회 재시도
+            for symbol in STOCK_SYMBOLS:
+                for attempt in range(3):
+                    try:
+                        _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=200)
+                        if len(_tmp) >= 50:
+                            _stock_retrain_map[symbol] = _tmp
+                            logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉)", symbol, len(_tmp))
+                            break
+                        await asyncio.sleep(3)
+                    except Exception as e:
+                        logger.warning("[Retrain] 주식 OHLCV 수집 실패 %s (시도%d): %s", symbol, attempt+1, e)
+                        await asyncio.sleep(5)
         # 하위 호환: pool/map 변수 유지 (텔레그램 알림 등에서 참조)
         stock_ohlcv_pool = list(_stock_retrain_map.values())
         stock_ohlcv      = stock_ohlcv_pool[0] if stock_ohlcv_pool else []
@@ -1906,9 +1912,10 @@ class TradingScheduler:
         # 주식 에이전트 재학습용 multi-stock 딕셔너리 (위에서 이미 구성됨)
         _stock_ohlcv_by_sym = _stock_retrain_map
 
-        # ── 에이전트별 재학습 ────────────────────────────────────
+        # ── 에이전트별 재학습 (AI01-AI20 + ENSEMBLE_COIN/ENSEMBLE_STOCK) ───
+        from backend.ml.agents import ENSEMBLE_AGENTS
         success = 0
-        for agent in AGENTS.values():
+        for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
             fr         = coin_funding if agent.market == "coin" else None
             _btc_ref   = btc_train_ohlcv  if agent.market == "coin"  else None
             _kospi_ref = kospi_train_ohlcv if agent.market == "stock" else None
@@ -1947,11 +1954,11 @@ class TradingScheduler:
             except Exception:
                 logger.exception("[Retrain][%s] 재학습 중 예외", agent.agent_id)
 
-        logger.info("[Retrain] 완료: %d/20 에이전트 재학습", success)
+        logger.info("[Retrain] 완료: %d/22 에이전트 재학습 (AI01-AI20 + ENSEMBLE_COIN/STOCK)", success)
 
         # ── Meta-Labeling 2차 모델 학습 (buy_prob 데이터 30개+ 시 자동 학습) ──
         meta_success = 0
-        for agent in AGENTS.values():
+        for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
             _meta_data = agent_trade_results.get(agent.agent_id, [])
             _meta_valid = [t for t in _meta_data if t.get("buy_prob") is not None]
             if len(_meta_valid) >= 30:
@@ -1964,11 +1971,11 @@ class TradingScheduler:
 
         try:
             await telegram.notify_message(
-                f"🔄 <b>AI 일일 재학습 완료 (06:05)</b>\n"
-                f"성공: {success}/20 에이전트\n"
+                f"🔄 <b>AI 일일 재학습 완료</b>\n"
+                f"성공: {success}/22 에이전트 (AI01-AI20 + ENSEMBLE×2)\n"
                 f"Meta-Labeling: {meta_success}개 학습\n"
                 f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv_pool)}종목\n"
-                f"※ 전일 거래내역 sample_weight 반영 → 승률 지속 개선"
+                f"※ 전일 거래내역 sample_weight 반영 → 수익률 지속 개선"
             )
         except Exception:
             pass
