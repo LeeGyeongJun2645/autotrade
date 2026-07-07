@@ -719,7 +719,7 @@ class SimAgent:
                 return None
             return feat_df.values, label.values.astype(int)
         except Exception as e:
-            logger.debug("[%s] _build_labeled_segment 실패: %s", self.agent_id, e)
+            logger.warning("[%s] _build_labeled_segment 실패: %s", self.agent_id, e)
             return None
 
     def train_multi(
@@ -742,7 +742,9 @@ class SimAgent:
                 logger.debug("[%s] train_multi: %s %d샘플", self.agent_id, sym, len(seg[0]))
 
             if not all_X:
-                logger.warning("[%s] train_multi: 유효 종목 없음", self.agent_id)
+                logger.warning("[%s] train_multi: 유효 종목 없음 (입력 %d종목, 각 봉수: %s)",
+                               self.agent_id, len(ohlcv_by_symbol),
+                               {s: len(v) for s, v in ohlcv_by_symbol.items()})
                 return False
 
             X = np.concatenate(all_X, axis=0)
