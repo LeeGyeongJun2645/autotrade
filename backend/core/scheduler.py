@@ -83,11 +83,71 @@ _STOCK_PRICE_BLACKLIST: frozenset[str] = frozenset({
     "198440", "379800",
 })
 
+# ── 글로벌 크로스-에이전트 상태 (모든 에이전트 공유) ──────────────────────
+# 에이전트별 독립 cooldown의 한계: AI01 손절 → AI02~AI22는 즉시 재진입 가능
+# 해결: 모듈 레벨 공유 상태로 전체 에이전트 동시 차단
+
+_GLOBAL_COOLDOWN: dict[str, str] = {}       # ticker → 만료 ISO 시각(KST)
+_GLOBAL_LOSS_COUNT: dict[str, int] = {}      # ticker → 전체 에이전트 손절 누적 횟수
+_TICKER_STATS: dict[str, dict] = {}          # ticker → {"wins":0, "total":0}
+_RECENT_LOSSES: list[tuple] = []             # (ticker, time.time()) — 클러스터 감지용
+
+
+def _set_global_cooldown(symbol: str, minutes: int = 60) -> None:
+    """손절 시 전체 에이전트에 쿨다운 적용 (기본 60분)."""
+    from datetime import datetime as _dt, timedelta as _td
+    until = (_dt.now(KST) + _td(minutes=minutes)).isoformat()
+    _GLOBAL_COOLDOWN[symbol] = until
+    _GLOBAL_LOSS_COUNT[symbol] = _GLOBAL_LOSS_COUNT.get(symbol, 0) + 1
+    # 10회 이상 손절 → 정적 블랙리스트 추가 권고 로그
+    cnt = _GLOBAL_LOSS_COUNT[symbol]
+    if cnt in (5, 10, 20):
+        logger.warning("[글로벌차단] %s 전체 손절 %d회 → 블랙리스트 추가 검토 권고", symbol, cnt)
+
+
+def _is_global_cooldown(symbol: str) -> bool:
+    """전체 에이전트 공유 쿨다운 체크."""
+    until = _GLOBAL_COOLDOWN.get(symbol)
+    if not until:
+        return False
+    from datetime import datetime as _dt
+    if _dt.now(KST).isoformat() < until:
+        return True
+    _GLOBAL_COOLDOWN.pop(symbol, None)
+    return False
+
+
+def _update_ticker_stats(symbol: str, profit: float) -> None:
+    """매도 완료 시 전체 에이전트 집계 티커 승률 업데이트."""
+    s = _TICKER_STATS.setdefault(symbol, {"wins": 0, "total": 0})
+    s["total"] += 1
+    if profit > 0:
+        s["wins"] += 1
+    import time
+    if profit < -0.003:
+        _RECENT_LOSSES.append((symbol, time.time()))
+        if len(_RECENT_LOSSES) > 200:
+            _RECENT_LOSSES.pop(0)
+
+
+def _is_cluster_stop() -> bool:
+    """최근 30분 안에 5회 이상 손절 → 전체 시장 위기 → 신규 매수 전면 차단."""
+    import time
+    now = time.time()
+    recent = [ts for _, ts in _RECENT_LOSSES if now - ts < 1800]
+    return len(recent) >= 5
+
+
 def _is_blacklisted(symbol: str, agent) -> bool:
-    """정적 블랙리스트 + 동적 저승률 차단 (최근 거래 3건 이상 승률 < 25%)."""
+    """정적 블랙리스트 + 글로벌 동적 저승률 차단."""
     if symbol in _TICKER_BLACKLIST:
         return True
-    # 동적 필터: 이 에이전트의 최근 거래에서 해당 종목 승률 확인 (3건→민감도 향상)
+    # 글로벌 집계 기준 동적 차단 (인메모리 30개 한도 문제 해소)
+    s = _TICKER_STATS.get(symbol)
+    if s and s["total"] >= 5:
+        if s["wins"] / s["total"] < 0.25:
+            return True
+    # 폴백: 에이전트 recent_trades 기반 (서버 재시작 직후)
     ticker_sells = [
         t for t in agent.recent_trades
         if t.get("ticker") == symbol and t.get("action") == "SELL"
@@ -100,19 +160,20 @@ def _is_blacklisted(symbol: str, agent) -> bool:
 
 
 def _is_cooldown(symbol: str, agent) -> bool:
-    """손절 후 30분 쿨다운 — 재매수 금지."""
+    """손절 후 30분 쿨다운 (에이전트 개별)."""
     until = agent._cooldown_tickers.get(symbol)
     if not until:
         return False
     from datetime import datetime as _dt
-    if _dt.now(KST).isoformat() < until:
+    now_str = _dt.now(KST).isoformat()
+    if now_str < until:
         return True
     agent._cooldown_tickers.pop(symbol, None)
     return False
 
 
 def _set_cooldown(symbol: str, agent) -> None:
-    """손절 확정 시 해당 종목 30분 쿨다운 등록."""
+    """손절 확정 시 해당 에이전트 30분 쿨다운 등록."""
     from datetime import datetime as _dt, timedelta as _td
     until = (_dt.now(KST) + _td(minutes=30)).isoformat()
     agent._cooldown_tickers[symbol] = until
@@ -1616,14 +1677,37 @@ class TradingScheduler:
             if agent.market == "stock" and _is_stock_open_noise():
                 sim_log.push(agent.agent_id, f"[개장차단] {symbol} 09:00~09:25 노이즈 구간", "INFO")
                 return
-            # 저승률 종목 블랙리스트 (정적 + 동적)
+            # 저승률 종목 블랙리스트 (정적 + 글로벌 동적)
             if _is_blacklisted(symbol, agent):
                 sim_log.push(agent.agent_id, f"[블랙리스트] {symbol} 저승률 종목 차단", "INFO")
                 return
-            # 손절 후 30분 쿨다운 — 재매수 금지
+            # 전체 에이전트 공유 쿨다운 (손절 60분, 크로스-에이전트 재진입 방지)
+            if _is_global_cooldown(symbol):
+                sim_log.push(agent.agent_id, f"[글로벌쿨다운] {symbol} 전체에이전트 차단 중", "INFO")
+                return
+            # 에이전트 개별 쿨다운 (30분)
             if _is_cooldown(symbol, agent):
                 sim_log.push(agent.agent_id, f"[쿨다운] {symbol} 손절 후 30분 재매수 금지", "INFO")
                 return
+            # 클러스터 손절 감지: 30분 안에 5회+ 손절 → 시장 전체 위기 → 신규매수 전면 차단
+            if _is_cluster_stop():
+                sim_log.push(agent.agent_id, f"[클러스터차단] {symbol} 30분내 다중손절 → 전면차단", "WARN")
+                return
+            # 중기 하락추세 하드 게이트: OHLCV 캐시로 16시간 수익률 확인
+            # 코인 전용 (주식은 장 시간 제한으로 OHLCV 부족)
+            if agent.market == "coin":
+                try:
+                    _ohlcv_gate = getattr(agent, "_last_ohlcv_cache", {}).get(symbol) or []
+                    if len(_ohlcv_gate) >= 100:
+                        _c_new = float(_ohlcv_gate[-1]["close"])
+                        _c_old = float(_ohlcv_gate[0]["close"])
+                        _ret_lookback = (_c_new / _c_old - 1) if _c_old > 0 else 0
+                        if _ret_lookback < -0.05:
+                            sim_log.push(agent.agent_id,
+                                f"[하락추세차단] {symbol} {_ret_lookback*100:.1f}% 중기하락 진입금지", "INFO")
+                            return
+                except Exception:
+                    pass
             # 군집매수 방지: 동일 종목을 3개+ 에이전트가 이미 보유 시 차단
             # (BTC 하락 시 동일 종목 전 에이전트 동시 손절 방지)
             # 앙상블 에이전트는 제외 — 이미 다수결 합의(40%+ buy_votes)로 필터링됨
@@ -1713,9 +1797,12 @@ class TradingScheduler:
                 )
                 level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
                 sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
-                # 손절 시 30분 쿨다운 등록 (이중손절 방지)
+                # 매도 통계 업데이트 (글로벌 티커 승률 추적)
+                _update_ticker_stats(symbol, trade.profit_rate or 0)
+                # 손절 시 쿨다운 등록: 에이전트 개별(30분) + 전체 공유(60분)
                 if (trade.profit_rate or 0) < -0.003:
                     _set_cooldown(symbol, agent)
+                    _set_global_cooldown(symbol, 60)
                 # 5연속 손실 시 즉시 재학습 (백그라운드)
                 if agent.needs_retrain:
                     agent.needs_retrain = False

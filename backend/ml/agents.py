@@ -200,6 +200,23 @@ class SimAgent:
     # ── 프로퍼티 ────────────────────────────────────────────────
 
     @property
+    def adaptive_buy_threshold(self) -> float:
+        """연속 손실 횟수에 따라 buy_threshold 동적 상향.
+
+        연속 손실이 쌓일수록 진입 기준이 올라가 과매매를 자동 억제.
+        재학습 완료 후 _consecutive_losses=0 리셋 → 임계값도 정상 복귀.
+        """
+        base = self.buy_threshold
+        n = self._consecutive_losses
+        if n >= 10:
+            return min(base + 0.10, 0.88)
+        elif n >= 5:
+            return min(base + 0.05, 0.82)
+        elif n >= 3:
+            return min(base + 0.03, 0.80)
+        return base
+
+    @property
     def win_rate(self) -> float:
         return self.win_trades / self.total_trades if self.total_trades > 0 else 0.0
 
@@ -1095,6 +1112,19 @@ class SimAgent:
             logger.debug("[%s] predict 예외 — hold 반환", self.agent_id, exc_info=True)
             return "hold", 0.5
 
+        # ── 하락 레짐 하드 억제: regime_state==0 (하락추세) 시 확률 대폭 감소 ──
+        # 이전: ADX>25 = 추세(1)로 분류 → 하락 추세도 BUY 허용 (근본 문제)
+        # 수정: +DI/-DI 기반으로 0=하락/2=상승 분리 → 하락추세에서 BUY 사실상 차단
+        try:
+            if "regime_state" in full_df.columns:
+                _regime_val = float(full_df["regime_state"].iloc[-1])
+                if _regime_val == 0.0:   # 하락 추세 → 확률 대폭 억제
+                    prob = max(0.01, prob * 0.30)
+                elif _regime_val == 2.0: # 상승 추세 → 약간 강화
+                    prob = min(0.99, prob * 1.05)
+        except Exception:
+            pass
+
         # ── MTF 정렬 필터: 3개 타임프레임 모두 불일치 시 신호 억제 ───
         # 펀딩률은 predict_live / predict_ensemble 에서 라이브 데이터로 처리 (이중 적용 방지)
         try:
@@ -1142,7 +1172,7 @@ class SimAgent:
             except Exception:
                 pass
 
-        if prob >= self.buy_threshold:
+        if prob >= self.adaptive_buy_threshold:
             # ── Meta-Labeling 2차 필터 ───────────────────────────────
             # 1차 BUY 신호를 실제로 거래할지 2차 모델이 판단 (False Positive 감소)
             if self._meta_model is not None and self._meta_scaler is not None:
@@ -1238,9 +1268,9 @@ class SimAgent:
             except Exception:
                 pass
 
-        if prob >= self.buy_threshold:
+        if prob >= self.adaptive_buy_threshold:
             return "buy", round(prob, 4)
-        if prob <= (1.0 - self.buy_threshold):
+        if prob <= (1.0 - self.adaptive_buy_threshold):
             return "sell", round(prob, 4)
         return "hold", round(prob, 4)
 

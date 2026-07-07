@@ -321,11 +321,23 @@ def compute_features(
     df["ret_lag_2"]       = close.pct_change(1).shift(2)
     df["ret_lag_3"]       = close.pct_change(1).shift(3)
 
-    # ── 시장 레짐 (0=횡보, 1=추세, 2=고변동) ────────────────────
-    # ADX + BB 폭 기반 결정론적 레짐 감지 (HMM 제거 — 멀티스레드 경고 범람 + CPU 낭비)
-    _regime = pd.Series(0.0, index=df.index)
-    _regime[df["adx_14"] > 25] = 1.0
-    _regime[_bb_wband > _bb_wband_ma * 1.5] = 2.0
+    # ── 시장 레짐 (0=하락추세, 1=횡보, 2=상승추세, 3=고변동) ──────
+    # ADX + DI방향 + MA20 기울기로 방향 있는 레짐 감지
+    # 기존: 추세 강도만 (ADX>25=추세). 문제: 하락 추세도 1로 분류 → 하락장 BUY 허용
+    # 수정: +DI/-DI 비교 + MA20 기울기로 상승/하락 방향 분리
+    _adx_trend = df["adx_14"] > 25
+    try:
+        _adx_pos = trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx_pos()
+        _adx_neg = trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx_neg()
+        _uptrend   = _adx_trend & (_adx_pos > _adx_neg)
+        _downtrend = _adx_trend & (_adx_neg >= _adx_pos)
+    except Exception:
+        _uptrend   = _adx_trend
+        _downtrend = pd.Series(False, index=df.index)
+    _regime = pd.Series(1.0, index=df.index)   # 기본: 횡보
+    _regime[_uptrend]   = 2.0                   # 상승 추세
+    _regime[_downtrend] = 0.0                   # 하락 추세
+    _regime[_bb_wband > _bb_wband_ma * 1.5] = 3.0  # 고변동 (우선)
     df["regime_state"] = _regime
 
     # ── MTF 15분봉 상위 추세 (5분봉 리샘플 → EMA 크로스) ────────
