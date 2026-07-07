@@ -78,6 +78,11 @@ _TICKER_BLACKLIST: frozenset[str] = frozenset({
     "KRW-BIRB",  "KRW-ZBT",  "KRW-AQT",
 })
 
+# inquire-price 500 에러 유발 종목 (ELW, 구조화상품 등 — 거래량 상위 노출되나 API 지원 안됨)
+_STOCK_PRICE_BLACKLIST: frozenset[str] = frozenset({
+    "198440", "379800",
+})
+
 def _is_blacklisted(symbol: str, agent) -> bool:
     """정적 블랙리스트 + 동적 저승률 차단 (최근 거래 3건 이상 승률 < 25%)."""
     if symbol in _TICKER_BLACKLIST:
@@ -1089,6 +1094,8 @@ class TradingScheduler:
             if not stock_symbols:
                 stock_symbols = list(self._kis_symbols) or _STOCK_FALLBACK
                 logger.warning("[AgentTick] 거래량 순위 빈 결과 → 폴백 %d개 사용", len(stock_symbols))
+            # inquire-price 지원 안 되는 ELW/구조화상품 제거
+            stock_symbols = [s for s in stock_symbols if s not in _STOCK_PRICE_BLACKLIST]
 
         # ── 코인 인터벌별 OHLCV + 현재가 병렬 프리패치 ────────────
         coin_intervals = list({a.interval_str for a in AGENTS.values() if a.market == "coin"})

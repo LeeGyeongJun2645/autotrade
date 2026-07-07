@@ -94,6 +94,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     scheduler.start()
     logger.info("AutoTrade 서버 시작 (모드: %s)", settings.trade_mode)
     await telegram.notify_server_start(settings.trade_mode)
+    # 서비스 재시작 후 모델 파일 불일치(피처 변경 등) 에이전트 즉시 재학습
+    from backend.ml.agents import AGENTS
+    _missing = [a.agent_id for a in AGENTS.values() if not a.load_model()]
+    if _missing:
+        logger.warning("[Startup] 모델 없는 에이전트 %d개: %s → 즉시 재학습 시작", len(_missing), _missing)
+        asyncio.create_task(scheduler._daily_retrain())
     yield
     scheduler.stop()
     await telegram.notify_server_stop()

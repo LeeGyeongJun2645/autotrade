@@ -276,12 +276,18 @@ class SimAgent:
                 data = pickle.load(f)
             stored_feats = data.get("feature_names", [])
             if stored_feats and stored_feats != self.feature_names:
-                self._model_path.unlink(missing_ok=True)  # 피처 불일치 → 구 모델 삭제 후 재학습
+                added   = [f for f in self.feature_names if f not in stored_feats]
+                removed = [f for f in stored_feats if f not in self.feature_names]
+                logger.warning(
+                    "[%s] 피처 불일치 → 모델 삭제 (추가=%s, 제거=%s)",
+                    self.agent_id, added[:5], removed[:5],
+                )
+                self._model_path.unlink(missing_ok=True)
                 return False
             loaded = data["model"]
-            # 모델 타입 불일치(예: xgb→lgbm 전환) 시 자동 폐기 → 다음 틱 재학습
             loaded_type = "lgbm" if isinstance(loaded, LGBMClassifier) else "xgb"
             if loaded_type != self.model_type:
+                logger.warning("[%s] 모델 타입 불일치 (%s→%s) → 삭제", self.agent_id, loaded_type, self.model_type)
                 self._model_path.unlink(missing_ok=True)
                 return False
             self._model = loaded
