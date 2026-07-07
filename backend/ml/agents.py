@@ -636,18 +636,18 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        self.buy_threshold = round(min(max(_combined, 0.62), 0.72), 2)
+                        self.buy_threshold = round(min(max(_combined, 0.65), 0.75), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        self.buy_threshold = round(min(max(thr_b, 0.62), 0.72), 2)
+                        self.buy_threshold = round(min(max(thr_b, 0.65), 0.75), 2)
                     logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
                                  self.agent_id, val_acc * 100, self.buy_threshold, prec_b)
 
-            # 최소 임계값 — 주식은 0.55, 코인은 0.62 (0.58은 너무 낮아 과다매수 유발)
-            _min_thr = 0.55 if self.market == "stock" else 0.62
-            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.72)
+            # 최소 임계값 — 수익률 중심: 주식 0.60, 코인 0.65 (낮은 임계값이 손실의 주원인)
+            _min_thr = 0.60 if self.market == "stock" else 0.65
+            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.75)
             self._model = clf
             self._scaler = scaler
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
@@ -845,13 +845,14 @@ class SimAgent:
                     thr_a, _ = _find_best_thr(_va_prob, y_val_a)
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        self.buy_threshold = round(min(max(_combined, 0.58), 0.72), 2)
+                        self.buy_threshold = round(min(max(_combined, 0.60), 0.75), 2)
                 else:
                     if prec_b > 0:
-                        self.buy_threshold = round(min(max(thr_b, 0.58), 0.72), 2)
+                        self.buy_threshold = round(min(max(thr_b, 0.60), 0.75), 2)
 
-            _min_thr = 0.55 if self.market == "stock" else 0.58
-            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.72)
+            # 수익률 중심: 주식 최소 0.60 (기존 0.55에서 상향)
+            _min_thr = 0.60 if self.market == "stock" else 0.65
+            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.75)
             self._model   = clf
             self._scaler  = scaler
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
@@ -1457,11 +1458,19 @@ async def predict_ensemble(
     candidates = [
         a for a in AGENTS.values()
         if a.market == market and a._model is not None
-        # 30거래 이상 쌓인 에이전트 중 승률 40% 미만이면 앙상블에서 제외
+        # 승률 40% 미만 (30거래 이상 검증된 경우)
         and not (a.total_trades >= 30 and a.win_rate < 0.40)
+        # 수익률 -2% 이하 (50거래 이상 검증된 경우) — 손실 에이전트를 앙상블에서 제외
+        and not (a.total_trades >= 50 and a.total_return < -0.02)
     ]
     if not candidates:
-        # 폴백: 저승률이라도 모델 있는 에이전트 전원 사용 (완전 거래 중단 방지)
+        # 폴백: 수익률 기준만 유지, 모델 있는 에이전트 사용
+        candidates = [
+            a for a in AGENTS.values()
+            if a.market == market and a._model is not None
+            and not (a.total_trades >= 50 and a.total_return < -0.03)
+        ]
+    if not candidates:
         candidates = [a for a in AGENTS.values() if a.market == market and a._model is not None]
     if not candidates:
         return "hold", 0.5
@@ -1567,9 +1576,8 @@ async def predict_ensemble(
         except Exception:
             pass
 
-    # ── 임계값: 개별 임계값 가중평균 × 0.95 (앙상블 합의 효과 반영) ─────────────
-    # 여러 에이전트가 동의 → 개별 임계값보다 낮아도 신뢰도 충분
-    avg_thr = (weighted_thr / total_weight) * 0.95 if total_weight > 0 else 0.57
+    # ── 임계값: 개별 임계값 가중평균 × 0.98 (수익률 중심 — 진입 기준 상향)
+    avg_thr = (weighted_thr / total_weight) * 0.98 if total_weight > 0 else 0.62
     vote_ratio = buy_votes / len(candidates) if candidates else 0.0
 
     # 투표 로그 (앙상블 진단용)
@@ -1578,8 +1586,8 @@ async def predict_ensemble(
         market, ticker or "-", final_prob, avg_thr, buy_votes, len(candidates),
     )
 
-    # 매수: 가중확률 임계 초과 OR 에이전트 40% 이상 buy + 확률 ≥ 0.54
-    if final_prob >= avg_thr or (vote_ratio >= 0.40 and final_prob >= 0.54):
+    # 매수: 가중확률 임계 초과 OR 에이전트 50% 이상 buy + 확률 ≥ 0.58 (기존 40%+0.54에서 강화)
+    if final_prob >= avg_thr or (vote_ratio >= 0.50 and final_prob >= 0.58):
         return "buy", round(final_prob, 4)
     if final_prob <= (1.0 - avg_thr):
         return "sell", round(final_prob, 4)
