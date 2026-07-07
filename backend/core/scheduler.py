@@ -1410,12 +1410,13 @@ class TradingScheduler:
                                     _btc_train = _btc_ref
                                 _oi_ref    = btc_oi_hist    if btc_oi_hist    else None
                                 _taker_ref = btc_taker_hist if btc_taker_hist else None
+                                _ls_init   = btc_ls_hist    if btc_ls_hist    else None
                                 async with agent._train_lock:
                                     trained = await asyncio.to_thread(
                                         agent.train, train_ohlcv,
                                         agent._cached_funding_rates or None,
                                         _btc_train, None,
-                                        _oi_ref, _taker_ref,
+                                        _oi_ref, _taker_ref, None, _ls_init,
                                     )
                                 if not trained:
                                     continue
@@ -2125,8 +2126,9 @@ class TradingScheduler:
                         if not data:
                             logger.warning("[Retrain][%s] 코인 학습 데이터 없음, 스킵", agent.agent_id)
                             continue
+                        _ls_ref = btc_ls_train if btc_ls_train else None
                         trained = await asyncio.to_thread(
-                            agent.train, data, fr, _btc_ref, None, _oi_ref, _taker_ref, _trade_res
+                            agent.train, data, fr, _btc_ref, None, _oi_ref, _taker_ref, _trade_res, _ls_ref
                         )
                 if trained:
                     success += 1

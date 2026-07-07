@@ -411,9 +411,11 @@ class SimAgent:
         oi_hist: list[dict] | None = None,
         taker_hist: list[dict] | None = None,
         trade_results: list[dict] | None = None,
+        ls_hist: list[dict] | None = None,
     ) -> bool:
         """분봉 OHLCV로 전용 모델 학습."""
         try:
+            _ls = ls_hist or (self._cached_ls_hist if self.market == "coin" else None)
             feat_df = compute_features(
                 ohlcv_list,
                 funding_rates=funding_rates,
@@ -421,6 +423,7 @@ class SimAgent:
                 kospi_ohlcv=kospi_ohlcv,
                 oi_hist=oi_hist,
                 taker_hist=taker_hist,
+                ls_hist=_ls,
             )
             # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
@@ -719,7 +722,9 @@ class SimAgent:
         try:
             feat_df = compute_features(ohlcv_list, kospi_ohlcv=kospi_ohlcv)
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
-            feat_df = feat_df[[c for c in self.feature_names if c in feat_df.columns]].dropna()
+            _seg_cols = [c for c in self.feature_names
+                         if c in feat_df.columns and c not in self._low_importance_feats]
+            feat_df = feat_df[_seg_cols].dropna()
             if len(feat_df) < 30:
                 return None
             _atr_series = _atr_full.reindex(feat_df.index) if _atr_full is not None else None
@@ -867,6 +872,26 @@ class SimAgent:
                 fit_kwargs["verbose"] = False
             clf.fit(X_train_s, y_train, **fit_kwargs)
 
+            # ── SHAP 피처 중요도 분석 (train_multi 주식 에이전트용) ──
+            try:
+                _tm_feats = [c for c in self.feature_names
+                             if c not in self._low_importance_feats]
+                _tm_imp  = clf.feature_importances_
+                _tm_tot  = _tm_imp.sum()
+                if _tm_tot > 0 and len(_tm_imp) == len(_tm_feats):
+                    _tm_pct  = _tm_imp / _tm_tot
+                    _tm_map  = dict(zip(_tm_feats, _tm_pct))
+                    _tm_srt  = sorted(_tm_map.items(), key=lambda x: x[1], reverse=True)
+                    logger.info("[%s] 피처중요도(multi) TOP5: %s | BOTTOM5: %s",
+                                self.agent_id,
+                                [(k, f"{v:.1%}") for k, v in _tm_srt[:5]],
+                                [(k, f"{v:.2%}") for k, v in _tm_srt[-5:]])
+                    _tm_low = {k for k, v in _tm_map.items() if v < 0.005}
+                    if len(_tm_feats) - len(_tm_low) >= 30:
+                        self._low_importance_feats = _tm_low
+            except Exception:
+                pass
+
             if X_val is not None and len(X_val) > 0:
                 _val_s    = scaler.transform(X_val)
                 _val_prob = clf.predict_proba(_val_s)[:, 1]
@@ -907,6 +932,8 @@ class SimAgent:
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.75)
             self._model   = clf
             self._scaler  = scaler
+            self._trained_feature_names = [c for c in self.feature_names
+                                           if c not in self._low_importance_feats]
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
             self.save_model()
             logger.warning("[%s] train_multi 완료 (%d종목 풀링, %d샘플, thr=%.2f)",
@@ -1610,21 +1637,23 @@ async def predict_ensemble(
             elif agent.win_rate >= 0.50:
                 weight *= 1.2
 
-        # 레짐별 전략 가중치 조정
-        if current_regime == 1:    # 추세장: trend 우대, volume 축소
+        # 레짐별 전략 가중치 조정 (regime_state: 0=하락, 1=횡보, 2=상승, 3=고변동)
+        if current_regime == 2:    # 상승추세: trend 우대, volume 축소
             if agent.feature_set == "trend":
                 weight *= 1.5
             elif agent.feature_set == "volume":
                 weight *= 0.7
-        elif current_regime == 0:  # 횡보장: momentum 우대, trend 축소
+        elif current_regime == 1:  # 횡보: momentum 우대, trend 축소
             if agent.feature_set == "momentum":
                 weight *= 1.4
             elif agent.feature_set == "trend":
                 weight *= 0.8
-        elif current_regime == 2:  # 고변동장: all 우대, 전체 보수적
+        elif current_regime == 3:  # 고변동: all 우대, 전체 보수적
             weight *= 0.7
             if agent.feature_set == "all":
                 weight *= 1.3
+        elif current_regime == 0:  # 하락추세: 전체 보수적 축소 (predict()도 이미 0.3 억제)
+            weight *= 0.5
 
         sig, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist)
         weighted_prob += prob * weight

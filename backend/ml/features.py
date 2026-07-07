@@ -79,7 +79,7 @@ FEATURE_NAMES = [
     # ── 펀딩비 (코인: 8시간 주기 실제값, 주식: 항상 0) ─────────────
     "funding_rate",
     # ── 시장 레짐 & 구조 피처 ────────────────────────────────────────
-    "regime_state",         # 0=횡보, 1=추세, 2=고변동 (ADX+BB폭 복합)
+    "regime_state",         # 0=하락, 1=횡보, 2=상승, 3=고변동 (ADX+DI 기반)
     "anchored_vwap_ratio",  # close / 당일시가VWAP - 1 (기관 기준선)
     "anchored_vwap_cross",  # close > 당일 앵커드VWAP → 1
     "bb_squeeze",           # BB폭 수축 중 → 1 (돌파 직전 포착)
