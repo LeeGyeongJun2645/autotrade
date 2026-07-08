@@ -11,6 +11,9 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo as _ZI
+
+_KST = _ZI("Asia/Seoul")
 
 import httpx
 
@@ -46,7 +49,7 @@ class KISTokenManager:
     @property
     def is_valid(self) -> bool:
         """토큰이 유효한지 확인 (만료 5분 전부터 갱신 대상)."""
-        return self._token is not None and datetime.now() < self._expires_at - timedelta(minutes=5)
+        return self._token is not None and datetime.now(_KST) < self._expires_at - timedelta(minutes=5)
 
     async def get_token(self) -> str:
         """유효한 토큰 반환. 만료 임박 시 자동 갱신.
@@ -77,7 +80,7 @@ class KISTokenManager:
         self._token = data["access_token"]
         # KIS 토큰 유효시간: 86400초(24시간)
         expires_in = int(data.get("expires_in", 86400))
-        self._expires_at = datetime.now() + timedelta(seconds=expires_in)
+        self._expires_at = datetime.now(_KST) + timedelta(seconds=expires_in)
         logger.info("KIS 토큰 발급 완료 (%s). 만료: %s", base, self._expires_at.strftime("%Y-%m-%d %H:%M"))
 
 
@@ -186,7 +189,7 @@ async def get_daily_ohlcv(symbol: str, count: int = 30) -> list[dict[str, Any]]:
         [{"date": str, "open": int, "high": int, "low": int, "close": int, "volume": int}, ...]
         최신 날짜가 리스트 앞에 옴 (내림차순)
     """
-    today = datetime.now()
+    today = datetime.now(_KST)
     # count일치 조회하려면 주말·공휴일 감안해 넉넉히 2배 범위 요청
     start = today - timedelta(days=count * 2)
     data = await _kis_request(

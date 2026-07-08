@@ -131,7 +131,7 @@ FEATURE_NAMES = [
     "orb_position",    # (close - orb_low) / (orb_high - orb_low): 09:00~09:30 범위 내 위치 (0~1)
     "orb_breakout",    # 1=상단 돌파 / -1=하단 돌파 / 0=범위 내
     "orb_high_pct",    # close / orb_high - 1: 상단 대비 거리
-    "orb_vol_confirm", # ORB 상단 돌파 AND 거래량 2배 이상 동반 (고확률 ORB 필터)
+    "orb_vol_confirm", # ORB 상단 돌파 AND 거래량 1.5배 이상 동반 (고확률 ORB 필터)
     # ── 장중 세션 구조 — 주식 전용, 코인=0 ──────────────────────────
     "session_phase",      # 0=개장(~09:30) / 1=오전 / 2=점심 / 3=오후마감 (기존 3개 이진 대비 압축)
     "ret_since_open",     # 당일 시가 대비 현재 수익률 (장중 누적 모멘텀)
@@ -168,6 +168,17 @@ FEATURE_NAMES = [
     "ls_ratio",          # 롱 계좌 비율 (0.5=균등, >0.65=과도한 롱)
     "ls_extreme_long",   # ls_ratio > 0.65 → 1 (과열 롱, 역추세 신호)
     "ls_extreme_short",  # ls_ratio < 0.35 → 1 (과열 숏, 반등 신호)
+    # ── FVG (Fair Value Gap) — ICT/SMC 3캔들 불균형 구조 ──────────────────
+    "fvg_bull",          # 저점[t] > 고점[t-2]: 상승 갭 불균형 (매수 지지 구간)
+    "fvg_bear",          # 고점[t] < 저점[t-2]: 하락 갭 불균형 (매도 저항 구간)
+    # ── VSA (Volume Spread Analysis) ──────────────────────────────────────
+    "vsa_stopping_vol",  # 와이드봉+상단마감+초대량거래 = 하락 클라이막스(반등 신호)
+    "vsa_no_supply",     # 좁은봉+하단마감+저거래량 = 매도 소진(매수 신호)
+    "vsa_upthrust",      # 와이드봉+고점갱신+하단마감+고거래량 = 약세 반전(매도 신호)
+    # ── ICT 런던 킬존 (코인 전용, 주식=0) ───────────────────────────────
+    "is_london_kz",      # KST 15:00~18:00 코인만: 런던 세션 고유동성 구간
+    # ── ICT Premium / Discount Zone ──────────────────────────────────────
+    "premium_discount",  # (close-60봉저점)/(60봉고점-저점): 0=저가구간, 1=고가구간
 ]
 
 
@@ -287,7 +298,7 @@ def compute_features(
     _vwap_upper2     = vwap_20 + 2 * _vwap_std
     _vwap_lower2     = vwap_20 - 2 * _vwap_std
     df["vwap_upper2_dist"] = (close / _vwap_upper2.replace(0, np.nan) - 1).fillna(0.0)
-    df["vwap_lower2_dist"] = (close / _vwap_lower2.replace(0, np.nan) - 1).fillna(0.0)
+    df["vwap_lower2_dist"] = (close / _vwap_lower2.where(_vwap_lower2 > 0, np.nan) - 1).fillna(0.0)
 
     # ── 앵커드 VWAP (당일 시가 기준, 기관 매매 참조선) ──────────
     _tp_av     = (df["high"] + df["low"] + df["close"]) / 3
@@ -439,17 +450,17 @@ def compute_features(
     # 수정: +DI/-DI 비교 + MA20 기울기로 상승/하락 방향 분리
     _adx_trend = df["adx_14"] > 25
     try:
-        _adx_pos = trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx_pos()
-        _adx_neg = trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx_neg()
-        _uptrend   = _adx_trend & (_adx_pos > _adx_neg)
-        _downtrend = _adx_trend & (_adx_neg >= _adx_pos)
+        _uptrend   = _adx_trend & (df["adx_pos"] > df["adx_neg"])
+        _downtrend = _adx_trend & (df["adx_neg"] >= df["adx_pos"])
     except Exception:
         _uptrend   = _adx_trend
         _downtrend = pd.Series(False, index=df.index)
     _regime = pd.Series(1.0, index=df.index)   # 기본: 횡보
-    _regime[_uptrend]   = 2.0                   # 상승 추세
-    _regime[_downtrend] = 0.0                   # 하락 추세
-    _regime[_bb_wband > _bb_wband_ma * 1.5] = 3.0  # 고변동 (우선)
+    _regime[_uptrend]   = 2.0   # 상승 추세
+    _regime[_downtrend] = 0.0   # 하락 추세
+    # 고변동은 상승/횡보에만 덮어씀 — 하락추세(0) 구간은 유지해 BUY 억제 보존
+    _high_vol = _bb_wband > _bb_wband_ma * 1.5
+    _regime[_high_vol & ~_downtrend] = 3.0
     df["regime_state"] = _regime
 
     # ── MTF 15분봉 상위 추세 (5분봉 리샘플 → EMA 크로스) ────────
@@ -734,9 +745,9 @@ def compute_features(
             df.loc[close > _orb_h.fillna(0), "orb_breakout"] = 1.0
             df.loc[(close < _orb_l.fillna(float("inf"))) & _orb_l.notna(), "orb_breakout"] = -1.0
             df["orb_high_pct"] = (close / _orb_h.replace(0, np.nan) - 1).fillna(0.0)
-            # ORB 거래량 확인: 상단 돌파 + 거래량 2배 이상 (고확률 진짜 돌파 필터)
+            # ORB 거래량 확인: 상단 돌파 + 거래량 1.5배 이상 (연구 기준 150%+, 기존 200%는 과도)
             df["orb_vol_confirm"] = (
-                (df["orb_breakout"] == 1.0) & (vol >= vol_ma20 * 2)
+                (df["orb_breakout"] == 1.0) & (vol >= vol_ma20 * 1.5)
             ).astype(float)
 
             # session_phase: 0=개장(~09:30) / 1=오전(09:30~11:30) / 2=점심(11:30~13:00) / 3=오후(13:00~)
@@ -824,6 +835,48 @@ def compute_features(
         df["supertrend_bull"] = pd.Series((_st_dir == 1.0).astype(float), index=df.index)
     except Exception:
         df["supertrend_bull"] = 0.5
+
+    # ── FVG (Fair Value Gap) — ICT/SMC 3캔들 갭 불균형 ─────────────────
+    # 상승 FVG: 현재봉 저점 > 2봉 전 고점 (캔들 사이 빈 구간 = 매수 지지)
+    # 하락 FVG: 현재봉 고점 < 2봉 전 저점 (캔들 사이 빈 구간 = 매도 저항)
+    df["fvg_bull"] = (low > high.shift(2)).astype(float)
+    df["fvg_bear"] = (high < low.shift(2)).astype(float)
+
+    # ── VSA (Volume Spread Analysis) ─────────────────────────────────────
+    _bar_range  = high - low
+    _wide_bar   = _bar_range > atr * 1.5          # 와이드 바: 범위 > ATR×1.5
+    _narrow_bar = _bar_range < atr * 0.5          # 좁은 바: 범위 < ATR×0.5
+    _upper_cls  = close > (low + _bar_range * 0.6) # 상단 60%+ 마감
+    _lower_cls  = close < (low + _bar_range * 0.4) # 하단 40%- 마감
+    _vol_ma20_safe = vol_ma20.replace(0, np.nan)   # 0거래량 기간 → NaN으로 처리 (오발화 방지)
+    # Stopping Volume: 와이드 양봉 + 상단마감 + 초대량거래 → 하락 클라이막스(반등 신호)
+    df["vsa_stopping_vol"] = (
+        _wide_bar & _upper_cls & (close > open_) & (vol > _vol_ma20_safe * 2.5)
+    ).astype(float).fillna(0.0)
+    # No Supply: 좁은봉 + 하단마감 + 저거래량 → 매도 소진, 공급 고갈(매수 신호)
+    df["vsa_no_supply"] = (
+        _narrow_bar & _lower_cls & (vol < _vol_ma20_safe * 0.7)
+    ).astype(float).fillna(0.0)
+    # Upthrust: 와이드 상승 시도 + 고점갱신 + 하단 마감 + 고거래량 → 약세 반전(매도 신호)
+    df["vsa_upthrust"] = (
+        _wide_bar & _lower_cls & (high > high.shift(1)) & (vol > _vol_ma20_safe * 1.5)
+    ).astype(float).fillna(0.0)
+
+    # ── ICT 런던 킬존 (코인 전용: KST 15~18시, 최고 유동성 2위) ─────────
+    # kospi_ohlcv is not None → 주식 종목 → 런던 킬존 무의미 → 0
+    if kospi_ohlcv is None:
+        _kst_hour = df.index.hour
+        df["is_london_kz"] = ((_kst_hour >= 15) & (_kst_hour < 18)).astype(float)
+    else:
+        df["is_london_kz"] = 0.0
+
+    # ── ICT Premium / Discount Zone (60봉 스윙 내 현재가 위치) ───────────
+    # 0 = 저가구간(Discount, 매수 유리), 1 = 고가구간(Premium, 매도 유리)
+    # 50% 이하에서 매수, 50% 이상에서 매도가 ICT 기본 원칙
+    _sw_high = high.rolling(60, min_periods=10).max()
+    _sw_low  = low.rolling(60, min_periods=10).min()
+    _sw_rng  = (_sw_high - _sw_low).replace(0, np.nan)
+    df["premium_discount"] = ((close - _sw_low) / _sw_rng).clip(0.0, 1.0).fillna(0.5)
 
     # ── 미국 시장 세션 피처 (UTC 13~21시 = KST 22~06시, 최고 유동성) ──
     # df.index는 KST naive → UTC 변환 후 시간 비교

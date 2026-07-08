@@ -776,6 +776,7 @@ class TradingScheduler:
                 "[KIS 매도] %s %d주 @ %,.0f원 | 수익률 %.2f%% | 사유: %s",
                 symbol, qty, current_price, profit_rate * 100, reason,
             )
+            _update_ticker_stats(symbol, profit_rate)  # 실제 손절도 클러스터 스탑에 반영
             await insert_trade(symbol, "KIS", "SELL", float(qty), current_price, position.strategy, reason, profit_rate)
             sim_log.push(symbol, f"매도 체결 {qty}주 @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(symbol, float(qty), current_price, profit_rate, reason)
@@ -1099,7 +1100,11 @@ class TradingScheduler:
     ) -> None:
         """Upbit 실제 포지션 부분 청산 (40%). ATR×1.5 도달 시 선익절, 나머지 홀딩."""
         try:
-            sell_qty = position.qty * 0.40
+            # sell_qty를 락 아래서 결정 → await 사이 DCA 추가에 의한 qty 불일치 방지
+            async with self._lock:
+                if ticker not in self._positions:
+                    return
+                sell_qty = self._positions[ticker].qty * 0.40
             if sell_qty * current_price < 5_000:
                 return
             await upbit.place_sell_order(ticker, sell_qty)
@@ -1107,8 +1112,8 @@ class TradingScheduler:
             async with self._lock:
                 if ticker not in self._positions:
                     return
-                position.qty -= sell_qty
-                self._positions[ticker] = position
+                self._positions[ticker].qty -= sell_qty
+                position = self._positions[ticker]
                 _pts = self._partial_tp_state.get(ticker)
                 if _pts:
                     _pts["done"] = True
@@ -1153,6 +1158,7 @@ class TradingScheduler:
                 "[Upbit 매도] %s %.8f @ %.0f원 | 수익률 %.2f%% | 사유: %s",
                 ticker, position.qty, current_price, profit_rate * 100, reason,
             )
+            _update_ticker_stats(ticker, profit_rate)  # 실제 손절도 클러스터 스탑에 반영
             await insert_trade(ticker, "UPBIT", "SELL", position.qty, current_price, position.strategy, reason, profit_rate)
             sim_log.push(ticker, f"매도 체결 {position.qty:.6f} @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(ticker, position.qty, current_price, profit_rate, reason, is_crypto=True)
@@ -1809,9 +1815,10 @@ class TradingScheduler:
             if agent.needs_retrain:
                 sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 3연속손실 — 매수 보류", "INFO")
                 return
-            # ADX 필터: 코인 횡보장(ADX<20) 진입 차단 — 추세 없는 구간에서 WR 급락 방지
-            if agent.market == "coin" and 0 < agent._last_adx_14 < 20:
-                sim_log.push(agent.agent_id, f"[ADX차단] {symbol} ADX={agent._last_adx_14:.1f}<20 횡보장", "INFO")
+            # ADX 필터: 코인 횡보장(ADX<15) 진입 차단 — 추세 없는 구간에서 WR 급락 방지
+            # 20→15: VSA·FVG 반전 신호는 ADX 15~20 구간(횡보→추세 전환 직전)에서 유효
+            if agent.market == "coin" and 0 < agent._last_adx_14 < 15:
+                sim_log.push(agent.agent_id, f"[ADX차단] {symbol} ADX={agent._last_adx_14:.1f}<15 횡보장", "INFO")
                 return
             # KOSPI MIM: 개장 30분 하락 방향 시 주식 당일 BUY 억제 (MDPI Finance 검증 전략)
             if agent.market == "stock" and self._morning_direction == -1:
@@ -2056,7 +2063,7 @@ class TradingScheduler:
         agent_trade_results: dict[str, list[dict]] = {}
         async with connect_db() as db:
             db.row_factory = aiosqlite.Row
-            for agent in AGENTS.values():
+            for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
                 async with db.execute(
                     """
                     SELECT b.traded_at AS buy_at, b.buy_prob, b.buy_adx, b.buy_vol_ratio,
@@ -2065,12 +2072,12 @@ class TradingScheduler:
                     INNER JOIN agent_trades s
                         ON  s.agent_id = b.agent_id
                         AND s.ticker   = b.ticker
-                        AND s.action   = 'SELL'
+                        AND s.action   IN ('SELL', 'SELL_PARTIAL')
                         AND s.id = (
                             SELECT MIN(id) FROM agent_trades
                             WHERE agent_id = b.agent_id
                               AND ticker   = b.ticker
-                              AND action   = 'SELL'
+                              AND action   IN ('SELL', 'SELL_PARTIAL')
                               AND id > b.id
                         )
                     WHERE b.action = 'BUY'

@@ -319,6 +319,9 @@ class SimAgent:
             self._model = loaded
             self._scaler = data["scaler"]
             self._trained_at = data.get("trained_at")
+            self._trained_feature_names = data.get("trained_feature_names", [])
+            self._low_importance_feats = set(data.get("low_importance_feats", []))
+            self.load_meta_model()  # meta 모델도 함께 복원
             return True
         except Exception:
             self._model_path.unlink(missing_ok=True)  # 손상 파일 삭제 → 다음 틱 재학습
@@ -332,6 +335,8 @@ class SimAgent:
                     "scaler": self._scaler,
                     "trained_at": self._trained_at,
                     "feature_names": self.feature_names,
+                    "trained_feature_names": self._trained_feature_names,
+                    "low_importance_feats": list(self._low_importance_feats),
                 },
                 f,
             )
@@ -645,8 +650,9 @@ class SimAgent:
                                 self.agent_id,
                                 [(k, f"{v:.1%}") for k, v in _sorted_imp[:5]],
                                 [(k, f"{v:.2%}") for k, v in _sorted_imp[-5:]])
-                    # 0.5% 미만 피처 → 저중요도 목록 갱신 (최소 30개 남기도록 제한)
-                    _low = {k for k, v in _imp_map.items() if v < 0.005}
+                    # 0.3% 미만 피처 → 저중요도 목록 갱신 (최소 30개 남기도록 제한)
+                    # 0.5%→0.3%: FVG·VSA 등 희귀 이진 피처가 과도하게 pruning되는 문제 방지
+                    _low = {k for k, v in _imp_map.items() if v < 0.003}
                     if len(_active_feats) - len(_low) >= 30:
                         self._low_importance_feats = _low
                         if _low:
@@ -724,6 +730,8 @@ class SimAgent:
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
             _seg_cols = [c for c in self.feature_names
                          if c in feat_df.columns and c not in self._low_importance_feats]
+            if not _seg_cols:
+                return None
             feat_df = feat_df[_seg_cols].dropna()
             if len(feat_df) < 30:
                 return None
@@ -780,7 +788,7 @@ class SimAgent:
 
             if len(feat_df) < 30 or len(set(label.values)) < 2:
                 return None
-            return feat_df.values, label.values.astype(int)
+            return feat_df.values, label.values.astype(int), list(feat_df.columns)
         except Exception as e:
             logger.warning("[%s] _build_labeled_segment 실패: %s", self.agent_id, e)
             return None
@@ -794,6 +802,7 @@ class SimAgent:
         try:
             all_X: list[np.ndarray] = []
             all_y: list[np.ndarray] = []
+            _actual_cols: list[str] = []
             for sym, ohlcv_list in ohlcv_by_symbol.items():
                 if len(ohlcv_list) < 50:
                     continue
@@ -802,6 +811,8 @@ class SimAgent:
                     continue
                 all_X.append(seg[0])
                 all_y.append(seg[1])
+                if not _actual_cols:
+                    _actual_cols = seg[2]  # 첫 세그먼트 컬럼 기록 (실제 학습 피처)
                 logger.debug("[%s] train_multi: %s %d샘플", self.agent_id, sym, len(seg[0]))
 
             if not all_X:
@@ -874,20 +885,18 @@ class SimAgent:
 
             # ── SHAP 피처 중요도 분석 (train_multi 주식 에이전트용) ──
             try:
-                _tm_feats = [c for c in self.feature_names
-                             if c not in self._low_importance_feats]
                 _tm_imp  = clf.feature_importances_
                 _tm_tot  = _tm_imp.sum()
-                if _tm_tot > 0 and len(_tm_imp) == len(_tm_feats):
+                if _tm_tot > 0 and _actual_cols and len(_tm_imp) == len(_actual_cols):
                     _tm_pct  = _tm_imp / _tm_tot
-                    _tm_map  = dict(zip(_tm_feats, _tm_pct))
+                    _tm_map  = dict(zip(_actual_cols, _tm_pct))
                     _tm_srt  = sorted(_tm_map.items(), key=lambda x: x[1], reverse=True)
                     logger.info("[%s] 피처중요도(multi) TOP5: %s | BOTTOM5: %s",
                                 self.agent_id,
                                 [(k, f"{v:.1%}") for k, v in _tm_srt[:5]],
                                 [(k, f"{v:.2%}") for k, v in _tm_srt[-5:]])
-                    _tm_low = {k for k, v in _tm_map.items() if v < 0.005}
-                    if len(_tm_feats) - len(_tm_low) >= 30:
+                    _tm_low = {k for k, v in _tm_map.items() if v < 0.003}
+                    if len(_actual_cols) - len(_tm_low) >= 30:
                         self._low_importance_feats = _tm_low
             except Exception:
                 pass
@@ -932,8 +941,7 @@ class SimAgent:
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.75)
             self._model   = clf
             self._scaler  = scaler
-            self._trained_feature_names = [c for c in self.feature_names
-                                           if c not in self._low_importance_feats]
+            self._trained_feature_names = _actual_cols  # 실제 학습에 사용된 컬럼
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
             self.save_model()
             logger.warning("[%s] train_multi 완료 (%d종목 풀링, %d샘플, thr=%.2f)",
@@ -1193,13 +1201,22 @@ class SimAgent:
         except Exception:
             pass
 
-        # ── MTF 정렬 필터: 3개 타임프레임 모두 하락 정렬 시 하드 차단 ───
-        # mtf_align==0: 15분·1시간·4시간 전부 하락 정렬 → 단기 반등이라도 매수 금지
+        # ── MTF 정렬 필터: 3개 타임프레임 모두 하락 정렬 시 차단 ───
+        # mtf_align==0: 15분·1시간·4시간 전부 하락 정렬 → 매수 억제
+        # 단, ICT 반전 신호(FVG 상승갭, VSA Stopping Volume) 동반 시 소프트 억제로 완화
+        # 이유: ICT Power of 3에서 런던 스윕 직후 mtf_align=0이어도 NY 반전 유효
         try:
             if "mtf_align" in full_df.columns:
                 _align = float(full_df["mtf_align"].iloc[-1])
-                if _align == 0.0:  # 전 타임프레임 하락 정렬 → 하드 차단
-                    return "hold", round(prob * 0.5, 4)
+                if _align == 0.0:
+                    _fvg_bull = float(full_df["fvg_bull"].iloc[-1]) if "fvg_bull" in full_df.columns else 0.0
+                    _vsa_stop = float(full_df["vsa_stopping_vol"].iloc[-1]) if "vsa_stopping_vol" in full_df.columns else 0.0
+                    if _fvg_bull > 0.0 or _vsa_stop > 0.0:
+                        # FVG 또는 Stopping Volume 반전 신호 → 소프트 억제만 적용
+                        prob = max(0.01, prob * 0.70)
+                    else:
+                        # 반전 신호 없음 → 하드 차단 유지
+                        return "hold", round(prob * 0.5, 4)
                 elif _align == 3.0:  # 전부 상승 정렬 → 강화
                     prob = max(0.01, min(0.99, prob * 1.08))
         except Exception:
@@ -1414,6 +1431,7 @@ class SimAgent:
         pos = self._positions.get(ticker)
         if pos is None:
             return None
+        ratio = min(max(ratio, 0.0), 1.0)  # 0~1 클램프
         sell_qty = pos.qty * ratio
         if sell_qty <= 0:
             return None
@@ -1611,7 +1629,7 @@ async def predict_ensemble(
         return "hold", 0.5
 
     # ── 현재 시장 레짐 감지 (앙상블 가중치 조정용) ───────────────
-    current_regime = 1  # 기본: 추세장
+    current_regime = 1  # 기본: 횡보장
     try:
         _tmp = compute_features(ohlcv_list)
         if not _tmp.empty and "regime_state" in _tmp.columns:
