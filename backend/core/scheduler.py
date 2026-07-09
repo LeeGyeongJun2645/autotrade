@@ -587,6 +587,17 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # 뉴스 감성 점수 정기 갱신: 30분마다 (TTL=1시간, 최대 1.5시간 이내 최신 유지)
+        # 기존: _agent_execute에서 get_cached_score()만 사용 → 캐시 없으면 영구 0.0
+        # 개선: 선제적으로 모니터링 종목 뉴스 주기적 갱신 → news_score 피처 실데이터화
+        self._scheduler.add_job(
+            self._refresh_news_scores,
+            CronTrigger(minute="*/30", timezone=KST),
+            id="news_refresh",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         self._scheduler.start()
         logger.info(
             "스케줄러 시작 | KIS: %s | Upbit: %s",
@@ -2586,6 +2597,37 @@ class TradingScheduler:
             await telegram.notify_message(msg)
         except Exception:
             logger.exception("[레포트] 주식 일일 레포트 발송 실패")
+
+    async def _refresh_news_scores(self) -> None:
+        """30분마다 모니터링 종목 뉴스 감성 점수 갱신.
+
+        캐시 TTL=1시간이므로 30분 주기 호출 시 최대 1.5시간 이내 최신 데이터 유지.
+        get_sentiment_score()는 TTL 내라면 즉시 반환 → 실제 RSS 호출은 만료 시만 발생.
+        우선순위: 포지션 보유 종목 → 코인 상위 15 → 주식 상위 10
+        """
+        from backend.ml.news import get_sentiment_score
+
+        # 갱신 대상 수집
+        targets: list[str] = []
+        # 1순위: 현재 보유 포지션 (손절/익절 판단에 바로 영향)
+        async with self._lock:
+            targets.extend(list(self._positions.keys()))
+        # 2순위: 모니터링 코인 상위 15개
+        targets.extend(t for t in self._upbit_tickers[:15] if t not in targets)
+        # 3순위: 모니터링 주식 상위 10개
+        targets.extend(s for s in self._kis_symbols[:10] if s not in targets)
+
+        if not targets:
+            return
+
+        # 최대 20개 병렬 갱신 (RSS API 부하 제한, 각 종목 내부적으로 병렬 RSS 수집)
+        targets = targets[:20]
+        results = await asyncio.gather(
+            *[get_sentiment_score(t) for t in targets],
+            return_exceptions=True,
+        )
+        ok = sum(1 for r in results if isinstance(r, float))
+        logger.info("[뉴스갱신] %d/%d 종목 감성 점수 갱신 완료", ok, len(targets))
 
     async def _portfolio_snapshot(self) -> None:
         """매일 16:00 KST — KIS + 업비트 총자산 스냅샷 저장."""
