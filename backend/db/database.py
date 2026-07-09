@@ -129,6 +129,8 @@ async def init_db() -> None:
             "ALTER TABLE agent_trades ADD COLUMN buy_prob       REAL",
             "ALTER TABLE agent_trades ADD COLUMN buy_adx        REAL",
             "ALTER TABLE agent_trades ADD COLUMN buy_vol_ratio  REAL",
+            # 일일 P&L 추적용
+            "ALTER TABLE agent_stats ADD COLUMN day_start_balance REAL DEFAULT 0.0",
         ]
         for sql in _migrations:
             try:

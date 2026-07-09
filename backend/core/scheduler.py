@@ -498,6 +498,15 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # 일일 초기화: 매일 00:00 KST — day_start_balance 스냅샷 + 동적 블랙리스트 업데이트
+        self._scheduler.add_job(
+            self._daily_reset,
+            CronTrigger(hour=0, minute=0, timezone=KST),
+            id="daily_reset",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         # BTC 도미넌스 + Fear & Greed 갱신: 10분마다 (코인 보유 포지션 청산 판단용)
         self._scheduler.add_job(
             _refresh_market_context,
@@ -1560,12 +1569,12 @@ class TradingScheduler:
         # ATR이 유효하면(>0.1%) 시장 변동성에 자동 적응, 없으면 고정값 폴백
         atr_pct = agent._last_atr_pct
         if atr_pct > 0.001:
-            STOP_LOSS   = max(-(atr_pct * 1.5), -0.005)  # ATR×1.5, 최소 -0.5%
-            STOP_LOSS   = max(STOP_LOSS, -0.020)          # 상한 -2.0% (대손절 방지: 분석상 최악 -3.67%)
+            STOP_LOSS   = max(-(atr_pct * 1.2), -0.005)  # ATR×1.2 (1.5→1.2: 손절 타이트)
+            STOP_LOSS   = max(STOP_LOSS, -0.015)          # 상한 -1.5% (-2.0→-1.5: 대손절 방지)
             tp_base     = max(atr_pct * agent._dynamic_tp_mult, 0.012)  # 동적 배수 (R비율 기반, 기본 3.0)
         else:
-            STOP_LOSS   = -0.020
-            tp_base     = 0.05  # 4%→5% (R:R 개선)
+            STOP_LOSS   = -0.015
+            tp_base     = 0.05
 
         # ── 보유 포지션 익절/손절 우선 체크 ─────────────────────────
         if symbol in agent._positions:
@@ -1597,10 +1606,10 @@ class TradingScheduler:
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
-            # 8시간(480분) 이상 SL/TP 사이에서 무한 홀딩 → 강제 청산
-            if held_min >= 480:
+            # 6시간(360분) 이상 SL/TP 사이에서 무한 홀딩 → 강제 청산 (8h→6h: 장기 물림 손실 방지)
+            if held_min >= 360:
                 signal = "sell"
-                sim_log.push(agent.agent_id, f"[8h강제청산] {symbol} {held_min:.0f}분 보유 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
+                sim_log.push(agent.agent_id, f"[6h강제청산] {symbol} {held_min:.0f}분 보유 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
 
             # 최소 보유 10분: 진입 직후 신호 기반 조기 청산 완전 차단
             # 분석: 0~10분 청산 WR=38.2%(최악) → 노이즈 신호에 의한 손절이 주원인
@@ -1632,12 +1641,12 @@ class TradingScheduler:
                         sim_log.push(agent.agent_id, f"[알파소멸] {symbol} {unreal*100:.1f}% 240분 보유 강제청산 @ {price:,.0f}원", "SELL")
                     take_profit = max(tp_base * 0.75, sl_abs * 1.3)
 
-                # ── 부분 청산 Scale-out: ATR×1.5 도달 시 40% 선익절, 나머지 ATR×3.0까지 홀딩 ──
+                # ── 부분 청산 Scale-out: ATR×2.0 도달 시 30% 선익절 (1.5→2.0, 40%→30%: 더 많은 상승 포착)
                 _partial_target = agent._partial_tp_price.get(symbol, 0)
                 if (_partial_target > 0
                         and price >= _partial_target
                         and symbol not in agent._partial_tp_done):
-                    _ptrade = agent.virtual_partial_sell(symbol, price, 0.40)
+                    _ptrade = agent.virtual_partial_sell(symbol, price, 0.30)
                     if _ptrade:
                         await db.execute(
                             "INSERT INTO agent_trades (agent_id, ticker, action, price, qty,"
@@ -1648,7 +1657,7 @@ class TradingScheduler:
                              _ptrade.balance, _ptrade.traded_at),
                         )
                         sim_log.push(agent.agent_id,
-                            f"[부분청산40%] {symbol} @ {price:,.0f}원 +{(_ptrade.profit_rate or 0)*100:.1f}%",
+                            f"[부분청산30%] {symbol} @ {price:,.0f}원 +{(_ptrade.profit_rate or 0)*100:.1f}%",
                             "BUY")
 
                 # 트레일링 스탑: TP의 50% 도달 시 최고점 추적으로 전환 (90%→50%: 수익 조기 보호 + 추가 상승 포착)
@@ -1815,6 +1824,17 @@ class TradingScheduler:
             if agent.needs_retrain:
                 sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 3연속손실 — 매수 보류", "INFO")
                 return
+            # 동적 블랙리스트: WR<35% + 20건 이상인 종목 진입 차단 (반복 손실 종목 자동 제외)
+            if symbol in agent._ticker_blacklist:
+                return
+            # 일일 BUY 제한: 과매매 방지 (코인 8건/일, 주식 5건/일)
+            _today_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+            if agent._today_date != _today_kst:
+                agent._today_date = _today_kst
+                agent._today_buy_count = 0
+            _daily_limit = 8 if agent.market == "coin" else 5
+            if agent._today_buy_count >= _daily_limit:
+                return
             # ADX 필터: 코인 횡보장(ADX<15) 진입 차단 — 추세 없는 구간에서 WR 급락 방지
             # 20→15: VSA·FVG 반전 신호는 ADX 15~20 구간(횡보→추세 전환 직전)에서 유효
             if agent.market == "coin" and 0 < agent._last_adx_14 < 15:
@@ -1875,10 +1895,11 @@ class TradingScheduler:
                     "INSERT OR REPLACE INTO agent_positions (agent_id, ticker, entry_price, qty, entered_at) VALUES (?,?,?,?,?)",
                     (trade.agent_id, trade.ticker, trade.price, trade.qty, trade.traded_at),
                 )
-                sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%} / 진입{_portion*100:.0f}%)", "BUY")
-                # 부분 청산 1차 목표가 설정 (ATR×1.5), ATR 없으면 미설정
+                agent._today_buy_count += 1
+                sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%} / 진입{_portion*100:.0f}% / 일{agent._today_buy_count}건)", "BUY")
+                # 부분 청산 1차 목표가 설정 (ATR×2.0), ATR 없으면 미설정
                 if atr_pct > 0.001:
-                    agent._partial_tp_price[symbol] = price * (1 + atr_pct * 1.5)
+                    agent._partial_tp_price[symbol] = price * (1 + atr_pct * 2.0)
 
         elif signal == "sell" and symbol in agent._positions:
             trade = agent.virtual_sell(symbol, price)
@@ -2436,6 +2457,54 @@ class TradingScheduler:
             logger.info("[포트폴리오] 스냅샷 저장: 총 %.0f원", result["total_value"])
         except Exception:
             logger.exception("[포트폴리오] 스냅샷 저장 실패")
+
+    async def _daily_reset(self) -> None:
+        """매일 00:00 KST — 일일 P&L 기준점 스냅샷 + 동적 블랙리스트 업데이트."""
+        from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
+        from backend.db.database import connect_db
+
+        all_agents = list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values())
+
+        # 1) day_start_balance 스냅샷: 현재 잔액을 오늘의 기준점으로 저장
+        async with connect_db() as db:
+            for agent in all_agents:
+                agent.day_start_balance = agent._balance + agent.position_value
+                agent._today_buy_count = 0  # 일일 매수 카운터 리셋
+                agent._today_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+                try:
+                    await db.execute(
+                        "UPDATE agent_stats SET day_start_balance=? WHERE agent_id=?",
+                        (agent.day_start_balance, agent.agent_id),
+                    )
+                except Exception:
+                    pass
+            await db.commit()
+
+        # 2) 동적 블랙리스트 업데이트: WR<35% + 거래 20건 이상 종목 차단
+        async with connect_db() as db:
+            async with db.execute("""
+                SELECT agent_id, ticker,
+                       COUNT(*) as cnt,
+                       CAST(SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as wr
+                FROM agent_trades
+                WHERE action = 'SELL' AND profit_rate IS NOT NULL
+                GROUP BY agent_id, ticker
+                HAVING cnt >= 20
+            """) as cur:
+                rows = await cur.fetchall()
+
+        agent_map = {a.agent_id: a for a in all_agents}
+        new_bl: dict[str, set[str]] = {}
+        for row in rows:
+            aid, ticker, cnt, wr = row[0], row[1], row[2], row[3]
+            if wr < 0.35:
+                new_bl.setdefault(aid, set()).add(ticker)
+
+        for agent in all_agents:
+            agent._ticker_blacklist = new_bl.get(agent.agent_id, set())
+
+        bl_total = sum(len(v) for v in new_bl.values())
+        logger.info("[일일리셋] day_start_balance 저장 완료 / 블랙리스트 %d종목 차단", bl_total)
 
     def get_agents_snapshot(self) -> list[dict]:
         """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 → 앙상블 순)."""

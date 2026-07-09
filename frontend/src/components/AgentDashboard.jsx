@@ -243,14 +243,19 @@ function AgentDetail({ agent, stockNames = {} }) {
       </div>
 
       {/* 성과 4박스 */}
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-5 gap-2">
         <div className="bg-gray-700/50 rounded-lg p-3">
           <p className="text-xs text-gray-400 mb-1">승률</p>
           <WinBadge rate={agent.win_rate} wins={agent.win_trades} total={agent.total_trades} />
         </div>
         <div className="bg-gray-700/50 rounded-lg p-3">
-          <p className="text-xs text-gray-400 mb-1">수익률</p>
+          <p className="text-xs text-gray-400 mb-1">누적 수익률</p>
           <ReturnBadge pct={agent.total_return_pct} />
+        </div>
+        <div className="bg-gray-700/50 rounded-lg p-3">
+          <p className="text-xs text-gray-400 mb-1">오늘 수익률</p>
+          <ReturnBadge pct={agent.today_return_pct ?? 0} />
+          <p className="text-xs text-gray-500 mt-0.5">일 {agent.today_buy_count ?? 0}건</p>
         </div>
         <div className="bg-gray-700/50 rounded-lg p-3">
           <p className="text-xs text-gray-400 mb-1">총평가액 (챔피언 기준)</p>

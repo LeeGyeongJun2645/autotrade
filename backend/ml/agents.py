@@ -205,6 +205,10 @@ class SimAgent:
         self._daily_retrain_count: int = 0       # 당일 비상재학습 횟수 (최대 3회)
         self._last_retrain_date: str = ""        # 마지막 재학습 날짜 (YYYY-MM-DD)
         self._cooldown_tickers: dict[str, str] = {}  # ticker → 쿨다운 만료 시각 (ISO), 손절 후 30분 재매수 금지
+        self._today_buy_count: int = 0               # 당일 BUY 횟수 (00:00 KST 리셋)
+        self._today_date: str = ""                   # 리셋 기준 날짜 (YYYY-MM-DD KST)
+        self.day_start_balance: float = 0.0          # 당일 00:00 잔액 스냅샷 (일일 P&L 계산용)
+        self._ticker_blacklist: set[str] = set()     # 성과 기반 동적 블랙리스트 (WR<35%+20건 이상)
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -1532,25 +1536,32 @@ class SimAgent:
                 "current_value":       round(cur_val, 0),
                 "unrealized_pnl_pct":  round((cur_val / cost - 1) * 100, 2) if cost > 0 else 0.0,
             }
+        # 일일 P&L: day_start_balance가 0이면 미초기화 (첫 실행 시) → total_value 기준 0%
+        _day_start = self.day_start_balance if self.day_start_balance > 0 else total_value
+        _today_return_pct = round((total_value - _day_start) / _day_start * 100, 2) if _day_start > 0 else 0.0
         return {
-            "agent_id":         self.agent_id,
-            "market":           self.market,
-            "interval_min":     self.interval_min,
-            "label_threshold":  self.label_threshold,
-            "buy_threshold":    self.buy_threshold,
-            "feature_set":      self.feature_set,
-            "balance":          round(self._balance, 0),
-            "position_value":   round(pos_value, 0),
-            "total_value":      round(total_value, 0),
-            "total_return_pct": round(self.total_return * 100, 2),
-            "win_rate":         round(self.win_rate * 100, 1),
-            "total_trades":     self.total_trades,
-            "win_trades":       self.win_trades,
-            "is_champion":      self.is_champion,
-            "is_active":        self.is_active,
-            "trained_at":       self._trained_at,
-            "positions":        positions_detail,
-            "recent_trades":    self.recent_trades[:20],
+            "agent_id":          self.agent_id,
+            "market":            self.market,
+            "interval_min":      self.interval_min,
+            "label_threshold":   self.label_threshold,
+            "buy_threshold":     self.buy_threshold,
+            "feature_set":       self.feature_set,
+            "balance":           round(self._balance, 0),
+            "position_value":    round(pos_value, 0),
+            "total_value":       round(total_value, 0),
+            "total_return_pct":  round(self.total_return * 100, 2),
+            "today_return_pct":  _today_return_pct,
+            "day_start_balance": round(_day_start, 0),
+            "win_rate":          round(self.win_rate * 100, 1),
+            "total_trades":      self.total_trades,
+            "win_trades":        self.win_trades,
+            "today_buy_count":   self._today_buy_count,
+            "blacklist_count":   len(self._ticker_blacklist),
+            "is_champion":       self.is_champion,
+            "is_active":         self.is_active,
+            "trained_at":        self._trained_at,
+            "positions":         positions_detail,
+            "recent_trades":     self.recent_trades[:20],
         }
 
 
