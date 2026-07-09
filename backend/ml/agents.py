@@ -189,7 +189,8 @@ class SimAgent:
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
         self._cached_ls_hist: list[dict] = []         # BTC 글로벌 L/S 비율 히스토리 캐시 (코인 전용)
-        self._last_ohlcv_cache: dict[str, list[dict]] = {}  # 종목별 최신 OHLCV (continuation_score 용)
+        self._last_ohlcv_cache: dict[str, list[dict]] = {}  # 종목별 최신 OHLCV (continuation_score 용, 최대 60종목)
+        self._OHLCV_CACHE_MAXSIZE: int = 60  # 에이전트당 캐시 최대 종목 수 (22에이전트 × 60 × 200봉 ≈ 2.6GB 방지)
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
         self._trailing_mode: set[str] = set()
         # ── MFE/MAE 기반 동적 TP 배수 ─────────────────────────────────
@@ -1148,6 +1149,10 @@ class SimAgent:
         if self._model is None and not self.load_model():
             return "hold", 0.5
         if ticker and ohlcv_list:
+            # LRU 제한: maxsize 초과 시 가장 오래된 항목 삭제 (메모리 누수 방지)
+            if len(self._last_ohlcv_cache) >= self._OHLCV_CACHE_MAXSIZE and ticker not in self._last_ohlcv_cache:
+                oldest = next(iter(self._last_ohlcv_cache))
+                del self._last_ohlcv_cache[oldest]
             self._last_ohlcv_cache[ticker] = ohlcv_list
         try:
             full_df = compute_features(
