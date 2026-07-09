@@ -209,9 +209,10 @@ def _is_coin_night_risk() -> bool:
     KST 05~06시: 미국 장 마감 후 (UTC 20~21시) 유동성 공백
     KST 09시: WR=35.5% (아시아 개장 노이즈)
     KST 12시: WR=37.7% (점심 저유동성)
+    KST 17시: WR=33.3% (실거래 확인)
     """
     h = datetime.now(KST).hour
-    return h in {1, 2, 3, 4, 5, 6, 9, 12}
+    return h in {1, 2, 3, 4, 5, 6, 9, 12, 17}
 
 
 def _is_stock_open_noise() -> bool:
@@ -374,6 +375,32 @@ class TradingScheduler:
                 """, (_today_kst_str,)) as cur:
                     today_buy_counts = {r["agent_id"]: int(r["cnt"]) async for r in cur}
 
+                # 재시작 후 _partial_tp_done 복원: 당일 SELL_PARTIAL 거래 → 중복 청산 방지
+                async with db.execute("""
+                    SELECT agent_id, ticker
+                    FROM agent_trades
+                    WHERE action = 'SELL_PARTIAL'
+                      AND DATE(traded_at) = ?
+                """, (_today_kst_str,)) as cur:
+                    partial_done_rows: dict[str, set[str]] = {}
+                    async for r in cur:
+                        partial_done_rows.setdefault(r["agent_id"], set()).add(r["ticker"])
+
+                # 동적 블랙리스트 복원 (재시작 후 00:00 전까지 블랙리스트 소실 방지)
+                async with db.execute("""
+                    SELECT agent_id, ticker,
+                           CAST(SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as wr,
+                           COUNT(*) as cnt
+                    FROM agent_trades
+                    WHERE action = 'SELL' AND profit_rate IS NOT NULL
+                    GROUP BY agent_id, ticker
+                    HAVING cnt >= 20
+                """) as cur:
+                    restored_bl: dict[str, set[str]] = {}
+                    async for r in cur:
+                        if r["wr"] < 0.35:
+                            restored_bl.setdefault(r["agent_id"], set()).add(r["ticker"])
+
             from backend.ml.agents import ENSEMBLE_AGENTS
             from datetime import datetime as _dt3
             _today_kst_str2 = _dt3.now(KST).strftime("%Y-%m-%d")
@@ -391,6 +418,17 @@ class TradingScheduler:
                     # day_start_balance 복원: DB에 저장된 값 사용, 0이면 현재 잔액으로 초기화
                     _dsb = float(stats.get("day_start_balance") or 0.0)
                     agent.day_start_balance = _dsb if _dsb > 0 else (agent._balance + agent.position_value)
+                    # _dynamic_tp_mult 복원 (재시작 후 3.0 초기화 방지)
+                    agent._dynamic_tp_mult = float(stats.get("dynamic_tp_mult") or 3.0)
+                    # _partial_tp_done 복원: 당일 부분청산 완료 종목 마킹 (중복청산 방지)
+                    agent._partial_tp_done = partial_done_rows.get(agent.agent_id, set())
+                    # _peak_price 초기화: 재시작 시 보유 포지션의 entry_price로 보수적 초기화
+                    # (정확한 최고가 알 수 없으므로 진입가 기준으로 트레일링 재시작)
+                    for ticker, pos in agent._positions.items():
+                        if ticker not in agent._peak_price:
+                            agent._peak_price[ticker] = pos.entry_price
+                    # 동적 블랙리스트 복원
+                    agent._ticker_blacklist = restored_bl.get(agent.agent_id, set())
             logger.info("[복구] 에이전트 stats %d개 복구 완료 (오늘BUY: %s)", len(stats_rows), dict(list(today_buy_counts.items())[:5]))
         except Exception:
             logger.exception("[복구] 에이전트 stats 복구 실패")
@@ -974,6 +1012,9 @@ class TradingScheduler:
             return
 
         # ── 포지션 없음: 매수 신호 탐색 (5분봉) ──
+        # 실매매에도 야간 고위험 시간대 차단 적용 (가상매매 _agent_execute와 동일 기준)
+        if _is_coin_night_risk():
+            return
         ohlcv_5min = await upbit.get_ohlcv(ticker, interval="minutes/5", count=300)
         result, strategy_name = self._run_upbit_strategies(ohlcv_5min, current_price)
         if result.is_buy:
@@ -1501,19 +1542,20 @@ class TradingScheduler:
                             signal, prob = agent.predict(ohlcv, kospi_ohlcv=kospi_ohlcv or None, ticker=symbol)
                             await self._agent_execute(db, agent, symbol, signal, prob, price)
 
-                    # agent_stats upsert (today_buy_count 포함 → 재시작 후 복원 가능)
+                    # agent_stats upsert (today_buy_count/dynamic_tp_mult 포함 → 재시작 후 복원 가능)
                     await db.execute(
                         """INSERT INTO agent_stats
                            (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
                             total_trades, win_trades, win_rate, total_return, current_balance,
-                            is_champion, is_active, today_buy_count, updated_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            is_champion, is_active, today_buy_count, dynamic_tp_mult, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
                              total_trades=excluded.total_trades, win_trades=excluded.win_trades,
                              win_rate=excluded.win_rate, total_return=excluded.total_return,
                              current_balance=excluded.current_balance, is_champion=excluded.is_champion,
                              buy_threshold=excluded.buy_threshold, is_active=excluded.is_active,
                              today_buy_count=excluded.today_buy_count,
+                             dynamic_tp_mult=excluded.dynamic_tp_mult,
                              updated_at=excluded.updated_at""",
                         (
                             agent.agent_id, agent.interval_min, agent.label_threshold,
@@ -1522,6 +1564,7 @@ class TradingScheduler:
                             round(agent.win_rate, 4), round(agent.total_return, 4),
                             round(agent._balance, 2), int(agent.is_champion),
                             int(agent.is_active), agent._today_buy_count,
+                            round(agent._dynamic_tp_mult, 4),
                             now.strftime("%Y-%m-%dT%H:%M:%S"),
                         ),
                     )
@@ -1564,20 +1607,22 @@ class TradingScheduler:
                         """INSERT INTO agent_stats
                            (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
                             total_trades, win_trades, win_rate, total_return, current_balance,
-                            is_champion, is_active, today_buy_count, updated_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?,?)
+                            is_champion, is_active, today_buy_count, dynamic_tp_mult, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
                              total_trades=excluded.total_trades, win_trades=excluded.win_trades,
                              win_rate=excluded.win_rate, total_return=excluded.total_return,
                              current_balance=excluded.current_balance,
                              buy_threshold=excluded.buy_threshold,
                              today_buy_count=excluded.today_buy_count,
+                             dynamic_tp_mult=excluded.dynamic_tp_mult,
                              updated_at=excluded.updated_at""",
                         (_ea.agent_id, _ea.interval_min, _ea.label_threshold,
                          round(_ea.buy_threshold, 4), _ea.feature_set,
                          _ea.total_trades, _ea.win_trades,
                          round(_ea.win_rate, 4), round(_ea.total_return, 4),
                          round(_ea._balance, 2), _ea._today_buy_count,
+                         round(_ea._dynamic_tp_mult, 4),
                          now.strftime("%Y-%m-%dT%H:%M:%S")),
                     )
                 await _edb.commit()
