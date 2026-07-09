@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-INITIAL_CAPITAL    = 10_000_000.0  # 에이전트당 초기 가상 자금 (1000만원)
+INITIAL_CAPITAL    = 1_000_000.0   # 에이전트당 초기 가상 자금 (100만원)
 POSITION_RATIO     = 0.15           # 잔액의 15%씩 사용 (0.5→0.15: 리스크 70% 축소)
 MAX_OPEN_POSITIONS = 2              # 에이전트당 동시 최대 포지션 수 (3→2)
 
