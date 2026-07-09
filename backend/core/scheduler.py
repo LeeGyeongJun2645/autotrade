@@ -433,6 +433,19 @@ class TradingScheduler:
         except Exception:
             logger.exception("[복구] 에이전트 stats 복구 실패")
 
+        # 코인 에이전트 펀딩비 즉시 로드 (재시작 후 06:05 daily_retrain 전까지 0.0 방지)
+        try:
+            from backend.api.binance import get_historical_funding_rates
+            from backend.ml.agents import AGENTS as _AGENTS_FR, ENSEMBLE_AGENTS as _EA_FR
+            _funding_init = await get_historical_funding_rates("BTCUSDT", limit=50)
+            if _funding_init:
+                for _a in list(_AGENTS_FR.values()) + list(_EA_FR.values()):
+                    if _a.market == "coin" and not _a._cached_funding_rates:
+                        _a._cached_funding_rates = _funding_init
+                logger.info("[복구] 펀딩비 초기 로드 완료 (%d개)", len(_funding_init))
+        except Exception:
+            logger.warning("[복구] 펀딩비 초기 로드 실패 — 0.0 유지")
+
         # 재시작 후에도 ATR 전환 조건 재평가 (인메모리 플래그 복구)
         await self._check_atr_upgrade()
 
@@ -1347,21 +1360,52 @@ class TradingScheduler:
         except Exception:
             coin_prices = {}
 
-        # BTC 선물 OI + Taker + L/S 히스토리 (코인 에이전트 전체 공유, 5분 TTL)
+        # BTC + 주요 알트코인 선물 OI/Taker/L/S 히스토리 (코인별 개별 수급 신호)
+        # BTC만 사용하면 ETH·XRP 등 개별 코인 수급 반영 불가 → 코인별 Binance 심볼 매핑
         from backend.api.binance import get_open_interest_hist, get_taker_ratio_hist, get_ls_ratio_hist
+        # 업비트 KRW 티커 → 바이낸스 퍼페추얼 심볼 매핑 (시총 상위 & 업비트 거래량 상위)
+        _UPBIT_TO_BINANCE: dict[str, str] = {
+            "KRW-BTC": "BTCUSDT", "KRW-ETH": "ETHUSDT", "KRW-XRP": "XRPUSDT",
+            "KRW-SOL": "SOLUSDT", "KRW-ADA": "ADAUSDT", "KRW-AVAX": "AVAXUSDT",
+            "KRW-DOT": "DOTUSDT", "KRW-ATOM": "ATOMUSDT", "KRW-TRX": "TRXUSDT",
+            "KRW-UNI": "UNIUSDT", "KRW-LTC": "LTCUSDT", "KRW-ETC": "ETCUSDT",
+            "KRW-WAVES": "WAVEUSDT", "KRW-AAVE": "AAVEUSDT", "KRW-ARB": "ARBUSDT",
+        }
+        # 현재 모니터링 티커 중 Binance 매핑 있는 것만 추가 수집 (BTC 포함, API 부하 최소화)
+        _binance_targets = list(dict.fromkeys(
+            _UPBIT_TO_BINANCE[t] for t in coin_tickers if t in _UPBIT_TO_BINANCE
+        ))[:6]  # BTC 포함 최대 6개 (Binance API 부하 제한)
+        if "BTCUSDT" not in _binance_targets:
+            _binance_targets.insert(0, "BTCUSDT")
+
+        # 각 심볼별 OI/Taker/LS 병렬 수집
+        _coin_flow_cache: dict[str, dict[str, list]] = {}
         try:
-            btc_oi_hist, btc_taker_hist, btc_ls_hist = await asyncio.gather(
-                get_open_interest_hist("BTCUSDT", period="5m", limit=200),
-                get_taker_ratio_hist("BTCUSDT", period="5m", limit=200),
-                get_ls_ratio_hist("BTCUSDT", period="5m", limit=200),
-            )
+            _fetch_tasks = []
+            for _sym in _binance_targets:
+                _fetch_tasks.extend([
+                    get_open_interest_hist(_sym, period="5m", limit=200),
+                    get_taker_ratio_hist(_sym, period="5m", limit=200),
+                    get_ls_ratio_hist(_sym, period="5m", limit=200),
+                ])
+            _results = await asyncio.gather(*_fetch_tasks, return_exceptions=True)
+            for i, _sym in enumerate(_binance_targets):
+                _oi   = _results[i * 3]     if not isinstance(_results[i * 3], Exception) else []
+                _tk   = _results[i * 3 + 1] if not isinstance(_results[i * 3 + 1], Exception) else []
+                _ls   = _results[i * 3 + 2] if not isinstance(_results[i * 3 + 2], Exception) else []
+                _coin_flow_cache[_sym] = {"oi": _oi, "taker": _tk, "ls": _ls}
+        except Exception:
+            pass
+
+        # BTC 기본값 (폴백용) — 이전 캐시 사용
+        _btc_flow = _coin_flow_cache.get("BTCUSDT", {})
+        btc_oi_hist    = _btc_flow.get("oi")    or self._btc_oi_hist
+        btc_taker_hist = _btc_flow.get("taker") or self._btc_taker_hist
+        btc_ls_hist    = _btc_flow.get("ls")    or self._btc_ls_hist
+        if _btc_flow:
             self._btc_oi_hist    = btc_oi_hist
             self._btc_taker_hist = btc_taker_hist
             self._btc_ls_hist    = btc_ls_hist
-        except Exception:
-            btc_oi_hist    = self._btc_oi_hist
-            btc_taker_hist = self._btc_taker_hist
-            btc_ls_hist    = self._btc_ls_hist
 
         # 주식 OHLCV + 현재가도 병렬 프리패치
         stock_intervals = list({a.interval_min for a in AGENTS.values() if a.market == "stock"})
@@ -1499,9 +1543,12 @@ class TradingScheduler:
                             price = coin_prices.get(ticker, 0.0)
                             if price <= 0:
                                 continue
-                            _oi_ref    = btc_oi_hist    if btc_oi_hist    else None
-                            _taker_ref = btc_taker_hist if btc_taker_hist else None
-                            _ls_ref    = btc_ls_hist    if btc_ls_hist    else None
+                            # 코인별 개별 Binance 수급 데이터 (없으면 BTC 폴백)
+                            _binance_sym = _UPBIT_TO_BINANCE.get(ticker, "BTCUSDT")
+                            _coin_flow   = _coin_flow_cache.get(_binance_sym, {})
+                            _oi_ref    = (_coin_flow.get("oi")    or btc_oi_hist)    or None
+                            _taker_ref = (_coin_flow.get("taker") or btc_taker_hist) or None
+                            _ls_ref    = (_coin_flow.get("ls")    or btc_ls_hist)    or None
                             signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref, ls_hist=_ls_ref, ticker=ticker)
                             await self._agent_execute(db, agent, ticker, signal, prob, price)
 
