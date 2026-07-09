@@ -87,35 +87,36 @@ FEATURE_SETS: dict[str, list[str]] = {
     ],
 }
 
-# ── 20개 에이전트 설정 (전체 5분봉, 중복 전략 없음) ─────────────
-# (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market, lookahead)
-# lookahead: 3=단기(15분), 5=중기(25분), 8=장기(40분) — 앙상블 분산 극대화
+# ── 20개 에이전트 설정 ────────────────────────────────────────────
+# 코인: 60분봉 (1h bars) — 5분봉 대비 노이즈:신호 비율 대폭 개선, EV 음수 구간 탈피 목표
+# 주식: 15분봉 — 장중 6.5시간 기준 26봉 확보, 5분봉 대비 노이즈 감소
+# lookahead: 코인 3=3시간/5=5시간/8=8시간, 주식 3=45분/5=75분/8=2시간
 
 AGENT_CONFIGS: list[tuple] = [
     # (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market, lookahead, model_type)
-    # label_threshold = 트리플배리어 TP/SL 기준 (ATR×1.5 실거래 손절 범위에 맞게 0.005~0.015 조정)
+    # label_threshold: 60분봉 기준 3~8시간 내 수익 기준 (5분봉 0.006~0.012 → 1h 0.008~0.015)
     # 코인 홀수 → LightGBM / 짝수 → XGBoost (앙상블 다양성 극대화)
-    ("AI01",  5, 0.006, 0.58, "all",      "coin",  3, "lgbm"),  # 단기 공격형
-    ("AI02",  5, 0.007, 0.63, "momentum", "coin",  5, "xgb"),
-    ("AI03",  5, 0.008, 0.62, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
-    ("AI04",  5, 0.007, 0.62, "volume",   "coin",  3, "xgb"),
-    ("AI05",  5, 0.010, 0.60, "all",      "coin",  5, "lgbm"),
-    ("AI06",  5, 0.008, 0.65, "momentum", "coin",  8, "xgb"),
-    ("AI07",  5, 0.010, 0.62, "trend",    "coin",  3, "lgbm"),
-    ("AI08",  5, 0.007, 0.62, "volume",   "coin",  5, "xgb"),
-    ("AI09",  5, 0.012, 0.65, "all",      "coin",  8, "lgbm"),
-    ("AI10",  5, 0.008, 0.70, "trend",    "coin",  5, "xgb"),
-    # 주식 전략 — 전부 LightGBM (histogram-based 분할이 불균형 5분봉 데이터에 더 안정적)
-    ("AI11",  5, 0.006, 0.58, "all",      "stock", 3, "lgbm"),
-    ("AI12",  5, 0.005, 0.60, "trend",    "stock", 5, "lgbm"),  # label 0.7→0.5% (양성레이블 확보)
-    ("AI13",  5, 0.008, 0.58, "momentum", "stock", 8, "lgbm"),
-    ("AI14",  5, 0.005, 0.60, "volume",   "stock", 3, "lgbm"),  # label 0.7→0.5%
-    ("AI15",  5, 0.010, 0.60, "all",      "stock", 5, "lgbm"),
-    ("AI16",  5, 0.005, 0.60, "trend",    "stock", 8, "lgbm"),  # label 0.8→0.5%
-    ("AI17",  5, 0.010, 0.62, "momentum", "stock", 3, "lgbm"),
-    ("AI18",  5, 0.006, 0.60, "volume",   "stock", 5, "lgbm"),  # label 1.0→0.6%
-    ("AI19",  5, 0.012, 0.65, "all",      "stock", 8, "lgbm"),
-    ("AI20",  5, 0.012, 0.60, "trend",    "stock", 3, "lgbm"),  # xgb→lgbm, 임계 0.70→0.60
+    ("AI01", 60, 0.008, 0.58, "all",      "coin",  3, "lgbm"),  # 단기 공격형
+    ("AI02", 60, 0.009, 0.63, "momentum", "coin",  5, "xgb"),
+    ("AI03", 60, 0.010, 0.62, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
+    ("AI04", 60, 0.009, 0.62, "volume",   "coin",  3, "xgb"),
+    ("AI05", 60, 0.012, 0.60, "all",      "coin",  5, "lgbm"),
+    ("AI06", 60, 0.010, 0.65, "momentum", "coin",  8, "xgb"),
+    ("AI07", 60, 0.012, 0.62, "trend",    "coin",  3, "lgbm"),
+    ("AI08", 60, 0.009, 0.62, "volume",   "coin",  5, "xgb"),
+    ("AI09", 60, 0.015, 0.65, "all",      "coin",  8, "lgbm"),
+    ("AI10", 60, 0.010, 0.70, "trend",    "coin",  5, "xgb"),
+    # 주식: 15분봉 — 장중 충분한 데이터 확보 + 노이즈 감소
+    ("AI11", 15, 0.007, 0.58, "all",      "stock", 3, "lgbm"),
+    ("AI12", 15, 0.006, 0.60, "trend",    "stock", 5, "lgbm"),
+    ("AI13", 15, 0.009, 0.58, "momentum", "stock", 8, "lgbm"),
+    ("AI14", 15, 0.006, 0.60, "volume",   "stock", 3, "lgbm"),
+    ("AI15", 15, 0.011, 0.60, "all",      "stock", 5, "lgbm"),
+    ("AI16", 15, 0.006, 0.60, "trend",    "stock", 8, "lgbm"),
+    ("AI17", 15, 0.011, 0.62, "momentum", "stock", 3, "lgbm"),
+    ("AI18", 15, 0.007, 0.60, "volume",   "stock", 5, "lgbm"),
+    ("AI19", 15, 0.013, 0.65, "all",      "stock", 8, "lgbm"),
+    ("AI20", 15, 0.013, 0.60, "trend",    "stock", 3, "lgbm"),
 ]
 
 
@@ -170,7 +171,7 @@ class SimAgent:
         self._model: XGBClassifier | LGBMClassifier | None = None
         self._scaler: StandardScaler | None = None
         self._trained_at: str | None = None
-        self._model_path = MODEL_DIR / f"{model_type}_agent_{agent_id}.pkl"
+        self._model_path = MODEL_DIR / f"{model_type}_agent_{agent_id}_{interval_min}m.pkl"
         self._train_lock = asyncio.Lock()   # 동시 재학습 race condition 방지
 
         self.total_trades = 0
@@ -184,7 +185,7 @@ class SimAgent:
         self._last_adx_14: float = 0.0           # ADX(14) — BUY 필터: 횡보장 진입 차단용
         self._meta_model: LGBMClassifier | None = None   # Meta-Labeling 2차 필터 모델
         self._meta_scaler: StandardScaler | None = None
-        self._meta_path = MODEL_DIR / f"meta_agent_{agent_id}.pkl"
+        self._meta_path = MODEL_DIR / f"meta_agent_{agent_id}_{interval_min}m.pkl"
         self._cached_funding_rates: list[dict] = []  # 재학습 시 업데이트, predict()에서 사용
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
@@ -568,14 +569,15 @@ class SimAgent:
             # 손실 낸 매수 시점 봉 → 가중치 ↓ (최소 0.3배)
             if trade_results:
                 try:
+                    _round_freq = f"{self.interval_min}min"
                     ohlcv_dates = pd.to_datetime(
                         [d["date"] for d in reversed(ohlcv_list)]
-                    ).round("5min")
+                    ).round(_round_freq)
                     ohlcv_dates_arr = ohlcv_dates.values
                     n_train = len(X_train)
                     for tr in trade_results:
                         try:
-                            buy_dt = pd.Timestamp(tr["buy_at"]).round("5min").to_datetime64()
+                            buy_dt = pd.Timestamp(tr["buy_at"]).round(_round_freq).to_datetime64()
                             idx = int(np.searchsorted(ohlcv_dates_arr, buy_dt))
                             if idx >= n_train:
                                 continue
@@ -1581,8 +1583,8 @@ AGENTS: dict[str, SimAgent] = build_agents()
 # ── 앙상블 그림자 에이전트 — 실매매 앙상블 신호를 가상 포트폴리오로 추적 ──────
 # predict_ensemble() 호출 결과를 동일 TP/SL 로직으로 가상 매매해 앙상블 기대수익 검증
 ENSEMBLE_AGENTS: dict[str, SimAgent] = {
-    "ENSEMBLE_COIN":  SimAgent("ENSEMBLE_COIN",  5, 0.008, 0.65, "all", "coin",  5, "lgbm"),
-    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 5, 0.006, 0.60, "all", "stock", 5, "lgbm"),
+    "ENSEMBLE_COIN":  SimAgent("ENSEMBLE_COIN",  60, 0.010, 0.65, "all", "coin",  5, "lgbm"),
+    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 15, 0.007, 0.60, "all", "stock", 5, "lgbm"),
 }
 
 

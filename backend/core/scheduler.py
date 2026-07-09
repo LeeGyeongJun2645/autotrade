@@ -524,10 +524,10 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # AI 에이전트 경쟁 시뮬레이션: 5분마다
+        # AI 에이전트 경쟁 시뮬레이션: 30분마다 (코인 60분봉/주식 15분봉 → 30분 간격 충분)
         self._scheduler.add_job(
             self._agent_tick,
-            CronTrigger(minute="*/5", timezone=KST),
+            CronTrigger(minute="*/30", timezone=KST),
             id="agent_tick",
             replace_existing=True,
             coalesce=True,
@@ -665,11 +665,15 @@ class TradingScheduler:
                     await self._execute_kis_dca_add(symbol, current_price, position, 3, 0.25)
             return
 
-        # ── 포지션 없음: 매수 신호 탐색 (5분봉) ──
+        # ── 포지션 없음: 매수 신호 탐색 (5분봉 전략 + 15분봉 ML 게이트) ──
         ohlcv_5min = await kis.get_minute_ohlcv(symbol, interval_min=5, count=300)
         result, strategy_name = self._run_kis_strategies(ohlcv_5min, current_price)
         if result.is_buy:
-            ml_ok = await self._check_ml_gate(symbol, ohlcv_5min, market="stock")
+            try:
+                ohlcv_ml = await kis.get_minute_ohlcv(symbol, interval_min=15, count=200)
+            except Exception:
+                ohlcv_ml = ohlcv_5min
+            ml_ok = await self._check_ml_gate(symbol, ohlcv_ml, market="stock")
             if ml_ok:
                 sim_log.push(symbol, f"{strategy_name}+5분봉ML — {result.reason} @ {current_price:,.0f}원", "BUY")
                 await self._execute_kis_buy(symbol, current_price, result, strategy_name)
@@ -700,8 +704,8 @@ class TradingScheduler:
         )
         return result, "rsi"
 
-    async def _check_ml_gate(self, symbol: str, ohlcv_5min: list, market: str = "coin") -> bool:
-        """앙상블 ML 게이트.
+    async def _check_ml_gate(self, symbol: str, ohlcv_ml: list, market: str = "coin") -> bool:
+        """앙상블 ML 게이트 (코인=60분봉, 주식=15분봉).
 
         모든 학습된 에이전트가 최근 성과 기반 가중 투표.
         지금 잘 맞히는 전략이 자동으로 발언권 커짐 → 장세 변화 자동 적응.
@@ -720,7 +724,7 @@ class TradingScheduler:
             taker_hist = self._btc_taker_hist   if market == "coin" else None
             ls_hist    = self._btc_ls_hist      if market == "coin" else None
             signal, prob = await predict_ensemble(
-                ohlcv_5min, ticker=symbol, market=market,
+                ohlcv_ml, ticker=symbol, market=market,
                 btc_ohlcv=btc_ohlcv,
                 oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist,
             )
@@ -1042,7 +1046,11 @@ class TradingScheduler:
         ohlcv_5min = await upbit.get_ohlcv(ticker, interval="minutes/5", count=300)
         result, strategy_name = self._run_upbit_strategies(ohlcv_5min, current_price)
         if result.is_buy:
-            ml_ok = await self._check_ml_gate(ticker, ohlcv_5min, market="coin")
+            try:
+                ohlcv_ml = await upbit.get_ohlcv(ticker, interval="minutes/60", count=200)
+            except Exception:
+                ohlcv_ml = ohlcv_5min
+            ml_ok = await self._check_ml_gate(ticker, ohlcv_ml, market="coin")
             if ml_ok:
                 sim_log.push(ticker, f"{strategy_name}+5분봉ML — {result.reason} @ {current_price:,.0f}원", "BUY")
                 await self._execute_upbit_buy(ticker, current_price, result, strategy_name)
@@ -1282,7 +1290,7 @@ class TradingScheduler:
             logger.exception("[리포트] 일일 리포트 실행 중 예외")
 
     async def _agent_tick(self) -> None:
-        """5분마다 — 20개 에이전트 가상 매매 실행.
+        """30분마다 — 20개 에이전트 가상 매매 실행 (코인 60분봉, 주식 15분봉).
 
         코인: 24/7 — 업비트 거래대금 상위 50개
         주식: 평일 장중(09:00~15:30)에 추가 — KIS 거래량 상위 50개
@@ -1395,9 +1403,9 @@ class TradingScheduler:
             _fetch_tasks = []
             for _sym in _binance_targets:
                 _fetch_tasks.extend([
-                    get_open_interest_hist(_sym, period="5m", limit=200),
-                    get_taker_ratio_hist(_sym, period="5m", limit=200),
-                    get_ls_ratio_hist(_sym, period="5m", limit=200),
+                    get_open_interest_hist(_sym, period="1h", limit=200),
+                    get_taker_ratio_hist(_sym, period="1h", limit=200),
+                    get_ls_ratio_hist(_sym, period="1h", limit=200),
                 ])
             _results = await asyncio.gather(*_fetch_tasks, return_exceptions=True)
             for i, _sym in enumerate(_binance_targets):
@@ -1423,11 +1431,11 @@ class TradingScheduler:
         stock_ohlcv_cache: dict[str, list] = {}
         stock_prices: dict[str, float] = {}
 
-        # KOSPI 지수 5분봉 (주식 에이전트 상대강도 피처용)
+        # KOSPI 지수 15분봉 (주식 에이전트 상대강도 피처용 — 15분봉 에이전트와 타임프레임 맞춤)
         kospi_ohlcv: list[dict] = []
         if is_market_open and stock_symbols:
             try:
-                kospi_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=200)
+                kospi_ohlcv = await _kis.get_minute_ohlcv("0001", 15, count=200)
             except Exception:
                 kospi_ohlcv = []
 
@@ -1479,8 +1487,8 @@ class TradingScheduler:
             sp_results = await asyncio.gather(*[_fetch_stock_price(s) for s in stock_symbols])
             stock_prices = {s: p for s, p in sp_results if p > 0}
 
-        # BTC OHLCV 캐시 갱신 (ML 게이트 btc_corr_20 피처용)
-        _fresh_btc = ohlcv_cache.get("KRW-BTC:minutes/5", [])
+        # BTC OHLCV 캐시 갱신 (ML 게이트 btc_corr_20 피처용 — 60분봉)
+        _fresh_btc = ohlcv_cache.get("KRW-BTC:minutes/60", [])
         if _fresh_btc:
             self._btc_ohlcv_cache = _fresh_btc
 
@@ -1513,8 +1521,8 @@ class TradingScheduler:
                     if agent.market == "coin":
                         # ── 코인 전담 (AI01~AI10): 24/7 ──────────────
                         agent.update_position_values(coin_prices)
-                        # BTC OHLCV (비BTC 코인의 상관관계 피처용)
-                        btc_ohlcv_cache = ohlcv_cache.get("KRW-BTC:minutes/5", [])
+                        # BTC OHLCV (비BTC 코인의 상관관계 피처용 — 60분봉)
+                        btc_ohlcv_cache = ohlcv_cache.get(f"KRW-BTC:{agent.interval_str}", [])
                         for ticker in fetch_coin_tickers:
                             ohlcv = ohlcv_cache.get(f"{ticker}:{agent.interval_str}", [])
                             if not ohlcv:
@@ -1522,7 +1530,12 @@ class TradingScheduler:
                             # BTC 자신은 BTC 상관관계 불필요
                             _btc_ref = btc_ohlcv_cache if ticker != "KRW-BTC" else None
                             if agent._model is None and not agent.load_model():
-                                train_count = 2000 if agent.interval_min <= 5 else 700
+                                if agent.interval_min <= 5:
+                                    train_count = 2000
+                                elif agent.interval_min <= 15:
+                                    train_count = 1000
+                                else:
+                                    train_count = 700
                                 try:
                                     train_ohlcv = await _upbit.get_ohlcv(
                                         ticker, interval=agent.interval_str, count=train_count
@@ -1643,7 +1656,7 @@ class TradingScheduler:
                     _ea.update_position_values(coin_prices if _ea.market == "coin" else stock_prices)
                     _tickers = (coin_tickers if _ea.market == "coin" else stock_symbols)[:20]
                     for _eticker in _tickers:
-                        _key = f"{_eticker}:minutes/5" if _ea.market == "coin" else f"{_eticker}:{_ea.interval_min}"
+                        _key = f"{_eticker}:{_ea.interval_str}" if _ea.market == "coin" else f"{_eticker}:{_ea.interval_min}"
                         _eohlcv = (ohlcv_cache if _ea.market == "coin" else stock_ohlcv_cache).get(_key, [])
                         if not _eohlcv:
                             continue
@@ -2103,8 +2116,8 @@ class TradingScheduler:
             if agent.market == "coin":
                 for _t in ["KRW-BTC", "KRW-ETH", "KRW-XRP"]:
                     try:
-                        _ohlcv = await _upbit.get_ohlcv(_t, interval="minutes/5", count=2000)
-                        if len(_ohlcv) >= 300:
+                        _ohlcv = await _upbit.get_ohlcv(_t, interval=agent.interval_str, count=700)
+                        if len(_ohlcv) >= 200:
                             ok = await asyncio.to_thread(agent.train, _ohlcv)
                             if ok:
                                 logger.info("[비상재학습] %s 코인 모델 갱신 완료 (%s)", agent.agent_id, _t)
@@ -2114,7 +2127,7 @@ class TradingScheduler:
             else:
                 for _sym in ["005930", "000660"]:
                     try:
-                        _ohlcv = await _kis.get_ohlcv(_sym, interval="minutes/5", count=500)
+                        _ohlcv = await _kis.get_minute_ohlcv(_sym, agent.interval_min, count=500)
                         if len(_ohlcv) >= 100:
                             ok = await asyncio.to_thread(agent.train, _ohlcv)
                             if ok:
@@ -2126,10 +2139,10 @@ class TradingScheduler:
             logger.warning("[비상재학습] %s 실패: %s", agent.agent_id, e)
 
     async def _daily_retrain(self) -> None:
-        """매일 06:05 KST — 전 에이전트 최신 데이터로 재학습.
+        """매일 06:07 KST — 전 에이전트 최신 데이터로 재학습.
 
-        코인: BTC·ETH·XRP·SOL 4개 순차 시도, 첫 성공 데이터 사용 (2000봉 = 약 7일치)
-        주식: 삼성전자·SK하이닉스·NAVER 3개 순차 시도 (500봉 = 약 5거래일치)
+        코인: BTC·ETH·XRP·SOL 4개 순차 시도, 60분봉 700봉 (약 29일치)
+        주식: 삼성전자·SK하이닉스·NAVER 3개 순차 시도, 15분봉 500봉 (약 25거래일치)
         에이전트별로 피처셋이 다르므로 같은 데이터로 학습해도 모델이 달라짐.
         """
         from backend.api import upbit as _upbit, kis as _kis
@@ -2144,9 +2157,9 @@ class TradingScheduler:
         coin_ohlcv: list[dict] = []
         for ticker in COIN_TICKERS:
             try:
-                coin_ohlcv = await _upbit.get_ohlcv(ticker, interval="minutes/5", count=2000)
-                if len(coin_ohlcv) >= 500:
-                    logger.info("[Retrain] 코인 학습 데이터: %s (%d봉)", ticker, len(coin_ohlcv))
+                coin_ohlcv = await _upbit.get_ohlcv(ticker, interval="minutes/60", count=700)
+                if len(coin_ohlcv) >= 200:
+                    logger.info("[Retrain] 코인 학습 데이터: %s (%d봉, 60분봉)", ticker, len(coin_ohlcv))
                     break
             except Exception as e:
                 logger.warning("[Retrain] 코인 OHLCV 수집 실패 (%s): %s", ticker, e)
@@ -2169,10 +2182,10 @@ class TradingScheduler:
             for symbol in STOCK_SYMBOLS:
                 for attempt in range(3):
                     try:
-                        _tmp = await _kis.get_minute_ohlcv(symbol, 5, count=200)
+                        _tmp = await _kis.get_minute_ohlcv(symbol, 15, count=500)
                         if len(_tmp) >= 50:
                             _stock_retrain_map[symbol] = _tmp
-                            logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉)", symbol, len(_tmp))
+                            logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉, 15분봉)", symbol, len(_tmp))
                             break
                         await asyncio.sleep(3)
                     except Exception as e:
@@ -2194,8 +2207,8 @@ class TradingScheduler:
         # ── BTC 학습용 데이터 (코인 에이전트 상관관계 피처용) ────────
         btc_train_ohlcv: list[dict] = []
         try:
-            btc_train_ohlcv = await _upbit.get_ohlcv("KRW-BTC", interval="minutes/5", count=2000)
-            logger.info("[Retrain] BTC 학습 데이터: %d봉", len(btc_train_ohlcv))
+            btc_train_ohlcv = await _upbit.get_ohlcv("KRW-BTC", interval="minutes/60", count=700)
+            logger.info("[Retrain] BTC 학습 데이터: %d봉 (60분봉)", len(btc_train_ohlcv))
         except Exception:
             logger.warning("[Retrain] BTC 상관관계 학습 데이터 수집 실패")
 
@@ -2206,8 +2219,8 @@ class TradingScheduler:
             logger.info("[Retrain] KOSPI 학습 데이터(캐시): %d봉", len(kospi_train_ohlcv))
         else:
             try:
-                kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 5, count=100)
-                logger.info("[Retrain] KOSPI 학습 데이터(API): %d봉", len(kospi_train_ohlcv))
+                kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 15, count=200)
+                logger.info("[Retrain] KOSPI 학습 데이터(API): %d봉 (15분봉)", len(kospi_train_ohlcv))
             except Exception:
                 logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
 
@@ -2218,9 +2231,9 @@ class TradingScheduler:
         btc_ls_train:    list[dict] = []
         try:
             btc_oi_train, btc_taker_train, btc_ls_train = await asyncio.gather(
-                get_open_interest_hist("BTCUSDT", period="5m", limit=500),
-                get_taker_ratio_hist("BTCUSDT", period="5m", limit=500),
-                get_ls_ratio_hist("BTCUSDT", period="5m", limit=500),
+                get_open_interest_hist("BTCUSDT", period="1h", limit=700),
+                get_taker_ratio_hist("BTCUSDT", period="1h", limit=700),
+                get_ls_ratio_hist("BTCUSDT", period="1h", limit=700),
             )
             logger.info("[Retrain] BTC OI: %d개, Taker비율: %d개, L/S비율: %d개",
                         len(btc_oi_train), len(btc_taker_train), len(btc_ls_train))
