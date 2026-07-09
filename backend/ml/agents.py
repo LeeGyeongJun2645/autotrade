@@ -189,8 +189,8 @@ class SimAgent:
         self._cached_oi_hist: list[dict] = []         # BTC OI 히스토리 캐시 (코인 전용)
         self._cached_taker_hist: list[dict] = []      # BTC Taker 비율 히스토리 캐시 (코인 전용)
         self._cached_ls_hist: list[dict] = []         # BTC 글로벌 L/S 비율 히스토리 캐시 (코인 전용)
-        self._last_ohlcv_cache: dict[str, list[dict]] = {}  # 종목별 최신 OHLCV (continuation_score 용, 최대 60종목)
-        self._OHLCV_CACHE_MAXSIZE: int = 60  # 에이전트당 캐시 최대 종목 수 (22에이전트 × 60 × 200봉 ≈ 2.6GB 방지)
+        self._last_ohlcv_cache: dict[str, list[dict]] = {}  # 종목별 최신 OHLCV (continuation_score 용, 최대 100종목)
+        self._OHLCV_CACHE_MAXSIZE: int = 100  # 에이전트당 캐시 최대 종목 수 (22에이전트 × 100 × 200봉 ≈ 430MB 상한)
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
         self._trailing_mode: set[str] = set()
         # ── MFE/MAE 기반 동적 TP 배수 ─────────────────────────────────

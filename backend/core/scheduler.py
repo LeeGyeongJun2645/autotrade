@@ -1895,12 +1895,35 @@ class TradingScheduler:
             # 동적 블랙리스트: WR<35% + 20건 이상인 종목 진입 차단 (반복 손실 종목 자동 제외)
             if symbol in agent._ticker_blacklist:
                 return
-            # 일일 BUY 제한: 과매매 방지 (코인 8건/일, 주식 5건/일)
+            # 일일 BUY 제한: WR 기반 자동 조정 (30건 미만 시 기본값 고정)
+            # EV음수(WR<48%) 구간에서는 거래 수 억제, BEP 돌파 시 자동 확대
             _today_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
             if agent._today_date != _today_kst:
                 agent._today_date = _today_kst
                 agent._today_buy_count = 0
-            _daily_limit = 8 if agent.market == "coin" else 5
+            _wr = agent.win_rate
+            _min_trades_for_dynamic = 30  # 통계 신뢰 최소 건수
+            if agent.total_trades < _min_trades_for_dynamic:
+                # 학습 초기: 기본값으로 고정
+                _daily_limit = 8 if agent.market == "coin" else 5
+            elif agent.market == "coin":
+                if _wr < 0.45:
+                    _daily_limit = 6    # EV 음수, 최소화
+                elif _wr < 0.48:
+                    _daily_limit = 8    # BEP 직전, 보수적 유지
+                elif _wr < 0.55:
+                    _daily_limit = 12   # BEP 돌파, 확대
+                else:
+                    _daily_limit = 20   # 고승률, 적극 활용
+            else:  # stock
+                if _wr < 0.45:
+                    _daily_limit = 4
+                elif _wr < 0.48:
+                    _daily_limit = 5
+                elif _wr < 0.55:
+                    _daily_limit = 8
+                else:
+                    _daily_limit = 12
             if agent._today_buy_count >= _daily_limit:
                 return
             # ADX 필터: 코인 횡보장(ADX<15) 진입 차단 — 추세 없는 구간에서 WR 급락 방지
