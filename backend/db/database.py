@@ -131,6 +131,8 @@ async def init_db() -> None:
             "ALTER TABLE agent_trades ADD COLUMN buy_vol_ratio  REAL",
             # 일일 P&L 추적용
             "ALTER TABLE agent_stats ADD COLUMN day_start_balance REAL DEFAULT 0.0",
+            # 일일 BUY 건수 영속화 (재시작 후 복원용 보조 컬럼)
+            "ALTER TABLE agent_stats ADD COLUMN today_buy_count   INTEGER DEFAULT 0",
         ]
         for sql in _migrations:
             try:

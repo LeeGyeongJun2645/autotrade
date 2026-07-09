@@ -362,7 +362,21 @@ class TradingScheduler:
                         if len(trade_rows.get(aid, [])) < 30:
                             trade_rows.setdefault(aid, []).append(dict(r))
 
+                # 오늘 BUY 건수 복원 (재시작 시 _today_buy_count 초기화 방지)
+                from datetime import datetime as _dt2
+                _today_kst_str = _dt2.now(KST).strftime("%Y-%m-%d")
+                async with db.execute("""
+                    SELECT agent_id, COUNT(*) as cnt
+                    FROM agent_trades
+                    WHERE action = 'BUY'
+                      AND DATE(traded_at) = ?
+                    GROUP BY agent_id
+                """, (_today_kst_str,)) as cur:
+                    today_buy_counts = {r["agent_id"]: int(r["cnt"]) async for r in cur}
+
             from backend.ml.agents import ENSEMBLE_AGENTS
+            from datetime import datetime as _dt3
+            _today_kst_str2 = _dt3.now(KST).strftime("%Y-%m-%d")
             for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
                 stats = stats_rows.get(agent.agent_id)
                 if stats:
@@ -371,7 +385,13 @@ class TradingScheduler:
                         pos_rows.get(agent.agent_id, []),
                         trade_rows.get(agent.agent_id, []),
                     )
-            logger.info("[복구] 에이전트 stats %d개 복구 완료", len(stats_rows))
+                    # 오늘 BUY 건수 복원
+                    agent._today_buy_count = today_buy_counts.get(agent.agent_id, 0)
+                    agent._today_date = _today_kst_str2
+                    # day_start_balance 복원: DB에 저장된 값 사용, 0이면 현재 잔액으로 초기화
+                    _dsb = float(stats.get("day_start_balance") or 0.0)
+                    agent.day_start_balance = _dsb if _dsb > 0 else (agent._balance + agent.position_value)
+            logger.info("[복구] 에이전트 stats %d개 복구 완료 (오늘BUY: %s)", len(stats_rows), dict(list(today_buy_counts.items())[:5]))
         except Exception:
             logger.exception("[복구] 에이전트 stats 복구 실패")
 
@@ -1481,18 +1501,19 @@ class TradingScheduler:
                             signal, prob = agent.predict(ohlcv, kospi_ohlcv=kospi_ohlcv or None, ticker=symbol)
                             await self._agent_execute(db, agent, symbol, signal, prob, price)
 
-                    # agent_stats upsert
+                    # agent_stats upsert (today_buy_count 포함 → 재시작 후 복원 가능)
                     await db.execute(
                         """INSERT INTO agent_stats
                            (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
                             total_trades, win_trades, win_rate, total_return, current_balance,
-                            is_champion, is_active, updated_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            is_champion, is_active, today_buy_count, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
                              total_trades=excluded.total_trades, win_trades=excluded.win_trades,
                              win_rate=excluded.win_rate, total_return=excluded.total_return,
                              current_balance=excluded.current_balance, is_champion=excluded.is_champion,
                              buy_threshold=excluded.buy_threshold, is_active=excluded.is_active,
+                             today_buy_count=excluded.today_buy_count,
                              updated_at=excluded.updated_at""",
                         (
                             agent.agent_id, agent.interval_min, agent.label_threshold,
@@ -1500,7 +1521,7 @@ class TradingScheduler:
                             agent.total_trades, agent.win_trades,
                             round(agent.win_rate, 4), round(agent.total_return, 4),
                             round(agent._balance, 2), int(agent.is_champion),
-                            int(agent.is_active),
+                            int(agent.is_active), agent._today_buy_count,
                             now.strftime("%Y-%m-%dT%H:%M:%S"),
                         ),
                     )
@@ -1543,19 +1564,21 @@ class TradingScheduler:
                         """INSERT INTO agent_stats
                            (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
                             total_trades, win_trades, win_rate, total_return, current_balance,
-                            is_champion, is_active, updated_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?)
+                            is_champion, is_active, today_buy_count, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
                              total_trades=excluded.total_trades, win_trades=excluded.win_trades,
                              win_rate=excluded.win_rate, total_return=excluded.total_return,
                              current_balance=excluded.current_balance,
                              buy_threshold=excluded.buy_threshold,
+                             today_buy_count=excluded.today_buy_count,
                              updated_at=excluded.updated_at""",
                         (_ea.agent_id, _ea.interval_min, _ea.label_threshold,
                          round(_ea.buy_threshold, 4), _ea.feature_set,
                          _ea.total_trades, _ea.win_trades,
                          round(_ea.win_rate, 4), round(_ea.total_return, 4),
-                         round(_ea._balance, 2), now.strftime("%Y-%m-%dT%H:%M:%S")),
+                         round(_ea._balance, 2), _ea._today_buy_count,
+                         now.strftime("%Y-%m-%dT%H:%M:%S")),
                     )
                 await _edb.commit()
         except Exception:
@@ -1569,8 +1592,8 @@ class TradingScheduler:
         # ATR이 유효하면(>0.1%) 시장 변동성에 자동 적응, 없으면 고정값 폴백
         atr_pct = agent._last_atr_pct
         if atr_pct > 0.001:
-            STOP_LOSS   = max(-(atr_pct * 1.2), -0.005)  # ATR×1.2 (1.5→1.2: 손절 타이트)
-            STOP_LOSS   = max(STOP_LOSS, -0.015)          # 상한 -1.5% (-2.0→-1.5: 대손절 방지)
+            STOP_LOSS   = min(-(atr_pct * 1.2), -0.005)  # ATR×1.2, 최소 -0.5% 보장 (min: ATR 클수록 넓어짐)
+            STOP_LOSS   = max(STOP_LOSS, -0.015)          # 상한 -1.5% (대손절 방지)
             tp_base     = max(atr_pct * agent._dynamic_tp_mult, 0.012)  # 동적 배수 (R비율 기반, 기본 3.0)
         else:
             STOP_LOSS   = -0.015
@@ -1614,13 +1637,13 @@ class TradingScheduler:
             # 최소 보유 10분: 진입 직후 신호 기반 조기 청산 완전 차단
             # 분석: 0~10분 청산 WR=38.2%(최악) → 노이즈 신호에 의한 손절이 주원인
             if held_min < 10:
-                extreme_sl = STOP_LOSS * 1.5  # ATR×2.25 (급락 시에만 즉시 손절)
+                extreme_sl = STOP_LOSS * 1.5  # ATR×1.8 (급락 시에만 즉시 손절)
                 if unreal >= tp_base:
                     signal = "sell"
                     sim_log.push(agent.agent_id, f"[즉시익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) @ {price:,.0f}원", "SELL")
                 elif unreal <= extreme_sl:
                     signal = "sell"
-                    sim_log.push(agent.agent_id, f"[급락손절] {symbol} {unreal*100:.1f}% (ATR×2.25={extreme_sl*100:.1f}%) @ {price:,.0f}원", "SELL")
+                    sim_log.push(agent.agent_id, f"[급락손절] {symbol} {unreal*100:.1f}% (ATR×1.8={extreme_sl*100:.1f}%) @ {price:,.0f}원", "SELL")
                 else:
                     signal = "hold"  # 그 외 신호 무시: 노이즈 청산 차단
             else:

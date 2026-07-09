@@ -689,6 +689,9 @@ def compute_features(
          (1 - _k_yz) * _rs_yz.rolling(_yz_n).mean()).clip(lower=0)
     ).fillna(0.0)
 
+    # df.copy()로 100+ 컬럼 누적 단편화 해소 (PerformanceWarning 방지 — 이전 위치 L727에서 앞으로 이동)
+    df = df.copy()
+
     # ── 멀티타임프레임 수익률 (5분봉 기준, 상위 TF 모멘텀 정렬 감지) ─
     df["mtf_ret_15m"] = close.pct_change(3).fillna(0.0)    # 15분
     df["mtf_ret_1h"]  = close.pct_change(12).fillna(0.0)   # 1시간
@@ -723,8 +726,6 @@ def compute_features(
 
     # ── ORB + 장중 세션 피처 (주식 전용: kospi_ohlcv 있을 때만, 코인=0) ──
     # kospi_ohlcv 가 None 이면 코인 에이전트 → 전부 중립값
-    # df.copy()로 단편화 해소 (100+ 컬럼 추가 후 PerformanceWarning 방지)
-    df = df.copy()
     if kospi_ohlcv is not None:
         try:
             _h_idx = df.index.hour
