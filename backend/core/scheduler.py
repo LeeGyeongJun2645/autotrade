@@ -2146,7 +2146,7 @@ class TradingScheduler:
         에이전트별로 피처셋이 다르므로 같은 데이터로 학습해도 모델이 달라짐.
         """
         from backend.api import upbit as _upbit, kis as _kis
-        from backend.ml.agents import AGENTS
+        from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
 
         logger.info("[Retrain] 전 에이전트 일일 재학습 시작")
 
