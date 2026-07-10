@@ -183,6 +183,7 @@ def compute_features(
     ticker: str = "",                          # 뉴스 감성 조회용 종목 코드
     ls_hist: list[dict] | None = None,         # 바이낸스 글로벌 L/S 비율 히스토리
     obi_snaps: list[float] | None = None,      # 60분봉 내 오더북 OBI 스냅샷 리스트 (코인전용)
+    interval_min: int = 5,                     # 봉 단위 (5분봉=5, 60분봉=60) — MTF 봉수 계산용
 ) -> pd.DataFrame:
     """OHLCV 리스트 → Feature DataFrame 변환.
 
@@ -684,10 +685,14 @@ def compute_features(
     # df.copy()로 100+ 컬럼 누적 단편화 해소 (PerformanceWarning 방지 — 이전 위치 L727에서 앞으로 이동)
     df = df.copy()
 
-    # ── 멀티타임프레임 수익률 (5분봉 기준, 상위 TF 모멘텀 정렬 감지) ─
-    df["mtf_ret_15m"] = close.pct_change(3).fillna(0.0)    # 15분
-    df["mtf_ret_1h"]  = close.pct_change(12).fillna(0.0)   # 1시간
-    df["mtf_ret_4h"]  = close.pct_change(48).fillna(0.0)   # 4시간
+    # ── 멀티타임프레임 수익률 (interval_min 기반 봉수 동적 계산)
+    # 60분봉: 15분→1봉, 1h→max(2,1)=2봉, 4h→max(3,4)=4봉으로 자동 스케일
+    _bars_s = max(1, 15 // interval_min)
+    _bars_m = max(_bars_s + 1, 60 // interval_min)
+    _bars_l = max(_bars_m + 1, 240 // interval_min)
+    df["mtf_ret_15m"] = close.pct_change(_bars_s).fillna(0.0)
+    df["mtf_ret_1h"]  = close.pct_change(_bars_m).fillna(0.0)
+    df["mtf_ret_4h"]  = close.pct_change(_bars_l).fillna(0.0)
     _dir_1   = np.sign(close.pct_change(1))
     _dir_15m = np.sign(df["mtf_ret_15m"])
     _dir_1h  = np.sign(df["mtf_ret_1h"])

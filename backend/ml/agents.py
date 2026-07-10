@@ -435,6 +435,7 @@ class SimAgent:
                 oi_hist=oi_hist,
                 taker_hist=taker_hist,
                 ls_hist=_ls,
+                interval_min=self.interval_min,
             )
             # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
@@ -502,26 +503,29 @@ class SimAgent:
                         break  # 손절 터치 → 0 유지
             label = pd.Series(raw_labels, index=range(len(close)))
 
-            # 수익률은 노이즈 필터용으로 유지
-            next_close = close.shift(-LOOKAHEAD)
-            ret = (next_close / close - 1).fillna(0)
+            # ATR 기반 변동성 필터 (lookahead 없음: 미래 수익률 대신 현재 ATR 사용)
+            if _atr_series is not None:
+                _vol_series = _atr_series.fillna(NOISE_FLOOR * 2)
+            else:
+                _vol_series = close.pct_change().abs().rolling(3).mean().fillna(NOISE_FLOOR * 2)
+            _vol_series = _vol_series.reset_index(drop=True)
 
             # 마지막 LOOKAHEAD 행 제거
-            feat_df = feat_df.iloc[:-LOOKAHEAD]
-            label   = label.iloc[:-LOOKAHEAD]
-            ret     = ret.iloc[:-LOOKAHEAD]
+            feat_df    = feat_df.iloc[:-LOOKAHEAD]
+            label      = label.iloc[:-LOOKAHEAD]
+            _vol_series = _vol_series.iloc[:-LOOKAHEAD]
 
             # 길이 보정
-            min_len = min(len(feat_df), len(label))
-            feat_df = feat_df.iloc[:min_len]
-            label   = label.iloc[:min_len]
-            ret     = ret.iloc[:min_len]
+            min_len = min(len(feat_df), len(label), len(_vol_series))
+            feat_df    = feat_df.iloc[:min_len]
+            label      = label.iloc[:min_len]
+            _vol_series = _vol_series.iloc[:min_len]
 
-            # 노이즈 필터: label=0 중 LOOKAHEAD 후 수익률이 ±NOISE_FLOOR 미만인 구간 제외
-            # label=1(TP 조기 발동 후 되돌림)은 유효한 매수 기회이므로 항상 보존
-            clear_mask = (label == 1) | (ret.abs() >= NOISE_FLOOR)
-            feat_df = feat_df[clear_mask.values]
-            label   = label[clear_mask.values]
+            # 노이즈 필터: label=0이고 ATR이 NOISE_FLOOR 미만(= 횡보 구간) → 제외
+            # label=1은 유효 매수 기회이므로 항상 보존
+            clear_mask = (label == 1) | (_vol_series.values >= NOISE_FLOOR)
+            feat_df = feat_df[clear_mask]
+            label   = label[clear_mask]
 
             if len(feat_df) < 30 or len(set(label.values)) < 2:
                 logger.warning("[%s] 학습 스킵: 레이블 후 %d행 / 클래스수 %d (양성레이블 %d개)",
@@ -744,7 +748,7 @@ class SimAgent:
     ) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
         """단일 종목 OHLCV → (X, y, feature_cols) 배열 반환. 실패/샘플 부족 시 None."""
         try:
-            feat_df = compute_features(ohlcv_list, kospi_ohlcv=kospi_ohlcv)
+            feat_df = compute_features(ohlcv_list, kospi_ohlcv=kospi_ohlcv, interval_min=self.interval_min)
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
             _seg_cols = [c for c in self.feature_names
                          if c in feat_df.columns and c not in self._low_importance_feats]
@@ -995,6 +999,7 @@ class SimAgent:
                 oi_hist=oi_hist or (self._cached_oi_hist or None),
                 taker_hist=taker_hist or (self._cached_taker_hist or None),
                 ticker=ticker,
+                interval_min=self.interval_min,
             )
         except Exception:
             return 0.0, []
@@ -1179,6 +1184,7 @@ class SimAgent:
                 ticker=ticker if ticker else "",
                 ls_hist=ls_hist or (self._cached_ls_hist or None),
                 obi_snaps=obi_snaps,
+                interval_min=self.interval_min,
             )
             if full_df.empty:
                 return "hold", 0.5
@@ -1661,7 +1667,8 @@ async def predict_ensemble(
     # ── 현재 시장 레짐 감지 (앙상블 가중치 조정용) ───────────────
     current_regime = 1  # 기본: 횡보장
     try:
-        _tmp = compute_features(ohlcv_list)
+        _interval = candidates[0].interval_min if candidates else 5
+        _tmp = compute_features(ohlcv_list, interval_min=_interval)
         if not _tmp.empty and "regime_state" in _tmp.columns:
             current_regime = int(_tmp["regime_state"].iloc[-1])
     except Exception:

@@ -428,6 +428,13 @@ class TradingScheduler:
                     for ticker, pos in agent._positions.items():
                         if ticker not in agent._peak_price:
                             agent._peak_price[ticker] = pos.entry_price
+                        # _trailing_mode: 부분청산이 완료된 종목은 이미 트레일링 구간이었음
+                        if ticker in agent._partial_tp_done:
+                            agent._trailing_mode.add(ticker)
+                        # _partial_tp_price: 아직 부분청산 안 된 종목은 1.5% 목표가로 보수 복원
+                        # (ATR 재계산 불가 → ATR 평균치 근사: entry×1.015)
+                        elif ticker not in agent._partial_tp_price:
+                            agent._partial_tp_price[ticker] = pos.entry_price * 1.015
                     # 동적 블랙리스트 복원
                     agent._ticker_blacklist = restored_bl.get(agent.agent_id, set())
             logger.info("[복구] 에이전트 stats %d개 복구 완료 (오늘BUY: %s)", len(stats_rows), dict(list(today_buy_counts.items())[:5]))
