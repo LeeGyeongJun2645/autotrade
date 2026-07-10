@@ -168,15 +168,6 @@ FEATURE_NAMES = [
     "ls_ratio",          # 롱 계좌 비율 (0.5=균등, >0.65=과도한 롱)
     "ls_extreme_long",   # ls_ratio > 0.65 → 1 (과열 롱, 역추세 신호)
     "ls_extreme_short",  # ls_ratio < 0.35 → 1 (과열 숏, 반등 신호)
-    # ── FVG (Fair Value Gap) — ICT/SMC 3캔들 불균형 구조 ──────────────────
-    "fvg_bull",          # 저점[t] > 고점[t-2]: 상승 갭 불균형 (매수 지지 구간)
-    "fvg_bear",          # 고점[t] < 저점[t-2]: 하락 갭 불균형 (매도 저항 구간)
-    # ── VSA (Volume Spread Analysis) ──────────────────────────────────────
-    "vsa_stopping_vol",  # 와이드봉+상단마감+초대량거래 = 하락 클라이막스(반등 신호)
-    "vsa_no_supply",     # 좁은봉+하단마감+저거래량 = 매도 소진(매수 신호)
-    "vsa_upthrust",      # 와이드봉+고점갱신+하단마감+고거래량 = 약세 반전(매도 신호)
-    # ── ICT 런던 킬존 (코인 전용, 주식=0) ───────────────────────────────
-    "is_london_kz",      # KST 15:00~18:00 코인만: 런던 세션 고유동성 구간
     # ── ICT Premium / Discount Zone ──────────────────────────────────────
     "premium_discount",  # (close-60봉저점)/(60봉고점-저점): 0=저가구간, 1=고가구간
 ]
@@ -837,40 +828,6 @@ def compute_features(
         df["supertrend_bull"] = pd.Series((_st_dir == 1.0).astype(float), index=df.index)
     except Exception:
         df["supertrend_bull"] = 0.5
-
-    # ── FVG (Fair Value Gap) — ICT/SMC 3캔들 갭 불균형 ─────────────────
-    # 상승 FVG: 현재봉 저점 > 2봉 전 고점 (캔들 사이 빈 구간 = 매수 지지)
-    # 하락 FVG: 현재봉 고점 < 2봉 전 저점 (캔들 사이 빈 구간 = 매도 저항)
-    df["fvg_bull"] = (low > high.shift(2)).astype(float)
-    df["fvg_bear"] = (high < low.shift(2)).astype(float)
-
-    # ── VSA (Volume Spread Analysis) ─────────────────────────────────────
-    _bar_range  = high - low
-    _wide_bar   = _bar_range > atr * 1.5          # 와이드 바: 범위 > ATR×1.5
-    _narrow_bar = _bar_range < atr * 0.5          # 좁은 바: 범위 < ATR×0.5
-    _upper_cls  = close > (low + _bar_range * 0.6) # 상단 60%+ 마감
-    _lower_cls  = close < (low + _bar_range * 0.4) # 하단 40%- 마감
-    _vol_ma20_safe = vol_ma20.replace(0, np.nan)   # 0거래량 기간 → NaN으로 처리 (오발화 방지)
-    # Stopping Volume: 와이드 양봉 + 상단마감 + 초대량거래 → 하락 클라이막스(반등 신호)
-    df["vsa_stopping_vol"] = (
-        _wide_bar & _upper_cls & (close > open_) & (vol > _vol_ma20_safe * 2.5)
-    ).astype(float).fillna(0.0)
-    # No Supply: 좁은봉 + 하단마감 + 저거래량 → 매도 소진, 공급 고갈(매수 신호)
-    df["vsa_no_supply"] = (
-        _narrow_bar & _lower_cls & (vol < _vol_ma20_safe * 0.7)
-    ).astype(float).fillna(0.0)
-    # Upthrust: 와이드 상승 시도 + 고점갱신 + 하단 마감 + 고거래량 → 약세 반전(매도 신호)
-    df["vsa_upthrust"] = (
-        _wide_bar & _lower_cls & (high > high.shift(1)) & (vol > _vol_ma20_safe * 1.5)
-    ).astype(float).fillna(0.0)
-
-    # ── ICT 런던 킬존 (코인 전용: KST 15~18시, 최고 유동성 2위) ─────────
-    # kospi_ohlcv is not None → 주식 종목 → 런던 킬존 무의미 → 0
-    if kospi_ohlcv is None:
-        _kst_hour = df.index.hour
-        df["is_london_kz"] = ((_kst_hour >= 15) & (_kst_hour < 18)).astype(float)
-    else:
-        df["is_london_kz"] = 0.0
 
     # ── ICT Premium / Discount Zone (60봉 스윙 내 현재가 위치) ───────────
     # 0 = 저가구간(Discount, 매수 유리), 1 = 고가구간(Premium, 매도 유리)
