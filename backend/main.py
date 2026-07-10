@@ -614,7 +614,7 @@ async def get_agent_analysis():
 
 @app.post("/agents/reset", tags=["Agents"])
 async def reset_agents(retrain: bool = Query(default=False)):
-    """모든 에이전트 초기화 — 잔액 10M 리셋, 포지션·거래기록 삭제.
+    """모든 에이전트 초기화 — 잔액 1M 리셋, 포지션·거래기록 삭제.
 
     retrain=true 로 호출하면 리셋 직후 재학습도 시작.
     기존 거래 기록은 agent_trades_archive 테이블로 이동 후 삭제.
@@ -629,13 +629,33 @@ async def reset_agents(retrain: bool = Query(default=False)):
         async with connect_db() as db:
             # 기존 거래 기록 아카이브 이동 후 삭제
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS agent_trades_archive AS
-                SELECT *, strftime('%Y-%m-%dT%H:%M:%S','now','localtime') AS archived_at
-                FROM agent_trades WHERE 0
+                CREATE TABLE IF NOT EXISTS agent_trades_archive (
+                    id INTEGER PRIMARY KEY,
+                    agent_id TEXT,
+                    ticker TEXT,
+                    action TEXT,
+                    price REAL,
+                    qty REAL,
+                    entry_price REAL,
+                    profit_rate REAL,
+                    balance REAL,
+                    traded_at TEXT,
+                    buy_prob REAL DEFAULT 0.0,
+                    buy_adx REAL DEFAULT 0.0,
+                    buy_vol_ratio REAL DEFAULT 0.0,
+                    archived_at TEXT
+                )
             """)
             await db.execute("""
                 INSERT INTO agent_trades_archive
-                SELECT *, strftime('%Y-%m-%dT%H:%M:%S','now','localtime')
+                    (id, agent_id, ticker, action, price, qty, entry_price,
+                     profit_rate, balance, traded_at,
+                     buy_prob, buy_adx, buy_vol_ratio, archived_at)
+                SELECT
+                    id, agent_id, ticker, action, price, qty, entry_price,
+                    profit_rate, balance, traded_at,
+                    buy_prob, buy_adx, buy_vol_ratio,
+                    strftime('%Y-%m-%dT%H:%M:%S','now','localtime')
                 FROM agent_trades
             """)
             await db.execute("DELETE FROM agent_trades")
