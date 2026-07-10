@@ -730,8 +730,8 @@ class SimAgent:
         self,
         ohlcv_list: list[dict],
         kospi_ohlcv: list[dict] | None = None,
-    ) -> tuple[np.ndarray, np.ndarray] | None:
-        """단일 종목 OHLCV → (X, y) 배열 반환. 실패/샘플 부족 시 None."""
+    ) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
+        """단일 종목 OHLCV → (X, y, feature_cols) 배열 반환. 실패/샘플 부족 시 None."""
         try:
             feat_df = compute_features(ohlcv_list, kospi_ohlcv=kospi_ohlcv)
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
@@ -1319,6 +1319,7 @@ class SimAgent:
             ohlcv_list,
             oi_hist=self._cached_oi_hist or None,
             taker_hist=self._cached_taker_hist or None,
+            obi_snaps=None,
         )
 
         if self.market == "coin" and ticker:
@@ -1591,7 +1592,7 @@ ENSEMBLE_AGENTS: dict[str, SimAgent] = {
 
 
 def reset_all_agents() -> None:
-    """모든 에이전트(가상+앙상블) 메모리 초기화 — 잔액 10M, 거래기록 0, 포지션 없음."""
+    """모든 에이전트(가상+앙상블) 메모리 초기화 — 잔액 1M(100만원), 거래기록 0, 포지션 없음."""
     for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
         agent._balance = INITIAL_CAPITAL
         agent._positions.clear()

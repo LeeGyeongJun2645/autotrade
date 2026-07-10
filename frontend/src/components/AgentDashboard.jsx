@@ -812,7 +812,7 @@ function ResetButton() {
 
   const reset = async () => {
     if (busy) return
-    if (!window.confirm('⚠️ 모든 에이전트를 10,000,000원으로 리셋하고 재학습을 시작합니다.\n기존 거래 기록은 아카이브로 보존됩니다.\n\n계속하시겠습니까?')) return
+    if (!window.confirm('⚠️ 모든 에이전트를 1,000,000원으로 리셋하고 재학습을 시작합니다.\n기존 거래 기록은 아카이브로 보존됩니다.\n\n계속하시겠습니까?')) return
     setBusy(true)
     setStatus(null)
     try {
@@ -829,7 +829,7 @@ function ResetButton() {
     <div className="flex items-center gap-3">
       <button onClick={reset} disabled={busy}
         className="text-xs px-3 py-1.5 rounded-lg bg-red-900/70 hover:bg-red-800 disabled:opacity-40 text-red-200 font-medium transition-colors border border-red-700/60">
-        {busy ? '리셋 중…' : '🔄 전체 리셋 + 재학습 (10M)'}
+        {busy ? '리셋 중…' : '🔄 전체 리셋 + 재학습 (1M)'}
       </button>
       {status && (
         <span className={`text-xs ${status.ok ? 'text-green-400' : 'text-red-400'}`}>{status.msg}</span>
