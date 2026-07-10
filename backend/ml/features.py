@@ -31,7 +31,6 @@ FEATURE_NAMES = [
     "adx_pos",
     "adx_neg",
     "trix_15",
-    "dpo_20",
     "vortex_diff",
     "ema9_cross_ema21",  # EMA 9/21 골든·데드 크로스
     # ── VWAP ──────────────────────────────
@@ -41,6 +40,7 @@ FEATURE_NAMES = [
     "vwap_lower2_dist",  # (close/VWAP-2σ) - 1: 하단 밴드 대비 위치 (양수=지지 위)
     # ── 변동성 ────────────────────────────
     "bb_pband",
+    "bb_width_pct",      # BB폭의 252봉 롤링 백분위 (0=최저변동성, 1=최고변동성) — 레짐 강도
     "atr_pct",
     "rv_ratio",          # 단기(5봉) / 중기(20봉) 실현변동성 비율 — 변동성 레짐 탐지
     "mass_index",
@@ -49,7 +49,6 @@ FEATURE_NAMES = [
     "vol_ratio",
     "vol_surge",
     "vol_surge_flag",
-    "obv_change",
     "cmf_20",
     # ── 기타 ──────────────────────────────
     "cci_20",
@@ -120,6 +119,7 @@ FEATURE_NAMES = [
     "ofi_5",        # 5봉 방향성 볼륨 비율 (-1~1, 양수=매수우세)
     "ofi_20",       # 20봉 OFI
     "cvd_ratio",    # 60봉 누적 볼륨 델타 비율
+    "obi_mean",     # 오더북 잔량 불균형 평균 (bid-ask)/(bid+ask), 코인전용 · 주식=0
     # ── Yang-Zhang 변동성 (overnight gap 처리, GK 대비 14배 효율) ──────
     "gk_vol",       # Yang-Zhang vol: open-gap + intraday + Rogers-Satchell 합성
     # ── 멀티타임프레임 수익률 ────────────────────────────────────────
@@ -191,6 +191,7 @@ def compute_features(
     taker_hist: list[dict] | None = None,
     ticker: str = "",                          # 뉴스 감성 조회용 종목 코드
     ls_hist: list[dict] | None = None,         # 바이낸스 글로벌 L/S 비율 히스토리
+    obi_snaps: list[float] | None = None,      # 60분봉 내 오더북 OBI 스냅샷 리스트 (코인전용)
 ) -> pd.DataFrame:
     """OHLCV 리스트 → Feature DataFrame 변환.
 
@@ -270,9 +271,6 @@ def compute_features(
     df["adx_pos"] = adx_ind.adx_pos()
     df["adx_neg"] = adx_ind.adx_neg()
     df["trix_15"] = trend.TRIXIndicator(close, window=15).trix()
-    # DPO: close[t-(n//2+1)] - SMA(close, n)[t] — ta 라이브러리 구현 방식과 동일하나 명시적으로 직접 구현
-    _dpo_n = 20
-    df["dpo_20"]  = close.shift(_dpo_n // 2 + 1) - close.rolling(_dpo_n).mean()
     vortex        = trend.VortexIndicator(high, low, close, window=14)
     df["vortex_diff"] = vortex.vortex_indicator_pos() - vortex.vortex_indicator_neg()
 
@@ -326,6 +324,10 @@ def compute_features(
     _bb_wband    = bb.bollinger_wband()          # (상단-하단)/중간선
     _bb_wband_ma = _bb_wband.rolling(20).mean()
     df["bb_squeeze"] = (_bb_wband <= _bb_wband_ma * 0.85).astype(float)  # 폭 수축 → 돌파 대기
+    # BB폭 252봉 롤링 백분위: 0=최저변동성(레인징), 1=최고변동성(추세/돌파)
+    df["bb_width_pct"] = _bb_wband.rolling(252, min_periods=20).apply(
+        lambda x: float(pd.Series(x).rank(pct=True).iloc[-1]), raw=False
+    ).fillna(0.5)
 
     # ── BB + Keltner Channel 이중 스퀴즈 (LazyBear 방식) ────────────
     # KC: EMA20 ± ATR×1.5 — BB가 KC 안에 들어올수록 강한 돌파 임박 신호
@@ -344,9 +346,6 @@ def compute_features(
     df["vol_surge"]   = (vol / vol.rolling(5).mean().replace(0, np.nan)).fillna(1.0)
     df["vol_surge_flag"] = (df["vol_surge"] >= 3).astype(float)  # 3배 이상 = 급증
 
-    obv               = volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()
-    obv_ma5           = obv.rolling(5).mean()
-    df["obv_change"]  = (obv - obv_ma5) / (obv_ma5.abs() + 1e-9)
     df["cmf_20"]      = volume.ChaikinMoneyFlowIndicator(high, low, close, vol, window=20).chaikin_money_flow()
 
     # ── Volume Profile POC (60봉 거래량 최다 가격대 대비 현재가 거리) ──
@@ -663,6 +662,8 @@ def compute_features(
     df["ofi_5"]    = (_vol_delta.rolling(5).sum()  / _vr5).fillna(0.0)
     df["ofi_20"]   = (_vol_delta.rolling(20).sum() / _vr20).fillna(0.0)
     df["cvd_ratio"] = (_vol_delta.rolling(60).sum() / _vr60).fillna(0.0)
+    # OBI: 오더북 잔량 불균형 (bid-ask)/(bid+ask), 코인전용 — 없으면 0.0
+    df["obi_mean"] = float(np.mean(obi_snaps)) if obi_snaps else 0.0
 
     # ── CVD 다이버전스 (가격 방향 vs 누적 볼륨 델타 방향 불일치) ────
     _cvd_dir_5  = np.sign(df["cvd_ratio"] - df["cvd_ratio"].shift(5))
