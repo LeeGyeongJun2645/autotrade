@@ -1146,6 +1146,7 @@ class SimAgent:
         taker_hist: list[dict] | None = None,
         ls_hist: list[dict] | None = None,
         ticker: str = "",
+        obi_snaps: list[float] | None = None,
     ) -> tuple[str, float]:
         """(signal, buy_prob) 반환. 모델 없으면 ('hold', 0.5)."""
         if self._model is None and not self.load_model():
@@ -1166,6 +1167,7 @@ class SimAgent:
                 taker_hist=taker_hist or (self._cached_taker_hist or None),
                 ticker=ticker if ticker else "",
                 ls_hist=ls_hist or (self._cached_ls_hist or None),
+                obi_snaps=obi_snaps,
             )
             if full_df.empty:
                 return "hold", 0.5
@@ -1618,6 +1620,7 @@ async def predict_ensemble(
     oi_hist: list[dict] | None = None,
     taker_hist: list[dict] | None = None,
     ls_hist: list[dict] | None = None,
+    obi_snaps: list[float] | None = None,
 ) -> tuple[str, float]:
     """가중 앙상블 게이트 — 전 에이전트 동적 투표 + 실시간 보정.
 
@@ -1691,7 +1694,7 @@ async def predict_ensemble(
         elif current_regime == 0:  # 하락추세: 전체 보수적 축소 (predict()도 이미 0.3 억제)
             weight *= 0.5
 
-        sig, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist)
+        sig, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps)
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight
         total_weight  += weight

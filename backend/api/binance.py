@@ -257,3 +257,27 @@ async def get_kimchi_premium(upbit_krw_price: float, binance_symbol: str = "BTCU
     except Exception as e:
         logger.warning("[김치프리미엄] 계산 실패: %s", e)
         return 0.0
+
+
+async def get_orderbook_obi(symbol: str = "BTCUSDT", levels: int = 5) -> float:
+    """바이낸스 선물 오더북 OBI (Order Book Imbalance) 반환.
+
+    OBI = (bid_vol - ask_vol) / (bid_vol + ask_vol)  범위: -1 ~ +1
+    양수 = 매수 압력 우세, 음수 = 매도 압력 우세.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(
+                "https://fapi.binance.com/fapi/v1/depth",
+                params={"symbol": symbol.upper(), "limit": max(levels, 5)},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        bid_vol = sum(float(q) for _, q in data.get("bids", [])[:levels])
+        ask_vol = sum(float(q) for _, q in data.get("asks", [])[:levels])
+        if bid_vol + ask_vol == 0:
+            return 0.0
+        return (bid_vol - ask_vol) / (bid_vol + ask_vol)
+    except Exception as e:
+        logger.debug("[OBI] 수집 실패: %s", e)
+        return 0.0

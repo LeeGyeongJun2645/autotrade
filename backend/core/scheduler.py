@@ -265,6 +265,7 @@ class TradingScheduler:
         self._btc_taker_hist: list[dict] = []  # BTC 선물 Taker 비율 히스토리 캐시
         self._btc_ls_hist:    list[dict] = []  # BTC 글로벌 L/S 비율 히스토리 캐시 (코인 전용)
         self._btc_ohlcv_cache: list[dict] = []  # BTC 5분봉 OHLCV 캐시 (ML 게이트 BTC 상관관계용)
+        self._obi_snaps: list[float] = []       # BTC 오더북 OBI 스냅샷 (매 5분, 최대 12개 = 60분봉 1개)
         self._stock_train_cache: dict[str, list] = {}  # 최근 틱에서 수집한 주식 OHLCV (재학습 재사용)
         self._kospi_train_cache: list[dict] = []       # 최근 틱 KOSPI OHLCV (재학습 재사용)
         # DCA 분할매수 상태: {symbol: {"stage": 1~3, "total_budget": float}}
@@ -723,10 +724,12 @@ class TradingScheduler:
             oi_hist    = self._btc_oi_hist      if market == "coin" else None
             taker_hist = self._btc_taker_hist   if market == "coin" else None
             ls_hist    = self._btc_ls_hist      if market == "coin" else None
+            obi_snaps  = self._obi_snaps        if market == "coin" else None
             signal, prob = await predict_ensemble(
                 ohlcv_ml, ticker=symbol, market=market,
                 btc_ohlcv=btc_ohlcv,
                 oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist,
+                obi_snaps=obi_snaps,
             )
             approved = signal == "buy"
             n = len(trained)
@@ -1491,6 +1494,16 @@ class TradingScheduler:
         _fresh_btc = ohlcv_cache.get("KRW-BTC:minutes/60", [])
         if _fresh_btc:
             self._btc_ohlcv_cache = _fresh_btc
+
+        # BTC 오더북 OBI 스냅샷 수집 (매 5분 — 60분봉 1개당 12개 집계)
+        try:
+            from backend.api.binance import get_orderbook_obi
+            _obi = await get_orderbook_obi("BTCUSDT", levels=5)
+            self._obi_snaps.append(_obi)
+            if len(self._obi_snaps) > 12:
+                self._obi_snaps = self._obi_snaps[-12:]
+        except Exception:
+            pass
 
         # 주식 학습 데이터 캐시 누적 갱신 (최대 500봉 rolling) — 틱마다 쌓아서 데이터 풍부하게
         if stock_ohlcv_cache:
