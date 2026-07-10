@@ -1586,7 +1586,7 @@ class TradingScheduler:
                             _oi_ref    = (_coin_flow.get("oi")    or btc_oi_hist)    or None
                             _taker_ref = (_coin_flow.get("taker") or btc_taker_hist) or None
                             _ls_ref    = (_coin_flow.get("ls")    or btc_ls_hist)    or None
-                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref, ls_hist=_ls_ref, ticker=ticker)
+                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref, ls_hist=_ls_ref, ticker=ticker, obi_snaps=self._obi_snaps)
                             await self._agent_execute(db, agent, ticker, signal, prob, price)
 
                     else:
@@ -1758,10 +1758,12 @@ class TradingScheduler:
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
-            # 6시간(360분) 이상 SL/TP 사이에서 무한 홀딩 → 강제 청산 (8h→6h: 장기 물림 손실 방지)
-            if held_min >= 360:
+            # 강제청산: 코인 60분봉 lookahead 8봉=480분(8h), 주식 360분(6h)
+            # 코인을 6h로 단축하면 lookahead 유효 구간 마지막 2h를 사용 못 함 → 480분으로 복원
+            _force_close_min = 480 if agent.market == "coin" else 360
+            if held_min >= _force_close_min:
                 signal = "sell"
-                sim_log.push(agent.agent_id, f"[6h강제청산] {symbol} {held_min:.0f}분 보유 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
+                sim_log.push(agent.agent_id, f"[{_force_close_min//60}h강제청산] {symbol} {held_min:.0f}분 보유 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
 
             # 최소 보유 10분: 진입 직후 신호 기반 조기 청산 완전 차단
             # 분석: 0~10분 청산 WR=38.2%(최악) → 노이즈 신호에 의한 손절이 주원인
@@ -1787,10 +1789,15 @@ class TradingScheduler:
                 elif held_min < 240:
                     take_profit = max(tp_base * 0.75, sl_abs * 1.3)  # 120~240분: R:R 1.5:1 유지
                 else:
-                    # 240분(4h) 이상 보유 → 알파 소멸 구간, 수익 있으면 강제 청산
+                    # 240분(4h) 이상 보유 → 알파 소멸 구간, 수익·손실 무관 즉시 청산
+                    # 수익: 알파 소멸 후 평균회귀 위험
+                    # 손실: 방치 시 360min까지 추가 손실 가능 → 대칭 처리
                     if unreal > 0:
                         signal = "sell"
-                        sim_log.push(agent.agent_id, f"[알파소멸] {symbol} {unreal*100:.1f}% 240분 보유 강제청산 @ {price:,.0f}원", "SELL")
+                        sim_log.push(agent.agent_id, f"[알파소멸익절] {symbol} +{unreal*100:.1f}% 240분 보유 강제청산 @ {price:,.0f}원", "SELL")
+                    else:
+                        signal = "sell"
+                        sim_log.push(agent.agent_id, f"[알파소멸손절] {symbol} {unreal*100:.1f}% 240분 손실 추가방치 차단 @ {price:,.0f}원", "SELL")
                     take_profit = max(tp_base * 0.75, sl_abs * 1.3)
 
                 # ── 부분 청산 Scale-out: ATR×2.0 도달 시 30% 선익절 (1.5→2.0, 40%→30%: 더 많은 상승 포착)
@@ -1802,12 +1809,22 @@ class TradingScheduler:
                     if _ptrade:
                         await db.execute(
                             "INSERT INTO agent_trades (agent_id, ticker, action, price, qty,"
-                            " entry_price, profit_rate, balance, traded_at)"
-                            " VALUES (?,?,?,?,?,?,?,?,?)",
+                            " entry_price, profit_rate, balance, buy_prob, buy_adx, buy_vol_ratio, traded_at)"
+                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                             (_ptrade.agent_id, _ptrade.ticker, _ptrade.action, _ptrade.price,
                              _ptrade.qty, _ptrade.entry_price, _ptrade.profit_rate,
-                             _ptrade.balance, _ptrade.traded_at),
+                             _ptrade.balance, 0.0, 0.0, 0.0, _ptrade.traded_at),
                         )
+                        # 잔여 qty를 agent_positions에 반영 (재시작 시 qty 과대계상 방지)
+                        _rem_pos = agent._positions.get(symbol)
+                        if _rem_pos:
+                            await db.execute(
+                                "INSERT OR REPLACE INTO agent_positions"
+                                " (agent_id, ticker, entry_price, qty, entered_at)"
+                                " VALUES (?,?,?,?,?)",
+                                (agent.agent_id, symbol, _rem_pos.entry_price,
+                                 _rem_pos.qty, _rem_pos.entered_at),
+                            )
                         sim_log.push(agent.agent_id,
                             f"[부분청산30%] {symbol} @ {price:,.0f}원 +{(_ptrade.profit_rate or 0)*100:.1f}%",
                             "BUY")
@@ -1819,7 +1836,11 @@ class TradingScheduler:
                 if symbol in agent._trailing_mode:
                     _peak = agent._peak_price.get(symbol, price)
                     agent._peak_price[symbol] = max(_peak, price)
-                    _trail_sl = agent._peak_price[symbol] * (1 - sl_abs * 0.8)  # 최고점 대비 SL 80% (0.5→0.8: 더 넓은 추적폭)
+                    # Chandelier Exit: 업계 최검증 ATR×3 (수익팩터 1.61)
+                    # sl_abs=ATR×1.2이므로 ×2.5=ATR×3.0 (Chandelier 동치)
+                    # max(atr_pct×3, sl_abs×2.0, 1.5%): ATR 불유효 시 sl_abs×2 폴백, 최소 1.5% 보장
+                    _chandelier_pct = max(atr_pct * 3.0, sl_abs * 2.0, 0.015)
+                    _trail_sl = agent._peak_price[symbol] * (1 - _chandelier_pct)
                     if price <= _trail_sl and unreal > 0:
                         signal = "sell"
                         sim_log.push(agent.agent_id, f"[트레일링] {symbol} 최고점 대비 하락 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
@@ -2081,8 +2102,12 @@ class TradingScheduler:
             if trade:
                 pct = (trade.profit_rate or 0) * 100
                 await db.execute(
-                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance, traded_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty, trade.entry_price, trade.profit_rate, trade.balance, trade.traded_at),
+                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price,"
+                    " profit_rate, balance, buy_prob, buy_adx, buy_vol_ratio, traded_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty,
+                     trade.entry_price, trade.profit_rate, trade.balance,
+                     0.0, 0.0, 0.0, trade.traded_at),
                 )
                 # 포지션 영속성: 청산 시 제거
                 await db.execute(
@@ -2131,7 +2156,8 @@ class TradingScheduler:
                     try:
                         _ohlcv = await _upbit.get_ohlcv(_t, interval=agent.interval_str, count=700)
                         if len(_ohlcv) >= 200:
-                            ok = await asyncio.to_thread(agent.train, _ohlcv)
+                            async with agent._train_lock:  # daily_retrain과 race condition 방지
+                                ok = await asyncio.to_thread(agent.train, _ohlcv)
                             if ok:
                                 logger.info("[비상재학습] %s 코인 모델 갱신 완료 (%s)", agent.agent_id, _t)
                             return
@@ -2142,7 +2168,8 @@ class TradingScheduler:
                     try:
                         _ohlcv = await _kis.get_minute_ohlcv(_sym, agent.interval_min, count=500)
                         if len(_ohlcv) >= 100:
-                            ok = await asyncio.to_thread(agent.train, _ohlcv)
+                            async with agent._train_lock:  # daily_retrain과 race condition 방지
+                                ok = await asyncio.to_thread(agent.train, _ohlcv)
                             if ok:
                                 logger.info("[비상재학습] %s 주식 모델 갱신 완료 (%s)", agent.agent_id, _sym)
                             return

@@ -56,7 +56,7 @@ FEATURE_SETS: dict[str, list[str]] = {
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
         "ma5_cross_ma20", "ma20_cross_ma60",
         "adx_14", "adx_pos", "adx_neg",
-        "trix_15", "dpo_20", "vortex_diff",
+        "trix_15", "vortex_diff",
         "ema9_cross_ema21", "vwap_ratio", "vwap_cross",
         "bb_pband_lag_1",
         "regime_state", "anchored_vwap_ratio", "anchored_vwap_cross", "mtf_ema_bull",
@@ -72,7 +72,7 @@ FEATURE_SETS: dict[str, list[str]] = {
         "orb_position", "orb_breakout", "orb_high_pct", "session_phase",
     ],
     "volume": [
-        "vol_ratio", "obv_change", "cmf_20",
+        "vol_ratio", "cmf_20",
         "mfi_14", "ret_1d", "ret_5d", "ret_20d",
         "vol_ratio_lag_1",
         "regime_state", "bb_squeeze",
@@ -673,8 +673,16 @@ class SimAgent:
                 _val_s    = scaler.transform(X_val)
                 _val_prob = clf.predict_proba(_val_s)[:, 1]
                 val_acc   = clf.score(_val_s, y_val)
-                if val_acc < 0.50:
-                    logger.warning("[%s] WF검증 %.1f%% < 50%% → 학습 실패", self.agent_id, val_acc * 100)
+                _val_pred = (_val_prob >= self.buy_threshold).astype(int)
+                from sklearn.metrics import precision_score as _ps2, recall_score as _rs2
+                _val_prec = _ps2(y_val, _val_pred, zero_division=0)
+                _val_rec  = _rs2(y_val, _val_pred, zero_division=0)
+                if val_acc < 0.50 or (_val_prec < 0.40 and int(_val_pred.sum()) > 5):
+                    logger.warning(
+                        "[%s] WF검증 실패 acc=%.1f%% prec=%.1f%% rec=%.1f%% (thr=%.2f n_buy=%d)",
+                        self.agent_id, val_acc*100, _val_prec*100, _val_rec*100,
+                        self.buy_threshold, int(_val_pred.sum()),
+                    )
                     return False
 
                 from sklearn.metrics import precision_score as _ps
@@ -709,8 +717,11 @@ class SimAgent:
                 else:
                     if prec_b > 0:
                         self.buy_threshold = round(min(max(thr_b, 0.65), 0.75), 2)
-                    logger.debug("[%s] WF검증 %.1f%% | 최적임계값 %.2f (정밀도 %.3f)",
-                                 self.agent_id, val_acc * 100, self.buy_threshold, prec_b)
+                    logger.info(
+                        "[%s] WF검증 acc=%.1f%% prec=%.1f%% rec=%.1f%% | thr=%.2f | n_train=%d n_val=%d",
+                        self.agent_id, val_acc*100, prec_b*100, _val_rec*100,
+                        self.buy_threshold, len(X_train), len(X_val),
+                    )
 
             # 최소 임계값 — 수익률 중심: 주식 0.60, 코인 0.65 (낮은 임계값이 손실의 주원인)
             _min_thr = 0.60 if self.market == "stock" else 0.65
@@ -1222,14 +1233,11 @@ class SimAgent:
             if "mtf_align" in full_df.columns:
                 _align = float(full_df["mtf_align"].iloc[-1])
                 if _align == 0.0:
-                    _fvg_bull = float(full_df["fvg_bull"].iloc[-1]) if "fvg_bull" in full_df.columns else 0.0
-                    _vsa_stop = float(full_df["vsa_stopping_vol"].iloc[-1]) if "vsa_stopping_vol" in full_df.columns else 0.0
-                    if _fvg_bull > 0.0 or _vsa_stop > 0.0:
-                        # FVG 또는 Stopping Volume 반전 신호 → 소프트 억제만 적용
-                        prob = max(0.01, prob * 0.70)
-                    else:
-                        # 반전 신호 없음 → 하드 차단 유지
-                        return "hold", round(prob * 0.5, 4)
+                    # 3개 TF 전부 하락 정렬 → 소프트 억제 (30% 하향)
+                    # FVG/VSA 피처 제거됨, 이전 하드차단 로직 → 소프트 억제로 변경
+                    prob = max(0.01, prob * 0.70)
+                    if prob < self.adaptive_buy_threshold:
+                        return "hold", round(prob, 4)
                 elif _align == 3.0:  # 전부 상승 정렬 → 강화
                     prob = max(0.01, min(0.99, prob * 1.08))
         except Exception:
@@ -1786,6 +1794,6 @@ def refresh_champion_flags() -> None:
         market_agents = [a for a in AGENTS.values() if a.market == market]
         for a in market_agents:
             a.is_champion = False
-        active = [a for a in market_agents if a.total_trades > 0]
+        active = [a for a in market_agents if a.total_trades >= 10 and a.win_trades > 0]
         if active:
             max(active, key=lambda a: a.total_return).is_champion = True
