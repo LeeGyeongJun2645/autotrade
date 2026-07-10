@@ -2099,12 +2099,26 @@ class TradingScheduler:
                     (trade.agent_id, trade.ticker, trade.price, trade.qty, trade.traded_at),
                 )
                 agent._today_buy_count += 1
+                agent.record_buy_context(symbol)  # 매수 시점 신호 스냅샷 저장 (손실 분석용)
                 sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%} / 진입{_portion*100:.0f}% / 일{agent._today_buy_count}건)", "BUY")
                 # 부분 청산 1차 목표가 설정 (ATR×2.0), ATR 없으면 미설정
                 if atr_pct > 0.001:
                     agent._partial_tp_price[symbol] = price * (1 + atr_pct * 2.0)
 
         elif signal == "sell" and symbol in agent._positions:
+            # 손실 분석: 매도 전 보유 시간 계산 (virtual_sell 후 포지션 소멸)
+            _sell_pos = agent._positions.get(symbol)
+            _held_min = 0.0
+            if _sell_pos and _sell_pos.entered_at:
+                try:
+                    from datetime import datetime as _dt_sell
+                    _now_kst  = _dt_sell.now(KST)
+                    _ent_dt   = _dt_sell.fromisoformat(_sell_pos.entered_at)
+                    if _ent_dt.tzinfo is None:
+                        _ent_dt = _ent_dt.replace(tzinfo=KST)
+                    _held_min = (_now_kst - _ent_dt).total_seconds() / 60
+                except Exception:
+                    pass
             trade = agent.virtual_sell(symbol, price)
             if trade:
                 pct = (trade.profit_rate or 0) * 100
@@ -2123,6 +2137,18 @@ class TradingScheduler:
                 )
                 level = "BUY" if (trade.profit_rate or 0) > 0 else "SELL"
                 sim_log.push(trade.agent_id, f"[가상매도] {symbol} @ {price:,.0f}원 | {pct:+.2f}%", level)
+                # 손실 발생 시 소급 분석 → 패턴 학습
+                if (trade.profit_rate or 0) < 0:
+                    _analysis = agent.analyze_loss(symbol, trade.profit_rate, _held_min)
+                    _cause_str = " | ".join(_analysis["causes"][:3]) if _analysis["causes"] else "원인 불명"
+                    _repeat    = _analysis["pattern_repeat"]
+                    sim_log.push(
+                        agent.agent_id,
+                        f"[손실분석] {symbol} {pct:+.1f}% 보유{_held_min:.0f}분 "
+                        f"— {_cause_str}"
+                        + (f" (패턴{_repeat}회 반복→패널티↑)" if _repeat >= 2 else ""),
+                        "SELL",
+                    )
                 # 매도 통계 업데이트 (글로벌 티커 승률 추적)
                 _update_ticker_stats(symbol, trade.profit_rate or 0)
                 # 손절 시 쿨다운 등록: 에이전트 개별(30분) + 전체 공유(60분)

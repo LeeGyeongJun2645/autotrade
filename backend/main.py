@@ -700,6 +700,42 @@ async def get_agent_trades(
         raise HTTPException(status_code=502, detail=str(e)) from e
 
 
+@app.get("/agents/{agent_id}/loss_analysis", tags=["Agents"])
+async def get_agent_loss_analysis(agent_id: str):
+    """특정 에이전트의 최근 손실 거래 분석 로그 조회.
+
+    각 손실 거래마다 매수 당시 어떤 신호가 잘못됐는지,
+    패턴이 몇 번 반복됐는지, 향후 패널티가 적용되는지 확인.
+    """
+    from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
+    _id = agent_id.upper()
+    agent = AGENTS.get(_id) or ENSEMBLE_AGENTS.get(_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="에이전트를 찾을 수 없음")
+    return {
+        "agent_id":      _id,
+        "loss_log":      agent._loss_analysis_log,
+        "loss_patterns": {str(k): v for k, v in agent._loss_patterns.items()},
+        "total_logged":  len(agent._loss_analysis_log),
+    }
+
+
+@app.get("/agents/loss_summary", tags=["Agents"])
+async def get_all_loss_summary():
+    """전 에이전트 손실 패턴 요약 — 어떤 신호 조합이 가장 많이 손실을 냈는지 집계."""
+    from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
+    combined: dict[str, int] = {}
+    for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
+        for pattern_key, count in agent._loss_patterns.items():
+            key_str = "+".join(pattern_key) if pattern_key else "unknown"
+            combined[key_str] = combined.get(key_str, 0) + count
+    sorted_patterns = sorted(combined.items(), key=lambda x: x[1], reverse=True)
+    return {
+        "top_loss_patterns": [{"pattern": k, "loss_count": v} for k, v in sorted_patterns[:20]],
+        "total_agents_with_loss": sum(1 for a in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()) if a._loss_patterns),
+    }
+
+
 # ── SSE 실시간 스트리밍 ──────────────────────────────────────────
 
 @app.get("/stream", tags=["Stream"])

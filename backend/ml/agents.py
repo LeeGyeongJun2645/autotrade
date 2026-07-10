@@ -211,6 +211,11 @@ class SimAgent:
         self._today_date: str = ""                   # 리셋 기준 날짜 (YYYY-MM-DD KST)
         self.day_start_balance: float = 0.0          # 당일 00:00 잔액 스냅샷 (일일 P&L 계산용)
         self._ticker_blacklist: set[str] = set()     # 성과 기반 동적 블랙리스트 (WR<35%+20건 이상)
+        # ── 손실 분석 / 패턴 학습 ────────────────────────────────────────
+        self._last_signal_snapshot: dict = {}         # 마지막 predict() 신호값 캐시
+        self._buy_context: dict[str, dict] = {}       # 매수 시점 신호 스냅샷 (소급 분석용)
+        self._loss_patterns: dict[tuple, int] = {}    # (wrong_signal_조합) → 손실 횟수
+        self._loss_analysis_log: list[dict] = []      # 최근 30건 손실 분석 결과
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -1195,6 +1200,16 @@ class SimAgent:
                 self._last_vol_ratio = float(full_df["vol_ratio"].iloc[-1])
             if "adx_14" in full_df.columns:
                 self._last_adx_14 = float(full_df["adx_14"].iloc[-1])
+            # 손실 분석용 신호 스냅샷 캐시 (매수 시점 컨텍스트 보존)
+            self._last_signal_snapshot = {
+                "rsi_9":       float(full_df["rsi_9"].iloc[-1])       if "rsi_9"       in full_df.columns else 50.0,
+                "macd_diff":   float(full_df["macd_diff"].iloc[-1])   if "macd_diff"   in full_df.columns else 0.0,
+                "adx_14":      float(full_df["adx_14"].iloc[-1])      if "adx_14"      in full_df.columns else 20.0,
+                "bb_pband":    float(full_df["bb_pband"].iloc[-1])    if "bb_pband"    in full_df.columns else 0.5,
+                "mtf_align":   float(full_df["mtf_align"].iloc[-1])   if "mtf_align"   in full_df.columns else 1.5,
+                "regime_state":float(full_df["regime_state"].iloc[-1])if "regime_state" in full_df.columns else 1.0,
+                "vol_ratio":   float(full_df["vol_ratio"].iloc[-1])   if "vol_ratio"   in full_df.columns else 1.0,
+            }
             # 학습 시 사용된 피처 목록 우선 사용 (SHAP 가지치기 일관성)
             _pred_cols = (self._trained_feature_names
                           if self._trained_feature_names
@@ -1297,6 +1312,13 @@ class SimAgent:
                 pass
 
         if prob >= self.adaptive_buy_threshold:
+            # ── 손실 패턴 패널티: 과거 동일 신호 조합에서 반복 손실 → 확률 하향 ──
+            _lp = self._loss_penalty()
+            if _lp > 0:
+                prob = max(0.01, prob * (1 - _lp))
+                logger.debug("[%s] 손실패턴 패널티 %.0f%% → prob=%.3f", self.agent_id, _lp * 100, prob)
+                if prob < self.adaptive_buy_threshold:
+                    return "hold", round(prob, 4)
             # ── Meta-Labeling 2차 필터 ───────────────────────────────
             # 1차 BUY 신호를 실제로 거래할지 2차 모델이 판단 (False Positive 감소)
             if self._meta_model is not None and self._meta_scaler is not None:
@@ -1450,6 +1472,93 @@ class SimAgent:
         trade = AgentTrade(self.agent_id, ticker, "SELL", price, pos.qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
         self._push_recent(trade)
         return trade
+
+    def record_buy_context(self, symbol: str) -> None:
+        """매수 시 신호 스냅샷 저장 (이후 손실 발생 시 소급 분석용)."""
+        self._buy_context[symbol] = dict(self._last_signal_snapshot)
+
+    def analyze_loss(self, symbol: str, profit_rate: float, held_min: float) -> dict:
+        """손실 거래 소급 분석: 매수 당시 어떤 신호/전략이 실패했는지 판단.
+
+        Returns:
+            분석 딕셔너리 (wrong_signals, causes, pattern_repeat 등)
+        """
+        ctx = self._buy_context.pop(symbol, {})
+        rsi  = ctx.get("rsi_9",       50.0)
+        adx  = ctx.get("adx_14",      20.0)
+        bb   = ctx.get("bb_pband",     0.5)
+        mtf  = ctx.get("mtf_align",    1.5)
+        reg  = ctx.get("regime_state", 1.0)
+        vol  = ctx.get("vol_ratio",    1.0)
+        macd = ctx.get("macd_diff",    0.0)
+
+        wrong: list[str] = []
+        cause: list[str] = []
+
+        if rsi > 65:
+            wrong.append("rsi_overbought")
+            cause.append(f"RSI={rsi:.0f} 과매수 진입 (반전 위험)")
+        if adx < 18:
+            wrong.append("low_adx")
+            cause.append(f"ADX={adx:.0f} 추세 약함 (횡보장 매수)")
+        if mtf < 2.0:
+            wrong.append("mtf_misalign")
+            cause.append(f"MTF정렬={mtf:.1f} (다중TF 하락 불일치)")
+        if bb > 0.85:
+            wrong.append("bb_upper")
+            cause.append(f"BB위치={bb:.2f} 볼린저 상단 돌파")
+        if vol < 0.8:
+            wrong.append("low_volume")
+            cause.append(f"거래량비율={vol:.2f} (약한 신호 신뢰도)")
+        if reg == 0.0:
+            wrong.append("bear_regime")
+            cause.append("레짐=하락장 (매수 억제 구간 진입)")
+        if macd < 0:
+            wrong.append("macd_negative")
+            cause.append(f"MACD={macd:.5f} 음수 (모멘텀 약세)")
+
+        if held_min < 30:
+            cause.append(f"보유{held_min:.0f}분 → 노이즈 신호 손절")
+        elif held_min > 240:
+            cause.append(f"보유{held_min:.0f}분 → 알파소멸 후 물림")
+
+        _key = tuple(sorted(wrong))
+        self._loss_patterns[_key] = self._loss_patterns.get(_key, 0) + 1
+
+        analysis = {
+            "agent_id":       self.agent_id,
+            "symbol":         symbol,
+            "loss_pct":       round(profit_rate * 100, 2),
+            "held_min":       round(held_min, 1),
+            "buy_ctx":        ctx,
+            "wrong_signals":  wrong,
+            "causes":         cause,
+            "pattern_repeat": self._loss_patterns[_key],
+        }
+        self._loss_analysis_log = ([analysis] + self._loss_analysis_log)[:30]
+        return analysis
+
+    def _loss_penalty(self) -> float:
+        """현재 신호 조합이 과거 손실 패턴과 2개 이상 겹치면 패널티 반환 (0.0 ~ 0.50)."""
+        if not self._loss_patterns or not self._last_signal_snapshot:
+            return 0.0
+        snap = self._last_signal_snapshot
+        current: set[str] = set()
+        if snap.get("rsi_9",       50.0) > 65:   current.add("rsi_overbought")
+        if snap.get("adx_14",      20.0) < 18:   current.add("low_adx")
+        if snap.get("mtf_align",    1.5) < 2.0:  current.add("mtf_misalign")
+        if snap.get("bb_pband",     0.5) > 0.85: current.add("bb_upper")
+        if snap.get("vol_ratio",    1.0) < 0.8:  current.add("low_volume")
+        if snap.get("regime_state", 1.0) == 0.0: current.add("bear_regime")
+        if snap.get("macd_diff",    0.0) < 0:    current.add("macd_negative")
+
+        max_penalty = 0.0
+        for pattern_key, count in self._loss_patterns.items():
+            overlap = len(current & set(pattern_key))
+            if overlap >= 2:
+                penalty = min(0.50, overlap * 0.10 * min(count, 4))
+                max_penalty = max(max_penalty, penalty)
+        return max_penalty
 
     def virtual_partial_sell(self, ticker: str, price: float, ratio: float = 0.40) -> AgentTrade | None:
         """부분 청산 (Scale-out): ratio 비율만큼 매도하고 나머지는 계속 보유.
