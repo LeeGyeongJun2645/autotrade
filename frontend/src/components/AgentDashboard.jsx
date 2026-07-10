@@ -21,7 +21,7 @@ const FEAT_DESC = {
   trend:    '이동평균(MA5/20/60)·ADX·EMA9/21·VWAP 기반. 추세가 형성된 방향으로 따라가는 전략.',
   volume:   'OBV·CMF·MFI 등 거래량 흐름 분석. 큰손(기관)의 매집·분산 움직임을 탐지.',
 }
-const INITIAL = 10_000_000
+const INITIAL = 1_000_000
 
 // ── 유틸 ────────────────────────────────────────────────────────
 const fmt  = n => (n == null || !Number.isFinite(Number(n))) ? '—' : Number(Math.round(n)).toLocaleString('ko-KR')
