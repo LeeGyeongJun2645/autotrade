@@ -419,6 +419,32 @@ def compute_features(
     df["is_marubozu_bull"] = ((df["body_ratio"] >= 0.9) & (close > open_)).astype(float)
     df["is_marubozu_bear"] = ((df["body_ratio"] >= 0.9) & (close < open_)).astype(float)
 
+    # 역망치형(Inverted Hammer): 저점 부근 위꼬리 긴 캔들 → 상승 반전 시도
+    df["is_inverted_hammer"] = (
+        (df["upper_shadow"] >= 0.5) &
+        (df["body_ratio"] < 0.3) &
+        (df["lower_shadow"] < 0.15)
+    ).astype(float)
+
+    # 아침별형(Morning Star): 음봉 → 소몸통별 → 양봉이 음봉의 절반 이상 회복
+    _prev2_body = (open_.shift(2) - close.shift(2)).clip(lower=0)  # 2봉전 음봉 크기
+    df["is_morning_star"] = (
+        (close.shift(2) < open_.shift(2)) &                              # 2봉전: 음봉
+        (df["body_ratio"].shift(1) < 0.30) &                             # 1봉전: 소몸통(별)
+        (close > open_) &                                                  # 현재: 양봉
+        (close > (close.shift(2) + open_.shift(2)) / 2)                  # 음봉 중간 이상 회복
+    ).astype(float)
+
+    # 관통형(Piercing Pattern): 이전 음봉의 50% 이상 회복하는 양봉
+    _prev_mid = (prev_open + prev_close) / 2  # 이전봉 중간값
+    df["is_piercing"] = (
+        (prev_close < prev_open) &   # 이전: 음봉
+        (close > open_) &            # 현재: 양봉
+        (open_ < prev_close) &       # 갭다운 시작
+        (close > _prev_mid) &        # 이전 음봉의 50% 이상 회복
+        (close < prev_open)          # 완전 장악은 아님 (장악형과 구분)
+    ).astype(float)
+
     # 연속 상승/하락 봉 수 (최대 5봉까지)
     is_up   = (close > close.shift(1)).astype(int)
     is_down = (close < close.shift(1)).astype(int)

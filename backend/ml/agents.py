@@ -1310,6 +1310,40 @@ class SimAgent:
             except Exception:
                 pass
 
+        # ── 캔들패턴 + 일목기준선 진입 필터 ──────────────────────────────────────
+        # 차트를 보고 들어가기: 망치·장악형·아침별·관통형 또는 일목 기준선 조건 중 하나 없으면 매수 차단
+        # 이유: ML이 변동성/수익률 지표만 학습하고 캔들패턴을 0% 중요도로 무시하는 문제 보완
+        try:
+            _last_row = full_df.iloc[-1]
+            def _cf(col: str) -> bool:
+                return bool(_last_row.get(col, 0))
+
+            # 강세 캔들 패턴 (단타 캔들 매매법 핵심 시그널)
+            _bullish_candle = (
+                _cf("is_hammer") or            # 망치형: 저점 지지 반등
+                _cf("is_inverted_hammer") or   # 역망치형: 저점 반전 시도
+                _cf("is_bullish_engulf") or    # 상승장악형: 강한 반전
+                _cf("is_morning_star") or      # 아침별형: 3봉 반전 패턴
+                _cf("is_piercing") or          # 관통형: 50% 이상 회복
+                _cf("is_marubozu_bull")        # 마루보쥬 양봉: 강한 모멘텀
+            )
+            # 일목균형표 조건 (기준선/구름대 기반)
+            _ichi_ok = _cf("ichi_tenkan_kijun_bull") or _cf("ichi_above_cloud")
+            # MA 정배열 + HA 연속 양봉 (추세 기반 모멘텀)
+            _trend_ok = _cf("ma20_cross_ma60") and float(_last_row.get("ha_bull_streak", 0)) >= 3
+
+            # 약세 캔들 → 신규 진입 직접 차단
+            _bearish_candle = _cf("is_shooting_star") or _cf("is_bearish_engulf")
+            if _bearish_candle:
+                return "hold", round(prob * 0.40, 4)
+
+            # 상승 근거가 하나도 없으면 매수 차단 (ML 확률이 높아도)
+            if not (_bullish_candle or _ichi_ok or _trend_ok):
+                return "hold", round(prob * 0.55, 4)
+
+        except Exception:
+            pass
+
         if prob >= self.adaptive_buy_threshold:
             # ── 손실 패턴 패널티: 과거 동일 신호 조합에서 반복 손실 → 확률 하향 ──
             _lp = self._loss_penalty()
