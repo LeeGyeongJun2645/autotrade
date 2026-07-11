@@ -2056,9 +2056,9 @@ class TradingScheduler:
                 return
             # 동일 코인 중복 매수 제한: 이미 다른 에이전트가 보유 중이면 신규 진입 차단
             # KAITO처럼 3개 에이전트가 동시에 같은 코인 → 집중리스크 + 손실 배수 문제
-            from backend.ml.agents import ENSEMBLE_AGENTS as _EA_CHK
+            from backend.ml.agents import AGENTS as _AGENTS_CHK, ENSEMBLE_AGENTS as _EA_CHK
             _already_holding = sum(
-                1 for _a in list(AGENTS.values()) + list(_EA_CHK.values())
+                1 for _a in list(_AGENTS_CHK.values()) + list(_EA_CHK.values())
                 if symbol in _a._positions and _a.agent_id != agent.agent_id
             )
             if _already_holding >= 2:
