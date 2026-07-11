@@ -51,6 +51,9 @@ FEATURE_SETS: dict[str, list[str]] = {
         "mtf_ret_15m", "mtf_ret_1h", "mtf_align",
         # 장중 세션 모멘텀 (주식 전용, 코인=중립)
         "session_phase", "ret_since_open", "intraday_reversal",
+        # 이중바닥 + 매도소진 (모멘텀 반전 신호)
+        "double_bottom_signal", "exhaustion_bounce",
+        "stoch_rsi_k", "stoch_rsi_d", "stoch_rsi_cross",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -70,6 +73,10 @@ FEATURE_SETS: dict[str, list[str]] = {
         "gk_vol",
         # ORB 돌파 (주식 지지/저항 기반 추세 확인, 코인=중립)
         "orb_position", "orb_breakout", "orb_high_pct", "session_phase",
+        # 정배열/역배열 + 피보나치 + 지지선 기울기 (추세 구조 강화)
+        "ma_bull_align", "ma_bear_align",
+        "fib_382_support", "fib_50_support", "fib_618_support",
+        "support_slope", "double_bottom_signal",
     ],
     "volume": [
         "vol_ratio", "cmf_20",
@@ -84,6 +91,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "ofi_5", "ofi_20", "cvd_ratio",
         "gk_vol",
         "session_phase", "ret_since_open",
+        # 매도소진 + 가짜돌파 필터 (거래량 신호 품질 강화)
+        "exhaustion_bounce", "false_breakout_warn", "vol_reversal_signal",
     ],
 }
 
@@ -1404,36 +1413,69 @@ class SimAgent:
             _near_support = _cf("near_support_3pct")
             # ── ⑨ 3봉 방향 확인: 최근 3봉 중 양봉 2개 이상 (3틱룰) ──────
             _multi_bull = _fv("bullish_count_3") >= 2
+            # ── ⑩ 이중바닥 W 패턴 완성 (40봉 내 두 유사저점+넥라인 돌파) ─
+            _double_bottom = _cf("double_bottom_signal")
+            # ── ⑪ 피보나치 지지 근접 (61.8% = 가장 강력, 38.2%/50% 포함) ──
+            _fib_support = _cf("fib_618_support") or _cf("fib_50_support") or _cf("fib_382_support")
+            # ── ⑫ 완전 정배열 (MA5>MA20>MA60 동시) ─────────────────────
+            _ma_align_bull = _cf("ma_bull_align")
+            # ── ⑬ 매도소진 고신뢰 반등 (거래량반전+RSI<35) ───────────────
+            _exhaustion_buy = _cf("exhaustion_bounce")
+            # ── ⑭ 지지선 기울기 양수 (상승 지지선 구조 확인) ────────────
+            _sup_slope_up = _fv("support_slope") > 0.0
 
             # ── 약세 캔들 → 신규 진입 직접 차단 (저항선 근처 약세는 더 강하게)
             _bearish_candle = _cf("is_shooting_star") or _cf("is_bearish_engulf")
             _near_resistance = _cf("near_resistance_2pct")
+            _ma_align_bear  = _cf("ma_bear_align")
             if _bearish_candle:
                 _penalty = 0.30 if _near_resistance else 0.40
                 return "hold", round(prob * _penalty, 4)
+
+            # ── 완전 역배열 + 가짜돌파 경고 → 강한 매수 차단 ──────────
+            if _ma_align_bear and _cf("false_breakout_warn"):
+                return "hold", round(prob * 0.25, 4)
 
             # ── 저항선 2% 이내 + 음봉 추세 → 매수 차단 (벽 앞에서 들어가면 안됨)
             if _near_resistance and _fv("bearish_count_3") >= 2:
                 return "hold", round(prob * 0.45, 4)
 
+            # ── 가짜 돌파 경고 단독 → 확률 약화 ────────────────────────
+            if _cf("false_breakout_warn") and not (_near_support or _fib_support):
+                return "hold", round(prob * 0.60, 4)
+
             # ── 상승 근거가 하나도 없으면 매수 차단 (캔들 하나만 보면 안됨)
             _has_signal = (
                 _bullish_candle or _ichi_ok or _trend_ok or
                 _pullback_ok or _bb_bounce or _vol_reversal or
-                _ma_reclaim
+                _ma_reclaim or _double_bottom or _fib_support or
+                _exhaustion_buy
             )
             if not _has_signal:
                 return "hold", round(prob * 0.55, 4)
 
+            # ── 이중바닥 + 매도소진 → 확률 강화 (고승률 조합) ──────────
+            if _double_bottom and _exhaustion_buy:
+                prob = min(prob * 1.12, 0.95)
+            elif _double_bottom or _exhaustion_buy:
+                prob = min(prob * 1.06, 0.95)
+
+            # ── 완전 정배열 + 피보나치 지지 + 양봉 → 최고 신뢰 진입 ────
+            if _ma_align_bull and _fib_support and _bullish_candle:
+                prob = min(prob * 1.10, 0.95)
+
             # ── 신호는 있지만 지지선 근처도 아니고 거래량도 없으면 약화 ──
             # 실전: 지지선과 거래량이 없는 캔들 패턴은 속임수일 가능성 높음
             _vol_ok = _fv("vol_ratio", 1.0) >= 1.1
-            _context_ok = _near_support or _multi_bull or _vol_ok or _vol_reversal
+            _context_ok = (
+                _near_support or _multi_bull or _vol_ok or _vol_reversal or
+                _fib_support or _double_bottom or _sup_slope_up
+            )
             if _bullish_candle and not _context_ok:
                 return "hold", round(prob * 0.70, 4)
 
             # ── 거래량 미동반 캔들만 단독: 신호 강도 약화 ─────────────────
-            if _bullish_candle and not _vol_ok and not _near_support:
+            if _bullish_candle and not _vol_ok and not _near_support and not _fib_support:
                 return "hold", round(prob * 0.75, 4)
 
         except Exception:

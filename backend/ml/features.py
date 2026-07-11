@@ -183,6 +183,21 @@ FEATURE_NAMES = [
     "ls_extreme_short",  # ls_ratio < 0.35 → 1 (과열 숏, 반등 신호)
     # ── ICT Premium / Discount Zone ──────────────────────────────────────
     "premium_discount",  # (close-60봉저점)/(60봉고점-저점): 0=저가구간, 1=고가구간
+    # ── 이중바닥 (W 패턴) ────────────────────────────────────────────────
+    "double_bottom_signal",  # 40봉 내 두 유사저점+RSI 다이버전스+넥라인 돌파 → 반전 신호
+    # ── 피보나치 되돌림 레벨 근접 ────────────────────────────────────────
+    "fib_382_support",  # 60봉 고저 기준 38.2% 되돌림 ±1.5% 이내
+    "fib_50_support",   # 50% 되돌림 ±1.5% 이내
+    "fib_618_support",  # 61.8% 되돌림 ±1.5% 이내 (가장 강력한 지지)
+    # ── 이평선 정배열/역배열 ─────────────────────────────────────────────
+    "ma_bull_align",  # MA5 > MA20 > MA60 완전 정배열 (매수 우위 구조)
+    "ma_bear_align",  # MA5 < MA20 < MA60 완전 역배열 (매도 우위 구조)
+    # ── 매도소진 고신뢰 반등 ─────────────────────────────────────────────
+    "exhaustion_bounce",  # vol_reversal_signal AND RSI<35 → 반등 고신뢰 구간
+    # ── 가짜 돌파 경고 ───────────────────────────────────────────────────
+    "false_breakout_warn",  # 전봉 저항 돌파 후 현재봉 복귀 → 휩쏘 경고
+    # ── 지지선 기울기 ────────────────────────────────────────────────────
+    "support_slope",  # 최근 10봉 저가 선형회귀 기울기 (양수=상승지지선, 음수=하락)
 ]
 
 
@@ -930,6 +945,100 @@ def compute_features(
     # df.index는 KST naive → UTC 변환 후 시간 비교
     _utc_hour = (df.index.hour - 9) % 24   # KST → UTC 근사 (naive index 기준)
     df["is_us_session"] = ((_utc_hour >= 13) & (_utc_hour < 21)).astype(float)
+
+    # ── 완전 정배열/역배열 ────────────────────────────────────────────
+    df["ma_bull_align"] = ((ma5 > ma20) & (ma20 > ma60)).astype(float)
+    df["ma_bear_align"] = ((ma5 < ma20) & (ma20 < ma60)).astype(float)
+
+    # ── 피보나치 되돌림 레벨 근접 신호 ──────────────────────────────────
+    # 60봉 스윙 고점-저점 기준 38.2%/50%/61.8% 레벨 ±1.5% 이내
+    try:
+        _fib_high = high.rolling(60, min_periods=10).max()
+        _fib_low  = low.rolling(60, min_periods=10).min()
+        _fib_rng  = (_fib_high - _fib_low).replace(0, np.nan)
+        _fib_382  = _fib_high - 0.382 * _fib_rng
+        _fib_50   = _fib_high - 0.500 * _fib_rng
+        _fib_618  = _fib_high - 0.618 * _fib_rng
+        _tol = 0.015
+        df["fib_382_support"] = (((close - _fib_382).abs() / _fib_382.replace(0, np.nan)) <= _tol).astype(float)
+        df["fib_50_support"]  = (((close - _fib_50).abs()  / _fib_50.replace(0, np.nan))  <= _tol).astype(float)
+        df["fib_618_support"] = (((close - _fib_618).abs() / _fib_618.replace(0, np.nan)) <= _tol).astype(float)
+    except Exception:
+        df["fib_382_support"] = 0.0
+        df["fib_50_support"]  = 0.0
+        df["fib_618_support"] = 0.0
+
+    # ── 매도소진 고신뢰 반등 (거래량 반전 + RSI 과매도 동시) ────────────
+    df["exhaustion_bounce"] = (
+        (df["vol_reversal_signal"] == 1.0) & (df["rsi_9"] < 35)
+    ).astype(float)
+
+    # ── 가짜 돌파 경고 (이전봉 저항 돌파 후 현재봉 복귀 = 휩쏘) ─────────
+    # 전봉 고가가 20봉 저항선 돌파했는데 현재 종가가 저항선 아래로 복귀
+    try:
+        _res_level = high.rolling(20).max().shift(2)   # 2봉 전까지의 20봉 최고점
+        _prev_broke = high.shift(1) > _res_level       # 전봉 고가가 저항 돌파
+        _curr_fail  = close < _res_level               # 현재 종가가 저항 아래 복귀
+        df["false_breakout_warn"] = (_prev_broke & _curr_fail).astype(float)
+    except Exception:
+        df["false_breakout_warn"] = 0.0
+
+    # ── 지지선 기울기 (최근 10봉 저가 선형회귀, 정규화된 기울기) ──────────
+    # 양수 = 상승 지지선(고점 높아지는 구조), 음수 = 하락 지지선
+    try:
+        _sl_win = 10
+        _x_sl   = np.arange(_sl_win, dtype=float)
+        _sl_arr = np.full(len(df), np.nan)
+        _low_v  = low.values
+        for _si in range(_sl_win - 1, len(df)):
+            _y_sl = _low_v[_si - _sl_win + 1: _si + 1]
+            _mean_y = float(np.mean(_y_sl))
+            if np.any(np.isnan(_y_sl)) or _mean_y == 0:
+                continue
+            _sl_arr[_si] = float(np.polyfit(_x_sl, _y_sl, 1)[0]) / _mean_y
+        df["support_slope"] = pd.Series(_sl_arr, index=df.index).fillna(0.0)
+    except Exception:
+        df["support_slope"] = 0.0
+
+    # ── 이중바닥(Double Bottom / W 패턴) 감지 ───────────────────────────
+    # 40봉 내 두 개의 유사저점(±3%) + RSI 긍정 다이버전스 + 넥라인 돌파 → 반전
+    try:
+        _lb_db   = 40
+        _half_db = _lb_db // 2
+        _db_sig  = np.zeros(len(df))
+        _lv      = low.values
+        _hv      = high.values
+        _cv      = close.values
+        _rv      = df["rsi_9"].values
+        for _di in range(_lb_db, len(df)):
+            _sl = _lv[_di - _lb_db: _di]
+            _sh = _hv[_di - _lb_db: _di]
+            _sr = _rv[_di - _lb_db: _di]
+            # 1차 저점: 앞쪽 절반의 최소
+            _i1  = int(np.argmin(_sl[:_half_db]))
+            _v1  = _sl[_i1]
+            # 2차 저점: 뒤쪽 절반의 최소
+            _i2  = int(np.argmin(_sl[_half_db:])) + _half_db
+            _v2  = _sl[_i2]
+            # 두 저점 차이 3% 이내
+            _avg = (_v1 + _v2) / 2 + 1e-9
+            if abs(_v1 - _v2) / _avg > 0.03:
+                continue
+            # 두 저점 사이 넥라인(최고점)
+            if _i2 <= _i1:
+                continue
+            _neckline = float(_sh[_i1: _i2 + 1].max())
+            if _neckline <= 0:
+                continue
+            # 현재 종가가 넥라인 위 (W 패턴 완성)
+            if _cv[_di] <= _neckline:
+                continue
+            # RSI 긍정 다이버전스: 2차 저점 RSI > 1차 저점 RSI
+            if _sr[_i2] > _sr[_i1]:
+                _db_sig[_di] = 1.0
+        df["double_bottom_signal"] = _db_sig
+    except Exception:
+        df["double_bottom_signal"] = 0.0
 
     _pre_drop = df[FEATURE_NAMES].copy()
     # 전체가 NaN인 컬럼(가격 변동 없는 종목의 bb_pband 등) → 0으로 대체 후 dropna
