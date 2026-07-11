@@ -33,11 +33,15 @@ _TR_ID = {
 _rate_limiter = RateLimiter(max_calls=settings.kis_rate_limit_per_sec, period=1.0)
 
 
+_TOKEN_CACHE_DIR = Path(__file__).resolve().parents[2] / "data"
+
+
 class KISTokenManager:
     """Access Token 발급 및 자동 갱신 담당.
 
     base_url: 토큰 발급 서버 URL (None이면 settings.kis_base_url 사용)
     시세/조회 API 전용으로 live 서버 토큰을 별도 관리하기 위해 base_url 파라미터 추가.
+    재시작 후에도 24시간 유효한 KIS 토큰을 재사용하기 위해 파일 캐시 지원.
     """
 
     def __init__(self, base_url: str | None = None) -> None:
@@ -45,28 +49,58 @@ class KISTokenManager:
         self._token: str | None = None
         self._expires_at: datetime = datetime.min
         self._lock = asyncio.Lock()
+        # 캐시 파일 이름: 서버 URL 기반으로 구분 (live vs paper)
+        _suffix = "live" if (base_url or "").find("9443") >= 0 or base_url is None else "paper"
+        self._cache_file = _TOKEN_CACHE_DIR / f"kis_token_{_suffix}.json"
 
     @property
     def is_valid(self) -> bool:
         """토큰이 유효한지 확인 (만료 5분 전부터 갱신 대상)."""
         return self._token is not None and datetime.now(_KST) < self._expires_at - timedelta(minutes=5)
 
+    def _load_cached_token(self) -> bool:
+        """파일 캐시에서 토큰 로드. 유효하면 True 반환."""
+        try:
+            if not self._cache_file.exists():
+                return False
+            data = json.loads(self._cache_file.read_text())
+            exp = datetime.fromisoformat(data["expires_at"])
+            if datetime.now(_KST) < exp - timedelta(minutes=5):
+                self._token = data["access_token"]
+                self._expires_at = exp
+                logger.info("KIS 토큰 캐시 로드 완료. 만료: %s", exp.strftime("%Y-%m-%d %H:%M"))
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _save_cached_token(self) -> None:
+        """토큰을 파일 캐시에 저장."""
+        try:
+            _TOKEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            self._cache_file.write_text(json.dumps({
+                "access_token": self._token,
+                "expires_at": self._expires_at.isoformat(),
+            }))
+        except Exception:
+            pass
+
     async def get_token(self) -> str:
         """유효한 토큰 반환. 만료 임박 시 자동 갱신.
 
         lock으로 동시 다중 발급 요청(race condition)을 차단한다.
+        재시작 후에는 파일 캐시 → API 발급 순으로 시도.
         """
         async with self._lock:
             if not self.is_valid:
-                await self._issue_token()
+                if not self._load_cached_token():
+                    await self._issue_token()
         return self._token  # type: ignore[return-value]
 
     async def _issue_token(self) -> None:
         """KIS OAuth2 토큰 발급 API 호출."""
         base = self._base_url if self._base_url is not None else settings.kis_base_url
-        # LIVE 모드: /oauth2/token, PAPER(모의투자) 모드: /oauth2/tokenP
-        _token_path = "/oauth2/tokenP" if settings.trade_mode == "PAPER" else "/oauth2/token"
-        url = f"{base}{_token_path}"
+        url = f"{base}/oauth2/tokenP"
         payload = {
             "grant_type": "client_credentials",
             "appkey": settings.kis_app_key,
@@ -83,6 +117,7 @@ class KISTokenManager:
         # KIS 토큰 유효시간: 86400초(24시간)
         expires_in = int(data.get("expires_in", 86400))
         self._expires_at = datetime.now(_KST) + timedelta(seconds=expires_in)
+        self._save_cached_token()
         logger.info("KIS 토큰 발급 완료 (%s). 만료: %s", base, self._expires_at.strftime("%Y-%m-%d %H:%M"))
 
 
