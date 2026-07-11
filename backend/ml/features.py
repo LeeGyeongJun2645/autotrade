@@ -693,14 +693,15 @@ def compute_features(
     df["mtf_ret_15m"] = close.pct_change(_bars_s).fillna(0.0)
     df["mtf_ret_1h"]  = close.pct_change(_bars_m).fillna(0.0)
     df["mtf_ret_4h"]  = close.pct_change(_bars_l).fillna(0.0)
-    _dir_1   = np.sign(close.pct_change(1))
-    _dir_15m = np.sign(df["mtf_ret_15m"])
-    _dir_1h  = np.sign(df["mtf_ret_1h"])
-    _dir_4h  = np.sign(df["mtf_ret_4h"])
+    # mtf_align: 단기/중기/장기 방향이 모두 상승(bullish)인 개수 (0=전부하락, 3=전부상승)
+    # 주의: _bars_s==1이면 _dir_1==_dir_15m 동어반복 → 현재 봉 방향 대신 각 TF 방향 직접 계산
+    _dir_s = np.sign(df["mtf_ret_15m"])
+    _dir_m = np.sign(df["mtf_ret_1h"])
+    _dir_l = np.sign(df["mtf_ret_4h"])
     df["mtf_align"] = (
-        (_dir_1 == _dir_15m).astype(float) +
-        (_dir_1 == _dir_1h).astype(float) +
-        (_dir_1 == _dir_4h).astype(float)
+        (_dir_s > 0).astype(float) +
+        (_dir_m > 0).astype(float) +
+        (_dir_l > 0).astype(float)
     ).fillna(0.0)
 
     # ── 일별 피봇 포인트 (전일 H/L/C 기준) ──────────────────────────

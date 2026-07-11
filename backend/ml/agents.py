@@ -526,9 +526,10 @@ class SimAgent:
             label      = label.iloc[:min_len]
             _vol_series = _vol_series.iloc[:min_len]
 
-            # 노이즈 필터: label=0이고 ATR이 NOISE_FLOOR 미만(= 횡보 구간) → 제외
-            # label=1은 유효 매수 기회이므로 항상 보존
-            clear_mask = (label == 1) | (_vol_series.values >= NOISE_FLOOR)
+            # 노이즈 필터: label=0이고 ATR이 하위 20% 미만(= 초저변동성 횡보) → 제외
+            # NOISE_FLOOR(0.001)는 ATR비율 대비 너무 작아 아무것도 필터링 안 됨 → 분위수 기반으로 변경
+            _atr_noise_thr = max(float(np.percentile(_vol_series.values, 20)), NOISE_FLOOR)
+            clear_mask = (label == 1) | (_vol_series.values >= _atr_noise_thr)
             feat_df = feat_df[clear_mask]
             label   = label[clear_mask]
 
@@ -686,11 +687,12 @@ class SimAgent:
                 from sklearn.metrics import precision_score as _ps2, recall_score as _rs2
                 _val_prec = _ps2(y_val, _val_pred, zero_division=0)
                 _val_rec  = _rs2(y_val, _val_pred, zero_division=0)
-                if val_acc < 0.50 or (_val_prec < 0.40 and int(_val_pred.sum()) > 5):
+                _n_val_buy = int(_val_pred.sum())
+                if val_acc < 0.50 or _n_val_buy == 0 or (_val_prec < 0.40 and _n_val_buy > 5):
                     logger.warning(
                         "[%s] WF검증 실패 acc=%.1f%% prec=%.1f%% rec=%.1f%% (thr=%.2f n_buy=%d)",
                         self.agent_id, val_acc*100, _val_prec*100, _val_rec*100,
-                        self.buy_threshold, int(_val_pred.sum()),
+                        self.buy_threshold, _n_val_buy,
                     )
                     return False
 
@@ -1254,11 +1256,8 @@ class SimAgent:
             if "mtf_align" in full_df.columns:
                 _align = float(full_df["mtf_align"].iloc[-1])
                 if _align == 0.0:
-                    # 3개 TF 전부 하락 정렬 → 소프트 억제 (30% 하향)
-                    # FVG/VSA 피처 제거됨, 이전 하드차단 로직 → 소프트 억제로 변경
-                    prob = max(0.01, prob * 0.70)
-                    if prob < self.adaptive_buy_threshold:
-                        return "hold", round(prob, 4)
+                    # 3개 TF 전부 하락 → 하드차단 (소프트 억제는 regime_state=2 부스트 0.945*0.7=0.661로 임계값 통과 가능)
+                    return "hold", round(prob * 0.70, 4)
                 elif _align == 3.0:  # 전부 상승 정렬 → 강화
                     prob = max(0.01, min(0.99, prob * 1.08))
         except Exception:
@@ -1468,6 +1467,7 @@ class SimAgent:
         self._trailing_mode.discard(ticker)
         self._partial_tp_price.pop(ticker, None)
         self._partial_tp_done.discard(ticker)
+        self._buy_context.pop(ticker, None)  # 수익/손실 불문 매도 시 컨텍스트 정리 (메모리 누수 방지)
         now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         trade = AgentTrade(self.agent_id, ticker, "SELL", price, pos.qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
         self._push_recent(trade)
@@ -1522,7 +1522,7 @@ class SimAgent:
         elif held_min > 240:
             cause.append(f"보유{held_min:.0f}분 → 알파소멸 후 물림")
 
-        _key = tuple(sorted(wrong))
+        _key = frozenset(wrong)  # frozenset: hashable + set 연산 직접 가능 (tuple+set변환 불필요)
         self._loss_patterns[_key] = self._loss_patterns.get(_key, 0) + 1
 
         analysis = {
@@ -1554,7 +1554,7 @@ class SimAgent:
 
         max_penalty = 0.0
         for pattern_key, count in self._loss_patterns.items():
-            overlap = len(current & set(pattern_key))
+            overlap = len(current & pattern_key)  # pattern_key는 frozenset → 직접 set 교집합
             if overlap >= 2:
                 penalty = min(0.50, overlap * 0.10 * min(count, 4))
                 max_penalty = max(max_penalty, penalty)
@@ -1626,9 +1626,11 @@ class SimAgent:
             self._last_position_values[p["ticker"]] = pos.entry_price * pos.qty
         self.recent_trades = trades[:30]
 
-        # 재시작 시 recent_trades에서 연속손실 복구
+        # 재시작 시 recent_trades에서 연속손실 복구 (BUY 레코드는 profit_rate=NULL → 스킵)
         consecutive = 0
         for t in self.recent_trades:
+            if t.get("action", "SELL") not in ("SELL", "SELL_PARTIAL"):
+                continue
             if (t.get("profit_rate") or 0) < 0:
                 consecutive += 1
             else:
@@ -1819,7 +1821,7 @@ async def predict_ensemble(
         elif current_regime == 0:  # 하락추세: 전체 보수적 축소 (predict()도 이미 0.3 억제)
             weight *= 0.5
 
-        sig, prob = agent.predict(ohlcv_list, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps)
+        sig, prob = agent.predict(ohlcv_list, ticker=ticker, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps)
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight
         total_weight  += weight

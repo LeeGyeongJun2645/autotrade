@@ -377,23 +377,28 @@ class TradingScheduler:
                     today_buy_counts = {r["agent_id"]: int(r["cnt"]) async for r in cur}
 
                 # 재시작 후 _partial_tp_done 복원: 당일 SELL_PARTIAL 거래 → 중복 청산 방지
+                # 현재 보유 포지션 기준: entered_at 이후에 발생한 SELL_PARTIAL만 복원
+                # (날짜 필터 제거: 다회 세션에 걸친 부분청산 누락 방지)
                 async with db.execute("""
-                    SELECT agent_id, ticker
-                    FROM agent_trades
-                    WHERE action = 'SELL_PARTIAL'
-                      AND DATE(traded_at) = ?
-                """, (_today_kst_str,)) as cur:
+                    SELECT DISTINCT at.agent_id, at.ticker
+                    FROM agent_trades at
+                    INNER JOIN agent_positions ap
+                        ON ap.agent_id = at.agent_id AND ap.ticker = at.ticker
+                    WHERE at.action = 'SELL_PARTIAL'
+                      AND at.traded_at >= ap.entered_at
+                """) as cur:
                     partial_done_rows: dict[str, set[str]] = {}
                     async for r in cur:
                         partial_done_rows.setdefault(r["agent_id"], set()).add(r["ticker"])
 
-                # 동적 블랙리스트 복원 (재시작 후 00:00 전까지 블랙리스트 소실 방지)
+                # 동적 블랙리스트 복원: 최근 90일 데이터만 사용 (전체기간이면 과거 손실이 영구 블랙리스트화)
                 async with db.execute("""
                     SELECT agent_id, ticker,
                            CAST(SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as wr,
                            COUNT(*) as cnt
                     FROM agent_trades
                     WHERE action = 'SELL' AND profit_rate IS NOT NULL
+                      AND date(traded_at) >= date('now', '-90 days')
                     GROUP BY agent_id, ticker
                     HAVING cnt >= 20
                 """) as cur:
@@ -1693,6 +1698,13 @@ class TradingScheduler:
                             )
                         except Exception:
                             continue
+                        # EA는 predict()가 직접 호출되지 않으므로 _last_signal_snapshot/_last_atr_pct 동기화
+                        # (손실분석 + ATR동적TP가 개별 챔피언의 스냅샷 기반으로 동작하도록)
+                        _ea_cands = [a for a in AGENTS.values() if a.market == _ea.market and a._model is not None]
+                        if _ea_cands:
+                            _best_ea = max(_ea_cands, key=lambda a: a.win_rate if a.total_trades >= 5 else 0.0)
+                            _ea._last_signal_snapshot = dict(_best_ea._last_signal_snapshot)
+                            _ea._last_atr_pct = _best_ea._last_atr_pct
                         await self._agent_execute(_edb, _ea, _eticker, _esig, _eprob, _eprice)
                     await _edb.execute(
                         """INSERT INTO agent_stats
@@ -1898,11 +1910,13 @@ class TradingScheduler:
                                 signal = "sell"
                                 sim_log.push(agent.agent_id,
                                     f"[뉴스위험청산] {symbol} 뉴스점수={_ns:.2f}(극악) {unreal*100:.1f}% → 강제청산", "SELL")
-                            elif _ns > 0.6 and symbol not in agent._trailing_mode:
-                                # 뉴스 강한 호재 → TP를 10% 올려서 더 오를 때까지 홀딩
-                                take_profit = take_profit * 1.10
+                            elif _ns > 0.6 and symbol not in agent._trailing_mode and unreal >= take_profit * 0.5:
+                                # 뉴스 강한 호재 + 충분한 수익 → 트레일링 전환 (하드TP 스킵, Chandelier 출구)
+                                # take_profit 수정은 이미 TP게이트 통과 후라 데드코드 → trailing 전환으로 실효화
+                                agent._trailing_mode.add(symbol)
+                                agent._peak_price.setdefault(symbol, price)
                                 sim_log.push(agent.agent_id,
-                                    f"[뉴스호재홀딩] {symbol} 뉴스점수={_ns:.2f} → TP+10% {take_profit*100:.1f}%까지 홀딩", "INFO")
+                                    f"[뉴스호재홀딩] {symbol} 뉴스={_ns:.2f} 수익{unreal*100:.1f}% → 트레일링전환 (Chandelier출구)", "INFO")
                     except Exception:
                         pass
 
@@ -1934,10 +1948,12 @@ class TradingScheduler:
                                 sim_log.push(agent.agent_id,
                                     f"[종합판단익절] {symbol} 지속성={_cont_score:.2f} 수익{unreal*100:.1f}% {_reason_str} → 조기익절",
                                     "SELL")
-                            elif _cont_score > 0.5 and symbol not in agent._trailing_mode:
-                                take_profit = take_profit * 1.15
+                            elif _cont_score > 0.5 and symbol not in agent._trailing_mode and unreal >= take_profit * 0.5:
+                                # 지속성 강함 + 충분한 수익 → 트레일링 전환 (데드코드였던 TP+15% 대신)
+                                agent._trailing_mode.add(symbol)
+                                agent._peak_price.setdefault(symbol, price)
                                 sim_log.push(agent.agent_id,
-                                    f"[종합판단홀딩] {symbol} 지속성={_cont_score:.2f} {_reason_str} → TP+15% {take_profit*100:.1f}%",
+                                    f"[종합판단홀딩] {symbol} 지속성={_cont_score:.2f} {_reason_str} → 트레일링전환",
                                     "INFO")
                     except Exception:
                         pass

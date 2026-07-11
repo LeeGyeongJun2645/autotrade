@@ -160,7 +160,8 @@ class XGBSignalModel:
         taker_hist: list[dict] | None = None,
     ) -> TrainResult:
         """동기 학습 함수 — FastAPI에서 asyncio.to_thread 로 호출."""
-        feat_df = compute_features(ohlcv_list, btc_ohlcv=btc_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
+        _interval_min = 60 if self.ticker.startswith("KRW-") else 15
+        feat_df = compute_features(ohlcv_list, btc_ohlcv=btc_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, interval_min=_interval_min)
         if len(feat_df) < 60:
             raise ValueError(
                 f"{self.ticker}: 학습 데이터 부족 ({len(feat_df)}봉, 최소 60봉 필요)"
@@ -297,7 +298,8 @@ class XGBSignalModel:
                     f"{self.ticker}: 학습된 모델 없음. POST /ml/train 먼저 호출"
                 )
 
-        feat_df = compute_features(ohlcv_list, btc_ohlcv=btc_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist)
+        _interval_min = 60 if self.ticker.startswith("KRW-") else 15
+        feat_df = compute_features(ohlcv_list, btc_ohlcv=btc_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, interval_min=_interval_min)
         if feat_df.empty:
             raise ValueError(f"{self.ticker}: Feature 계산 실패")
 
