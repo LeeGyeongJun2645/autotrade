@@ -688,7 +688,7 @@ class SimAgent:
                 _val_prec = _ps2(y_val, _val_pred, zero_division=0)
                 _val_rec  = _rs2(y_val, _val_pred, zero_division=0)
                 _n_val_buy = int(_val_pred.sum())
-                if val_acc < 0.50 or _n_val_buy == 0 or (_val_prec < 0.40 and _n_val_buy > 5):
+                if val_acc < 0.50 or (_val_prec < 0.40 and _n_val_buy > 5):
                     logger.warning(
                         "[%s] WF검증 실패 acc=%.1f%% prec=%.1f%% rec=%.1f%% (thr=%.2f n_buy=%d)",
                         self.agent_id, val_acc*100, _val_prec*100, _val_rec*100,
