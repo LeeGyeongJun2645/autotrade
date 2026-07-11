@@ -1287,6 +1287,17 @@ class SimAgent:
                 _entered  = datetime.fromisoformat(_held_pos.entered_at).replace(tzinfo=None)
                 _held_min = (_now_kst - _entered).total_seconds() / 60
 
+                # ── 주식 전용: 15:00 이후 오버나이트 방지 강제 청산 ────────────
+                if self.market == "stock" and len(full_df) >= 5:
+                    try:
+                        _now_k = datetime.now(ZoneInfo("Asia/Seoul"))
+                        if _now_k.hour == 15 and _now_k.minute >= 0:
+                            from backend.core import sim_log
+                            sim_log.push(self.agent_id, f"[차트모니터링] {ticker} 주식마감청산(15시이후)", "SELL")
+                            return "sell", round(max(prob, 0.60), 4)
+                    except Exception:
+                        pass
+
                 if _held_min >= 30 and len(full_df) >= 5:
                     _rsi_now   = float(full_df["rsi_9"].iloc[-1])
                     _rsi_prev  = float(full_df["rsi_9"].iloc[-3])
@@ -1335,6 +1346,26 @@ class SimAgent:
                             return "sell", round(max(prob, 0.52), 4)
                     except Exception:
                         pass
+
+                    # ── 주식 전용: ORB 하단이탈 손절 + 장중반전 익절 ────────────
+                    if self.market == "stock":
+                        try:
+                            _orb_br = float(full_df["orb_breakout"].iloc[-1]) if "orb_breakout" in full_df.columns else 0.0
+                            if _orb_br == -1:
+                                from backend.core import sim_log
+                                sim_log.push(self.agent_id, f"[차트모니터링] {ticker} ORB하단이탈→주식손절", "SELL")
+                                return "sell", round(max(prob, 0.52), 4)
+                        except Exception:
+                            pass
+                        try:
+                            _rev_s = bool(full_df["intraday_reversal"].iloc[-1]) if "intraday_reversal" in full_df.columns else False
+                            _sess_s = int(full_df["session_phase"].iloc[-1]) if "session_phase" in full_df.columns else 0
+                            if _rev_s and _sess_s >= 2:
+                                from backend.core import sim_log
+                                sim_log.push(self.agent_id, f"[차트모니터링] {ticker} 장중반전신호(오전강세→오후약세)→주식익절", "SELL")
+                                return "sell", round(max(prob, 0.52), 4)
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -1407,6 +1438,60 @@ class SimAgent:
 
         except Exception:
             pass
+
+        # ── 주식 전용 진입 필터: ORB + VWAP + 세션 + KOSPI 상대강도 ─────────────
+        # 실전 원칙: ① ORB 상단 돌파 ② VWAP 위 ③ KOSPI 강세 종목 ④ 마감 전 신규 비매수
+        if self.market == "stock":
+            try:
+                _last_s = full_df.iloc[-1]
+                def _ssf(col: str, default: float = 0.0) -> float:
+                    return float(_last_s.get(col, default))
+                def _ssb(col: str) -> bool:
+                    return bool(_last_s.get(col, 0))
+
+                _sess = int(_ssf("session_phase"))
+
+                # 마감 구간 (session_phase==3: 14:30~) 신규 매수 완전 차단
+                if _sess == 3:
+                    return "hold", round(prob * 0.25, 4)
+
+                # 개장 초변동 (session_phase==0: 09:00~09:30): 범위 확정 전 확률 약화
+                if _sess == 0:
+                    prob = prob * 0.75
+
+                # ORB 하단 돌파 중 → 하락 압력, 신규 진입 완전 차단
+                _orb_break = _ssf("orb_breakout")
+                if _orb_break == -1:
+                    return "hold", round(prob * 0.20, 4)
+
+                _orb_bull = (_orb_break == 1)           # ORB 상단 돌파 (강세 추세)
+                _orb_vol  = _ssb("orb_vol_confirm")     # ORB + 거래량 1.5배 동반
+
+                # VWAP 기준선: 기관의 매수 기준선, 아래면 분위기 나쁨
+                _above_vwap = _ssb("anchored_vwap_cross")
+
+                # KOSPI 상대강도 + 갭 방향
+                _kospi_rel = _ssf("kospi_rel_str")
+                _ret_open  = _ssf("ret_since_open")
+
+                # VWAP 아래 + ORB 돌파 없음 → 추세 역방향 진입 차단
+                if not _above_vwap and not _orb_bull:
+                    return "hold", round(prob * 0.40, 4)
+
+                # KOSPI 역행 + 갭다운 → 시장 전체 약세, 개별주 진입 차단
+                if _kospi_rel < -0.005 and _ret_open < -0.01:
+                    return "hold", round(prob * 0.45, 4)
+
+                # ORB 상단돌파 + 거래량 확인 = 주식 단타 최고 신뢰 진입 신호
+                if _orb_bull and _orb_vol:
+                    prob = min(prob * 1.15, 0.95)
+
+                # VWAP 위 + ORB 돌파 = 추세 방향 더블 확인
+                if _above_vwap and _orb_bull:
+                    prob = min(prob * 1.08, 0.95)
+
+            except Exception:
+                pass
 
         if prob >= self.adaptive_buy_threshold:
             # ── 손실 패턴 패널티: 과거 동일 신호 조합에서 반복 손실 → 확률 하향 ──
