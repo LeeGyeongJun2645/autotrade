@@ -64,7 +64,9 @@ class KISTokenManager:
     async def _issue_token(self) -> None:
         """KIS OAuth2 토큰 발급 API 호출."""
         base = self._base_url if self._base_url is not None else settings.kis_base_url
-        url = f"{base}/oauth2/tokenP"
+        # LIVE 모드: /oauth2/token, PAPER(모의투자) 모드: /oauth2/tokenP
+        _token_path = "/oauth2/tokenP" if settings.trade_mode == "PAPER" else "/oauth2/token"
+        url = f"{base}{_token_path}"
         payload = {
             "grant_type": "client_credentials",
             "appkey": settings.kis_app_key,
