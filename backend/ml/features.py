@@ -63,6 +63,10 @@ FEATURE_NAMES = [
     "is_bearish_engulf",
     "is_marubozu_bull",
     "is_marubozu_bear",
+    "is_inverted_hammer",  # 역망치형: 저점 반전 시도
+    "is_morning_star",     # 아침별형: 3봉 반전 패턴
+    "is_piercing",         # 관통형: 이전 음봉 50% 이상 회복
+    "is_pullback_to_ma20", # 눌림목: 정배열+MA20 근처 반등 시작
     "consecutive_up",
     "consecutive_down",
     "candle_color",
@@ -257,6 +261,14 @@ def compute_features(
     df["ma60_ratio"]      = close / ma60.replace(0, np.nan) - 1
     df["ma5_cross_ma20"]  = (ma5 > ma20).astype(float)
     df["ma20_cross_ma60"] = (ma20 > ma60).astype(float)
+
+    # 눌림목(Pullback to MA20): 정배열 구조에서 MA20 근처까지 내려온 후 반등 시작
+    # 실전 트레이더들이 가장 많이 쓰는 진입 자리 — MA20 눌림 후 양봉 전환 시 매수
+    df["is_pullback_to_ma20"] = (
+        (df["ma5_cross_ma20"] == 1) &         # MA5 > MA20 (정배열 — 하락 구조 아님)
+        (df["ma20_ratio"].abs() <= 0.015) &    # 현재가가 MA20 ±1.5% 이내 (눌린 자리)
+        (close > close.shift(1))               # 직전봉 대비 상승 (반등 시작 확인)
+    ).astype(float)
 
     adx_ind       = trend.ADXIndicator(high, low, close, window=14)
     df["adx_14"]  = adx_ind.adx()

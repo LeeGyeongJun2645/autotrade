@@ -96,16 +96,18 @@ AGENT_CONFIGS: list[tuple] = [
     # (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market, lookahead, model_type)
     # label_threshold: 60분봉 기준 3~8시간 내 수익 기준 (5분봉 0.006~0.012 → 1h 0.008~0.015)
     # 코인 홀수 → LightGBM / 짝수 → XGBoost (앙상블 다양성 극대화)
-    ("AI01", 60, 0.008, 0.58, "all",      "coin",  3, "lgbm"),  # 단기 공격형
+    # archive 2주치 실적: AI01(-43%) AI04(-52%) AI08(-96%) AI10(-79%) 모두 60분봉 최악
+    # → AI16(+25%)/AI12(+7%) 15분봉 trend 패턴으로 교체 (archive 기반 데이터 결정)
+    ("AI01", 15, 0.006, 0.60, "trend",    "coin",  8, "lgbm"),  # AI16 패턴 코인 버전 (1위)
     ("AI02", 60, 0.009, 0.63, "momentum", "coin",  5, "xgb"),
     ("AI03", 60, 0.010, 0.62, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
-    ("AI04", 60, 0.009, 0.62, "volume",   "coin",  3, "xgb"),
+    ("AI04", 15, 0.006, 0.62, "trend",    "coin",  5, "xgb"),   # AI12 패턴 코인 버전 (2위)
     ("AI05", 60, 0.012, 0.60, "all",      "coin",  5, "lgbm"),
     ("AI06", 60, 0.010, 0.65, "momentum", "coin",  8, "xgb"),
     ("AI07", 60, 0.012, 0.62, "trend",    "coin",  3, "lgbm"),
-    ("AI08", 60, 0.009, 0.62, "volume",   "coin",  5, "xgb"),
+    ("AI08", 15, 0.005, 0.60, "momentum", "coin",  5, "xgb"),   # 15분봉 모멘텀
     ("AI09", 60, 0.015, 0.65, "all",      "coin",  8, "lgbm"),
-    ("AI10", 60, 0.010, 0.70, "trend",    "coin",  5, "xgb"),
+    ("AI10", 15, 0.006, 0.58, "volume",   "coin",  6, "xgb"),   # 15분봉 거래량
     # 주식: 15분봉 — 장중 충분한 데이터 확보 + 노이즈 감소
     ("AI11", 15, 0.007, 0.58, "all",      "stock", 3, "lgbm"),
     ("AI12", 15, 0.006, 0.60, "trend",    "stock", 5, "lgbm"),
@@ -1310,15 +1312,15 @@ class SimAgent:
             except Exception:
                 pass
 
-        # ── 캔들패턴 + 일목기준선 진입 필터 ──────────────────────────────────────
-        # 차트를 보고 들어가기: 망치·장악형·아침별·관통형 또는 일목 기준선 조건 중 하나 없으면 매수 차단
-        # 이유: ML이 변동성/수익률 지표만 학습하고 캔들패턴을 0% 중요도로 무시하는 문제 보완
+        # ── 캔들패턴 + 일목기준선 + 거래량 진입 필터 (실전 단타 매매법 기반) ───────
+        # 실전 트레이더: 캔들패턴 + 지지선 위치 + 거래량 3가지 동시 확인 후 진입
+        # 추가: 눌림목 매수(MA20 근처 반등), BB 하단 반등, 거래량 동반 조건
         try:
             _last_row = full_df.iloc[-1]
             def _cf(col: str) -> bool:
                 return bool(_last_row.get(col, 0))
 
-            # 강세 캔들 패턴 (단타 캔들 매매법 핵심 시그널)
+            # 강세 캔들 패턴
             _bullish_candle = (
                 _cf("is_hammer") or            # 망치형: 저점 지지 반등
                 _cf("is_inverted_hammer") or   # 역망치형: 저점 반전 시도
@@ -1331,6 +1333,10 @@ class SimAgent:
             _ichi_ok = _cf("ichi_tenkan_kijun_bull") or _cf("ichi_above_cloud")
             # MA 정배열 + HA 연속 양봉 (추세 기반 모멘텀)
             _trend_ok = _cf("ma20_cross_ma60") and float(_last_row.get("ha_bull_streak", 0)) >= 3
+            # 눌림목: 정배열 MA20 근처 눌린 자리 반등 시작 (실전 고수 핵심 진입 자리)
+            _pullback_ok = _cf("is_pullback_to_ma20")
+            # BB 하단 반등: 볼린저밴드 25% 이하 과매도 구간 (BB 하단 반등 매매법)
+            _bb_bounce = float(_last_row.get("bb_pband", 0.5)) < 0.25
 
             # 약세 캔들 → 신규 진입 직접 차단
             _bearish_candle = _cf("is_shooting_star") or _cf("is_bearish_engulf")
@@ -1338,8 +1344,13 @@ class SimAgent:
                 return "hold", round(prob * 0.40, 4)
 
             # 상승 근거가 하나도 없으면 매수 차단 (ML 확률이 높아도)
-            if not (_bullish_candle or _ichi_ok or _trend_ok):
+            if not (_bullish_candle or _ichi_ok or _trend_ok or _pullback_ok or _bb_bounce):
                 return "hold", round(prob * 0.55, 4)
+
+            # 거래량 미동반 캔들: 신호 강도 약화 (캔들만 있고 거래량 없으면 신뢰도↓)
+            _vol_ok = float(_last_row.get("vol_ratio", 1.0)) >= 1.1
+            if _bullish_candle and not _vol_ok:
+                return "hold", round(prob * 0.75, 4)
 
         except Exception:
             pass
