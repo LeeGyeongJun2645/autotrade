@@ -100,9 +100,19 @@ async def get_top_tickers(n: int = 50) -> list[str]:
             all_tickers.extend(r.json())
 
     sorted_markets = sorted(all_tickers, key=lambda x: float(x.get("acc_trade_price_24h", 0)), reverse=True)
-    top = [d["market"] for d in sorted_markets]
+    # 필터: 현재가 500원 미만 또는 일 거래대금 50억 미만 코인 제외
+    # 6원짜리 잡코인은 한 틱=1원=16%로 수수료 왕복 0.2%를 상회할 수 없음
+    _MIN_PRICE = 500
+    _MIN_DAILY_VOLUME = 5_000_000_000  # 50억
+    filtered = [
+        d for d in sorted_markets
+        if float(d.get("trade_price", 0)) >= _MIN_PRICE
+        and float(d.get("acc_trade_price_24h", 0)) >= _MIN_DAILY_VOLUME
+    ]
+    top = [d["market"] for d in filtered]
     _TOP_TICKERS_CACHE = (top, now)
-    logger.debug("[Upbit] 거래대금 상위 %d개: %s", n, top[:n])
+    logger.info("[Upbit] 필터 후 유효 코인: %d개 (500원↑, 거래대금50억↑) 상위%d: %s",
+                len(top), min(n, len(top)), top[:n])
     return top[:n]
 
 

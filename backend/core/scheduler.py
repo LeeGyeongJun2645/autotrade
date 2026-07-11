@@ -2038,6 +2038,16 @@ class TradingScheduler:
                     _daily_limit = 12
             if agent._today_buy_count >= _daily_limit:
                 return
+            # 동일 코인 중복 매수 제한: 이미 다른 에이전트가 보유 중이면 신규 진입 차단
+            # KAITO처럼 3개 에이전트가 동시에 같은 코인 → 집중리스크 + 손실 배수 문제
+            from backend.ml.agents import ENSEMBLE_AGENTS as _EA_CHK
+            _already_holding = sum(
+                1 for _a in list(AGENTS.values()) + list(_EA_CHK.values())
+                if symbol in _a._positions and _a.agent_id != agent.agent_id
+            )
+            if _already_holding >= 2:
+                sim_log.push(agent.agent_id, f"[중복차단] {symbol} 이미 {_already_holding}개 에이전트 보유 → 분산", "INFO")
+                return
             # ADX 필터: 코인 횡보장(ADX<15) 진입 차단 — 추세 없는 구간에서 WR 급락 방지
             # 20→15: VSA·FVG 반전 신호는 ADX 15~20 구간(횡보→추세 전환 직전)에서 유효
             if agent.market == "coin" and 0 < agent._last_adx_14 < 15:
