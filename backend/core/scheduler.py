@@ -2267,6 +2267,21 @@ class TradingScheduler:
         if not coin_ohlcv:
             logger.error("[Retrain] 코인 학습 데이터 수집 전부 실패 — 코인 에이전트 재학습 건너뜀")
 
+        # 15분봉 코인 에이전트 전용 학습 데이터 (AI01/04/08/10 등 interval_min=15)
+        coin_ohlcv_15m: list[dict] = []
+        _has_15m_coin_agent = any(
+            a.interval_min == 15 and a.market == "coin" for a in AGENTS.values()
+        )
+        if _has_15m_coin_agent:
+            for ticker in COIN_TICKERS:
+                try:
+                    coin_ohlcv_15m = await _upbit.get_ohlcv(ticker, interval="minutes/15", count=2000)
+                    if len(coin_ohlcv_15m) >= 200:
+                        logger.info("[Retrain] 코인 학습 데이터(15분봉): %s (%d봉)", ticker, len(coin_ohlcv_15m))
+                        break
+                except Exception as e:
+                    logger.warning("[Retrain] 코인 15분봉 OHLCV 수집 실패 (%s): %s", ticker, e)
+
         # 주식 학습 데이터 수집 (symbol → ohlcv 딕셔너리)
         # 1순위: _agent_tick 이 누적한 틱 캐시 전체 활용 (재시작 후 25분 이상 경과 시 50종목 데이터)
         _stock_retrain_map: dict[str, list[dict]] = {}
@@ -2310,6 +2325,15 @@ class TradingScheduler:
             logger.info("[Retrain] BTC 학습 데이터: %d봉 (60분봉)", len(btc_train_ohlcv))
         except Exception:
             logger.warning("[Retrain] BTC 상관관계 학습 데이터 수집 실패")
+
+        # 15분봉 에이전트용 BTC 상관관계 데이터 (봉 단위 맞춰야 corr 계산 정확)
+        btc_train_ohlcv_15m: list[dict] = []
+        if _has_15m_coin_agent:
+            try:
+                btc_train_ohlcv_15m = await _upbit.get_ohlcv("KRW-BTC", interval="minutes/15", count=2000)
+                logger.info("[Retrain] BTC 학습 데이터(15분봉): %d봉", len(btc_train_ohlcv_15m))
+            except Exception:
+                logger.warning("[Retrain] BTC 15분봉 상관관계 학습 데이터 수집 실패, 60분봉으로 대체")
 
         # ── KOSPI 학습용 데이터 (주식 에이전트 상대강도 피처용) ──────
         kospi_train_ohlcv: list[dict] = []
@@ -2386,8 +2410,13 @@ class TradingScheduler:
         from backend.ml.agents import ENSEMBLE_AGENTS
         success = 0
         for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
-            fr         = coin_funding if agent.market == "coin" else None
-            _btc_ref   = btc_train_ohlcv  if agent.market == "coin"  else None
+            fr = coin_funding if agent.market == "coin" else None
+            # 15분봉 코인 에이전트는 15분봉 BTC 상관관계 데이터 사용 (봉 단위 일치)
+            if agent.market == "coin":
+                _btc_ref = (btc_train_ohlcv_15m if agent.interval_min == 15 and btc_train_ohlcv_15m
+                            else btc_train_ohlcv)
+            else:
+                _btc_ref = None
             _kospi_ref = kospi_train_ohlcv if agent.market == "stock" else None
             _oi_ref    = btc_oi_train      if agent.market == "coin"  else None
             _taker_ref = btc_taker_train   if agent.market == "coin"  else None
@@ -2411,7 +2440,9 @@ class TradingScheduler:
                             agent.train_multi, _stock_ohlcv_by_sym, _kospi_ref
                         )
                     else:
-                        data = coin_ohlcv
+                        # 15분봉 코인 에이전트는 15분봉 데이터로 학습 (봉 단위 일치)
+                        data = (coin_ohlcv_15m if agent.interval_min == 15 and coin_ohlcv_15m
+                                else coin_ohlcv)
                         if not data:
                             logger.warning("[Retrain][%s] 코인 학습 데이터 없음, 스킵", agent.agent_id)
                             continue
