@@ -66,7 +66,16 @@ FEATURE_NAMES = [
     "is_inverted_hammer",  # 역망치형: 저점 반전 시도
     "is_morning_star",     # 아침별형: 3봉 반전 패턴
     "is_piercing",         # 관통형: 이전 음봉 50% 이상 회복
-    "is_pullback_to_ma20", # 눌림목: 정배열+MA20 근처 반등 시작
+    "is_pullback_to_ma20",      # 눌림목: 정배열+MA20 근처 반등 시작
+    "close_reclaimed_ma20",     # MA20 회복봉: 아래서 위로 돌파 (지지선 회복 확인)
+    "close_reclaimed_ma60",     # MA60 회복봉: 중기 지지선 회복
+    "vol_reversal_signal",      # 거래량 반전: 2봉 감소→현재 급증 (반등 임박)
+    "bullish_count_3",          # 최근 3봉 중 양봉 개수 (3틱룰 기반 다중 확인)
+    "bearish_count_3",          # 최근 3봉 중 음봉 개수
+    "swing_near_support",       # 최근 20봉 저점 대비 현재가 거리 (동적 지지선)
+    "swing_near_resistance",    # 최근 20봉 고점 대비 현재가 거리 (동적 저항선)
+    "near_support_3pct",        # 동적 지지선 3% 이내 → 매수 유리 구간
+    "near_resistance_2pct",     # 동적 저항선 2% 이내 → 익절 준비 구간
     "consecutive_up",
     "consecutive_down",
     "candle_color",
@@ -262,6 +271,15 @@ def compute_features(
     df["ma5_cross_ma20"]  = (ma5 > ma20).astype(float)
     df["ma20_cross_ma60"] = (ma20 > ma60).astype(float)
 
+    # MA 회복봉: MA20/MA60 아래서 위로 돌파한 봉 (지지선 회복 = 반등 확인 시그널)
+    # 실전: 이평선 아래에 있다가 종가 기준으로 다시 선 위에서 마감하는 봉이 진입 신호
+    df["close_reclaimed_ma20"] = (
+        (close > ma20) & (close.shift(1) <= ma20.shift(1))
+    ).astype(float)
+    df["close_reclaimed_ma60"] = (
+        (close > ma60) & (close.shift(1) <= ma60.shift(1))
+    ).astype(float)
+
     # 눌림목(Pullback to MA20): 정배열 구조에서 MA20 근처까지 내려온 후 반등 시작
     # 실전 트레이더들이 가장 많이 쓰는 진입 자리 — MA20 눌림 후 양봉 전환 시 매수
     df["is_pullback_to_ma20"] = (
@@ -347,8 +365,15 @@ def compute_features(
     # ── 거래량 ────────────────────────────────────────────────────
     vol_ma20          = vol.rolling(20).mean()
     df["vol_ratio"]   = vol / vol_ma20.replace(0, np.nan)
-    df["vol_surge"]   = (vol / vol.rolling(5).mean().replace(0, np.nan)).fillna(1.0)
+    _vol_ma5          = vol.rolling(5).mean()
+    df["vol_surge"]   = (vol / _vol_ma5.replace(0, np.nan)).fillna(1.0)
     df["vol_surge_flag"] = (df["vol_surge"] >= 3).astype(float)  # 3배 이상 = 급증
+
+    # 거래량 반전 패턴: 직전 2봉 연속 감소 후 현재 5봉 평균 대비 1.3배 급증
+    # 실전: 하락하면서 거래량이 줄다가 → 급증하면 매도 소진 + 매수세 유입 = 반등 임박
+    _vol_declining = (vol.shift(1) < vol.shift(2)) & (vol.shift(2) < vol.shift(3))
+    _vol_surge_now = vol > _vol_ma5.shift(1) * 1.3
+    df["vol_reversal_signal"] = (_vol_declining & _vol_surge_now).astype(float)
 
     df["cmf_20"]      = volume.ChaikinMoneyFlowIndicator(high, low, close, vol, window=20).chaikin_money_flow()
 
@@ -462,6 +487,26 @@ def compute_features(
     is_down = (close < close.shift(1)).astype(int)
     df["consecutive_up"]   = is_up.rolling(5, min_periods=1).sum()
     df["consecutive_down"] = is_down.rolling(5, min_periods=1).sum()
+
+    # 3봉 방향 확인 (3틱룰): 최근 3봉 중 양봉/음봉 개수 — 다중 캔들 컨텍스트
+    # 실전: 단봉 하나만 보지 않고 최소 3봉의 흐름을 봐야 방향성 신뢰도 높아짐
+    _is_bull = (close > open_).astype(int)
+    _is_bear = (close < open_).astype(int)
+    df["bullish_count_3"]  = _is_bull.rolling(3, min_periods=1).sum().astype(float)
+    df["bearish_count_3"]  = _is_bear.rolling(3, min_periods=1).sum().astype(float)
+
+    # 동적 지지/저항선: 최근 20봉 스윙 저점/고점 기반 (실전 수평선 자동화)
+    # 실전: 고점은 고점끼리, 저점은 저점끼리 이어서 지지/저항선 — 3번 이상 터치 시 신뢰도 높음
+    _roll20_low  = low.rolling(20).min()
+    _roll20_high = high.rolling(20).max()
+    # 현재가가 최근 저점에서 얼마나 떨어져 있는지 (0=지지선 위, 값 작을수록 지지선 근처)
+    df["swing_near_support"]    = (close / _roll20_low.replace(0, np.nan) - 1).clip(0, 0.20)
+    # 현재가가 최근 고점에서 얼마나 아래에 있는지 (0=저항선, 값 작을수록 저항선 근처)
+    df["swing_near_resistance"] = (_roll20_high / close.replace(0, np.nan) - 1).clip(0, 0.20)
+    # 지지선 3% 이내 → 매수 유리 구간
+    df["near_support_3pct"]     = (df["swing_near_support"] <= 0.03).astype(float)
+    # 저항선 2% 이내 → 익절 준비 구간
+    df["near_resistance_2pct"]  = (df["swing_near_resistance"] <= 0.02).astype(float)
 
     # ── 래그 피처 (XGBoost에 시계열 맥락 제공) ───────────────────────
     df["rsi_lag_1"]       = df["rsi_9"].shift(1)

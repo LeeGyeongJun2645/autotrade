@@ -1309,47 +1309,100 @@ class SimAgent:
                         from backend.core import sim_log
                         sim_log.push(self.agent_id, f"[차트모니터링] {ticker} RSI다이버전스({_rsi_prev:.1f}→{_rsi_now:.1f})+MACD반전→익절신호", "SELL")
                         return "sell", round(max(prob, 0.55), 4)
+
+                    # ── 저항선 근처 + 약세 캔들 → 익절 (저항선에서 팔아야 함) ──
+                    # 실전: 저항선 2% 이내에 도달하면 매도 준비. 약세 봉 출현 시 즉시 익절
+                    try:
+                        _near_res = bool(full_df["near_resistance_2pct"].iloc[-1])
+                        _bear_cnt = float(full_df["bearish_count_3"].iloc[-1])
+                        _bear_engulf = bool(full_df["is_bearish_engulf"].iloc[-1]) if "is_bearish_engulf" in full_df.columns else False
+                        _shooting   = bool(full_df["is_shooting_star"].iloc[-1]) if "is_shooting_star" in full_df.columns else False
+                        if _near_res and (_bear_cnt >= 2 or _bear_engulf or _shooting):
+                            from backend.core import sim_log
+                            sim_log.push(self.agent_id, f"[차트모니터링] {ticker} 저항선근처({float(full_df['swing_near_resistance'].iloc[-1])*100:.1f}%)+약세봉→익절신호", "SELL")
+                            return "sell", round(max(prob, 0.55), 4)
+                    except Exception:
+                        pass
+
+                    # ── 3봉 연속 음봉 + 거래량 증가 → 추세 전환, 즉시 익절 ──────
+                    # 실전: 산 뒤 계속 차트 보다가 3봉 연속 음봉이면 추세 꺾인 것
+                    try:
+                        _bear3 = float(full_df["bearish_count_3"].iloc[-1])
+                        _vol_now = float(full_df["vol_ratio"].iloc[-1])
+                        if _bear3 >= 3 and _vol_now >= 1.2:
+                            from backend.core import sim_log
+                            sim_log.push(self.agent_id, f"[차트모니터링] {ticker} 3봉연속음봉+거래량급증({_vol_now:.1f}x)→추세전환 익절", "SELL")
+                            return "sell", round(max(prob, 0.52), 4)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
-        # ── 캔들패턴 + 일목기준선 + 거래량 진입 필터 (실전 단타 매매법 기반) ───────
-        # 실전 트레이더: 캔들패턴 + 지지선 위치 + 거래량 3가지 동시 확인 후 진입
-        # 추가: 눌림목 매수(MA20 근처 반등), BB 하단 반등, 거래량 동반 조건
+        # ── 차트 종합 분석 진입 필터 (캔들 + 지지선 + 거래량 + 다중봉 확인) ────────
+        # 실전 원칙: 캔들 하나만 보지 말고 ① 지지선 위치 ② 거래량 ③ 여러 봉의 흐름 동시 확인
+        # 연구 결과: 최소 3번 터치된 수평 지지선 근처 + 거래량 급증 + 2봉 이상 양봉 = 고승률 진입
         try:
             _last_row = full_df.iloc[-1]
             def _cf(col: str) -> bool:
                 return bool(_last_row.get(col, 0))
+            def _fv(col: str, default: float = 0.0) -> float:
+                return float(_last_row.get(col, default))
 
-            # 강세 캔들 패턴
+            # ── ① 강세 캔들 패턴 (단봉 시그널) ───────────────────────────
             _bullish_candle = (
-                _cf("is_hammer") or            # 망치형: 저점 지지 반등
+                _cf("is_hammer") or            # 망치형: 아래꼬리 지지 반등
                 _cf("is_inverted_hammer") or   # 역망치형: 저점 반전 시도
-                _cf("is_bullish_engulf") or    # 상승장악형: 강한 반전
+                _cf("is_bullish_engulf") or    # 상승장악형: 이전 음봉 완전 덮음
                 _cf("is_morning_star") or      # 아침별형: 3봉 반전 패턴
-                _cf("is_piercing") or          # 관통형: 50% 이상 회복
-                _cf("is_marubozu_bull")        # 마루보쥬 양봉: 강한 모멘텀
+                _cf("is_piercing") or          # 관통형: 이전 음봉 50% 이상 회복
+                _cf("is_marubozu_bull")        # 마루보쥬 양봉: 꼬리없는 강한 양봉
             )
-            # 일목균형표 조건 (기준선/구름대 기반)
+            # ── ② 일목균형표 조건 (기준선/구름대 기반 추세 확인) ──────────
             _ichi_ok = _cf("ichi_tenkan_kijun_bull") or _cf("ichi_above_cloud")
-            # MA 정배열 + HA 연속 양봉 (추세 기반 모멘텀)
-            _trend_ok = _cf("ma20_cross_ma60") and float(_last_row.get("ha_bull_streak", 0)) >= 3
-            # 눌림목: 정배열 MA20 근처 눌린 자리 반등 시작 (실전 고수 핵심 진입 자리)
+            # ── ③ MA 정배열 + HA 연속 양봉 (추세 지속 모멘텀) ────────────
+            _trend_ok = _cf("ma20_cross_ma60") and _fv("ha_bull_streak") >= 3
+            # ── ④ 눌림목: 정배열에서 MA20 근처 눌린 후 반등 (실전 핵심 매수 자리) ──
             _pullback_ok = _cf("is_pullback_to_ma20")
-            # BB 하단 반등: 볼린저밴드 25% 이하 과매도 구간 (BB 하단 반등 매매법)
-            _bb_bounce = float(_last_row.get("bb_pband", 0.5)) < 0.25
+            # ── ⑤ BB 하단 반등: 과매도 구간 (BB 25% 이하) ───────────────
+            _bb_bounce = _fv("bb_pband", 0.5) < 0.25
+            # ── ⑥ 거래량 반전 패턴: 감소→급증 (매도 소진, 반등 임박) ───────
+            _vol_reversal = _cf("vol_reversal_signal")
+            # ── ⑦ MA20/MA60 회복봉: 이평선 아래서 위로 돌파 (지지선 재확인) ─
+            _ma_reclaim = _cf("close_reclaimed_ma20") or _cf("close_reclaimed_ma60")
+            # ── ⑧ 동적 지지선 근처: 최근 20봉 저점 3% 이내 (수평 지지선 근접) ─
+            _near_support = _cf("near_support_3pct")
+            # ── ⑨ 3봉 방향 확인: 최근 3봉 중 양봉 2개 이상 (3틱룰) ──────
+            _multi_bull = _fv("bullish_count_3") >= 2
 
-            # 약세 캔들 → 신규 진입 직접 차단
+            # ── 약세 캔들 → 신규 진입 직접 차단 (저항선 근처 약세는 더 강하게)
             _bearish_candle = _cf("is_shooting_star") or _cf("is_bearish_engulf")
+            _near_resistance = _cf("near_resistance_2pct")
             if _bearish_candle:
-                return "hold", round(prob * 0.40, 4)
+                _penalty = 0.30 if _near_resistance else 0.40
+                return "hold", round(prob * _penalty, 4)
 
-            # 상승 근거가 하나도 없으면 매수 차단 (ML 확률이 높아도)
-            if not (_bullish_candle or _ichi_ok or _trend_ok or _pullback_ok or _bb_bounce):
+            # ── 저항선 2% 이내 + 음봉 추세 → 매수 차단 (벽 앞에서 들어가면 안됨)
+            if _near_resistance and _fv("bearish_count_3") >= 2:
+                return "hold", round(prob * 0.45, 4)
+
+            # ── 상승 근거가 하나도 없으면 매수 차단 (캔들 하나만 보면 안됨)
+            _has_signal = (
+                _bullish_candle or _ichi_ok or _trend_ok or
+                _pullback_ok or _bb_bounce or _vol_reversal or
+                _ma_reclaim
+            )
+            if not _has_signal:
                 return "hold", round(prob * 0.55, 4)
 
-            # 거래량 미동반 캔들: 신호 강도 약화 (캔들만 있고 거래량 없으면 신뢰도↓)
-            _vol_ok = float(_last_row.get("vol_ratio", 1.0)) >= 1.1
-            if _bullish_candle and not _vol_ok:
+            # ── 신호는 있지만 지지선 근처도 아니고 거래량도 없으면 약화 ──
+            # 실전: 지지선과 거래량이 없는 캔들 패턴은 속임수일 가능성 높음
+            _vol_ok = _fv("vol_ratio", 1.0) >= 1.1
+            _context_ok = _near_support or _multi_bull or _vol_ok or _vol_reversal
+            if _bullish_candle and not _context_ok:
+                return "hold", round(prob * 0.70, 4)
+
+            # ── 거래량 미동반 캔들만 단독: 신호 강도 약화 ─────────────────
+            if _bullish_candle and not _vol_ok and not _near_support:
                 return "hold", round(prob * 0.75, 4)
 
         except Exception:
