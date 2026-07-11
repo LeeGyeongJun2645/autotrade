@@ -49,9 +49,14 @@ class KISTokenManager:
         self._token: str | None = None
         self._expires_at: datetime = datetime.min
         self._lock = asyncio.Lock()
-        # 캐시 파일 이름: 서버 URL 기반으로 구분 (live vs paper)
-        _suffix = "live" if (base_url or "").find("9443") >= 0 or base_url is None else "paper"
-        self._cache_file = _TOKEN_CACHE_DIR / f"kis_token_{_suffix}.json"
+        # 캐시 파일은 실제 사용 URL에서 lazily 결정 (_get_cache_file 참조)
+        # __init__ 시점에 base_url=None이면 settings.kis_base_url이 아직 확정 안 됐을 수 있음
+
+    def _get_cache_file(self) -> "Path":
+        """실제 사용 URL로부터 캐시 파일 경로 결정. 29443 포트 = paper, 그 외 = live."""
+        base = self._base_url if self._base_url is not None else settings.kis_base_url
+        _suffix = "paper" if "29443" in base else "live"
+        return _TOKEN_CACHE_DIR / f"kis_token_{_suffix}.json"
 
     @property
     def is_valid(self) -> bool:
@@ -61,9 +66,10 @@ class KISTokenManager:
     def _load_cached_token(self) -> bool:
         """파일 캐시에서 토큰 로드. 유효하면 True 반환."""
         try:
-            if not self._cache_file.exists():
+            _cf = self._get_cache_file()
+            if not _cf.exists():
                 return False
-            data = json.loads(self._cache_file.read_text())
+            data = json.loads(_cf.read_text())
             exp = datetime.fromisoformat(data["expires_at"])
             if datetime.now(_KST) < exp - timedelta(minutes=5):
                 self._token = data["access_token"]
@@ -78,7 +84,7 @@ class KISTokenManager:
         """토큰을 파일 캐시에 저장."""
         try:
             _TOKEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            self._cache_file.write_text(json.dumps({
+            self._get_cache_file().write_text(json.dumps({
                 "access_token": self._token,
                 "expires_at": self._expires_at.isoformat(),
             }))

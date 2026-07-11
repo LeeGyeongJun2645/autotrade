@@ -514,11 +514,13 @@ def compute_features(
     # 실전: 고점은 고점끼리, 저점은 저점끼리 이어서 지지/저항선 — 3번 이상 터치 시 신뢰도 높음
     _roll20_low  = low.rolling(20).min()
     _roll20_high = high.rolling(20).max()
-    # 현재가가 최근 저점에서 얼마나 떨어져 있는지 (0=지지선 위, 값 작을수록 지지선 근처)
-    df["swing_near_support"]    = (close / _roll20_low.replace(0, np.nan) - 1).clip(0, 0.20)
+    # 현재가 vs 20봉 저점 거리: 음수(이탈)는 NaN으로 처리해 near_support_3pct가 False되도록 함
+    # clip(0, 0.20) 만 쓰면 이탈 시 0이 돼서 ≤0.03 조건이 True가 되는 버그 있음
+    _raw_sup = close / _roll20_low.replace(0, np.nan) - 1
+    df["swing_near_support"]    = _raw_sup.where(_raw_sup >= 0, other=np.nan).clip(upper=0.20).fillna(0.20)
     # 현재가가 최근 고점에서 얼마나 아래에 있는지 (0=저항선, 값 작을수록 저항선 근처)
     df["swing_near_resistance"] = (_roll20_high / close.replace(0, np.nan) - 1).clip(0, 0.20)
-    # 지지선 3% 이내 → 매수 유리 구간
+    # 지지선 3% 이내이면서 지지선 위 → 매수 유리 구간 (지지선 이탈 시 False)
     df["near_support_3pct"]     = (df["swing_near_support"] <= 0.03).astype(float)
     # 저항선 2% 이내 → 익절 준비 구간
     df["near_resistance_2pct"]  = (df["swing_near_resistance"] <= 0.02).astype(float)
@@ -985,20 +987,20 @@ def compute_features(
 
     # ── 지지선 기울기 (최근 10봉 저가 선형회귀, 정규화된 기울기) ──────────
     # 양수 = 상승 지지선(고점 높아지는 구조), 음수 = 하락 지지선
-    try:
-        _sl_win = 10
-        _x_sl   = np.arange(_sl_win, dtype=float)
-        _sl_arr = np.full(len(df), np.nan)
-        _low_v  = low.values
-        for _si in range(_sl_win - 1, len(df)):
+    _sl_win = 10
+    _x_sl   = np.arange(_sl_win, dtype=float)
+    _sl_arr = np.full(len(df), np.nan)
+    _low_v  = low.values
+    for _si in range(_sl_win - 1, len(df)):
+        try:
             _y_sl = _low_v[_si - _sl_win + 1: _si + 1]
             _mean_y = float(np.mean(_y_sl))
             if np.any(np.isnan(_y_sl)) or _mean_y == 0:
                 continue
             _sl_arr[_si] = float(np.polyfit(_x_sl, _y_sl, 1)[0]) / _mean_y
-        df["support_slope"] = pd.Series(_sl_arr, index=df.index).fillna(0.0)
-    except Exception:
-        df["support_slope"] = 0.0
+        except Exception:
+            pass  # 이 봉만 건너뜀, 이전 결과 유지
+    df["support_slope"] = pd.Series(_sl_arr, index=df.index).fillna(0.0)
 
     # ── 이중바닥(Double Bottom / W 패턴) 감지 ───────────────────────────
     # 40봉 내 두 개의 유사저점(±3%) + RSI 긍정 다이버전스 + 넥라인 돌파 → 반전
@@ -1024,17 +1026,21 @@ def compute_features(
             _avg = (_v1 + _v2) / 2 + 1e-9
             if abs(_v1 - _v2) / _avg > 0.03:
                 continue
-            # 두 저점 사이 넥라인(최고점)
+            # 두 저점 사이 넥라인(최고점) — _i1+1 부터 슬라이스해 바닥봉 wick 제외
             if _i2 <= _i1:
                 continue
-            _neckline = float(_sh[_i1: _i2 + 1].max())
+            _between = _sh[_i1 + 1: _i2]   # 바닥봉 자체 고가는 제외 (wick이 넥라인 과대평가 방지)
+            if len(_between) == 0:
+                continue
+            _neckline = float(_between.max())
             if _neckline <= 0:
                 continue
             # 현재 종가가 넥라인 위 (W 패턴 완성)
             if _cv[_di] <= _neckline:
                 continue
-            # RSI 긍정 다이버전스: 2차 저점 RSI > 1차 저점 RSI
-            if _sr[_i2] > _sr[_i1]:
+            # RSI 긍정 다이버전스: 두 저점 모두 유효한 RSI 값일 때만 확인
+            _rsi1, _rsi2 = _sr[_i1], _sr[_i2]
+            if np.isfinite(_rsi1) and np.isfinite(_rsi2) and _rsi2 > _rsi1:
                 _db_sig[_di] = 1.0
         df["double_bottom_signal"] = _db_sig
     except Exception:
