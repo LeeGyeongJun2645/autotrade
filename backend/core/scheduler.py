@@ -686,7 +686,14 @@ class TradingScheduler:
                 ohlcv_ml = await kis.get_minute_ohlcv(symbol, interval_min=15, count=200)
             except Exception:
                 ohlcv_ml = ohlcv_5min
-            ml_ok = await self._check_ml_gate(symbol, ohlcv_ml, market="stock")
+            try:
+                _ohlcv_60m = await kis.get_minute_ohlcv(symbol, interval_min=60, count=200)
+            except Exception:
+                _ohlcv_60m = ohlcv_ml
+            ml_ok = await self._check_ml_gate(
+                symbol, ohlcv_ml, market="stock",
+                ohlcv_by_interval={15: ohlcv_ml, 60: _ohlcv_60m},
+            )
             if ml_ok:
                 sim_log.push(symbol, f"{strategy_name}+5분봉ML — {result.reason} @ {current_price:,.0f}원", "BUY")
                 await self._execute_kis_buy(symbol, current_price, result, strategy_name)
@@ -717,7 +724,13 @@ class TradingScheduler:
         )
         return result, "rsi"
 
-    async def _check_ml_gate(self, symbol: str, ohlcv_ml: list, market: str = "coin") -> bool:
+    async def _check_ml_gate(
+        self,
+        symbol: str,
+        ohlcv_ml: list,
+        market: str = "coin",
+        ohlcv_by_interval: "dict | None" = None,
+    ) -> bool:
         """앙상블 ML 게이트 (코인=60분봉, 주식=15분봉).
 
         모든 학습된 에이전트가 최근 성과 기반 가중 투표.
@@ -742,6 +755,7 @@ class TradingScheduler:
                 btc_ohlcv=btc_ohlcv,
                 oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist,
                 obi_snaps=obi_snaps,
+                ohlcv_by_interval=ohlcv_by_interval,
             )
             approved = signal == "buy"
             n = len(trained)
@@ -1065,7 +1079,14 @@ class TradingScheduler:
                 ohlcv_ml = await upbit.get_ohlcv(ticker, interval="minutes/60", count=200)
             except Exception:
                 ohlcv_ml = ohlcv_5min
-            ml_ok = await self._check_ml_gate(ticker, ohlcv_ml, market="coin")
+            try:
+                _ohlcv_15m = await upbit.get_ohlcv(ticker, interval="minutes/15", count=200)
+            except Exception:
+                _ohlcv_15m = ohlcv_ml
+            ml_ok = await self._check_ml_gate(
+                ticker, ohlcv_ml, market="coin",
+                ohlcv_by_interval={15: _ohlcv_15m, 60: ohlcv_ml},
+            )
             if ml_ok:
                 sim_log.push(ticker, f"{strategy_name}+5분봉ML — {result.reason} @ {current_price:,.0f}원", "BUY")
                 await self._execute_upbit_buy(ticker, current_price, result, strategy_name)
@@ -1692,12 +1713,23 @@ class TradingScheduler:
                         if _eprice <= 0:
                             continue
                         try:
+                            if _ea.market == "coin":
+                                _eobi = {
+                                    15: ohlcv_cache.get(f"{_eticker}:minutes/15", _eohlcv),
+                                    60: ohlcv_cache.get(f"{_eticker}:minutes/60", _eohlcv),
+                                }
+                            else:
+                                _eobi = {
+                                    15: stock_ohlcv_cache.get(f"{_eticker}:15", _eohlcv),
+                                    60: stock_ohlcv_cache.get(f"{_eticker}:60", _eohlcv),
+                                }
                             _esig, _eprob = await predict_ensemble(
                                 _eohlcv, ticker=_eticker, market=_ea.market,
                                 btc_ohlcv=self._btc_ohlcv_cache if _ea.market == "coin" else None,
                                 oi_hist=btc_oi_hist if _ea.market == "coin" else None,
                                 taker_hist=btc_taker_hist if _ea.market == "coin" else None,
                                 ls_hist=btc_ls_hist if _ea.market == "coin" else None,
+                                ohlcv_by_interval=_eobi,
                             )
                         except Exception:
                             continue

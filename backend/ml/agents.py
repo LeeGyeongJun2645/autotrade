@@ -1975,11 +1975,14 @@ async def predict_ensemble(
     taker_hist: list[dict] | None = None,
     ls_hist: list[dict] | None = None,
     obi_snaps: list[float] | None = None,
+    ohlcv_by_interval: dict | None = None,  # {interval_min: ohlcv_list} — 봉 타입별 OHLCV
 ) -> tuple[str, float]:
     """가중 앙상블 게이트 — 전 에이전트 동적 투표 + 실시간 보정.
 
     가중치 = 승률 × (1 + 총수익률).
     지금 잘하는 전략이 자동으로 발언권이 커져서 장세에 자동 적응.
+    ohlcv_by_interval: {15: [...], 60: [...]} 제공 시 각 에이전트가 자기 봉 타입 OHLCV 사용.
+    미제공 시 ohlcv_list로 폴백 (기존 동작).
     """
     if not ohlcv_list:
         return "hold", 0.5
@@ -2049,7 +2052,9 @@ async def predict_ensemble(
         elif current_regime == 0:  # 하락추세: 전체 보수적 축소 (predict()도 이미 0.3 억제)
             weight *= 0.5
 
-        sig, prob = agent.predict(ohlcv_list, ticker=ticker, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps)
+        # 에이전트 봉 타입에 맞는 OHLCV 선택 (15분봉 에이전트에 60분봉 줬을 때 hold 고착 방지)
+        _agent_ohlcv = (ohlcv_by_interval or {}).get(agent.interval_min, ohlcv_list) or ohlcv_list
+        sig, prob = agent.predict(_agent_ohlcv, ticker=ticker, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps)
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight
         total_weight  += weight
