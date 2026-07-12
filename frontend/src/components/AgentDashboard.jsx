@@ -230,7 +230,7 @@ function AgentDetail({ agent, stockNames = {} }) {
       {/* 전략 설정 */}
       <div className="grid grid-cols-4 gap-2">
         {[
-          ['인터벌', '5분봉'],
+          ['인터벌', `${agent.interval_min ?? 5}분봉`],
           ['레이블 기준', agent.label_threshold != null ? `+${(agent.label_threshold * 100).toFixed(1)}%` : '—'],
           ['매수 임계값', agent.buy_threshold != null ? `${(agent.buy_threshold * 100).toFixed(0)}%` : '—'],
           ['챔피언 선정', '총자산 기준'],

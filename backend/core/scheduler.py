@@ -1646,6 +1646,9 @@ class TradingScheduler:
                             is_champion, is_active, today_buy_count, dynamic_tp_mult, updated_at)
                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
+                             interval_min=excluded.interval_min,
+                             label_threshold=excluded.label_threshold,
+                             feature_set=excluded.feature_set,
                              total_trades=excluded.total_trades, win_trades=excluded.win_trades,
                              win_rate=excluded.win_rate, total_return=excluded.total_return,
                              current_balance=excluded.current_balance, is_champion=excluded.is_champion,
@@ -1713,6 +1716,9 @@ class TradingScheduler:
                             is_champion, is_active, today_buy_count, dynamic_tp_mult, updated_at)
                            VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
+                             interval_min=excluded.interval_min,
+                             label_threshold=excluded.label_threshold,
+                             feature_set=excluded.feature_set,
                              total_trades=excluded.total_trades, win_trades=excluded.win_trades,
                              win_rate=excluded.win_rate, total_return=excluded.total_return,
                              current_balance=excluded.current_balance,
