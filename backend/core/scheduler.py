@@ -81,6 +81,7 @@ _TICKER_BLACKLIST: frozenset[str] = frozenset({
 # inquire-price 500 에러 유발 종목 (ELW, 구조화상품 등 — 거래량 상위 노출되나 API 지원 안됨)
 _STOCK_PRICE_BLACKLIST: frozenset[str] = frozenset({
     "198440", "379800",
+    "0167A0", "0193T0", "0193W0", "0195S0", "0195R0", "0162Z0", "0193L0", "0197X0",  # ELW/ETN 코드
 })
 
 # ── 글로벌 크로스-에이전트 상태 (모든 에이전트 공유) ──────────────────────
@@ -1344,9 +1345,10 @@ class TradingScheduler:
             and (now.hour < 15 or (now.hour == 15 and now.minute < 30))
         )
 
-        # 코인 티커 (24/7)
+        # 코인 티커 (24/7) — 블랙리스트 필터 적용 (가격 조회 실패 종목 제외)
         try:
             coin_tickers = await _upbit.get_top_tickers(50)
+            coin_tickers = [t for t in coin_tickers if t not in _TICKER_BLACKLIST]
         except Exception:
             coin_tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"]
 
@@ -2289,7 +2291,12 @@ class TradingScheduler:
 
         # ── 학습 데이터 수집 ─────────────────────────────────────
         COIN_TICKERS  = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL"]
-        STOCK_SYMBOLS = ["005930", "000660", "035420"]  # 삼성전자, SK하이닉스, NAVER
+        # 재학습용 주식 종목: 장 중 틱캐시 우선, 없으면 전일 watchlist, 최후 대표 종목 폴백
+        _RETRAIN_STOCK_FALLBACK = [
+            "005930", "000660", "035420", "035720", "000270",
+            "207940", "373220", "068270", "005380", "012330",
+        ]
+        STOCK_SYMBOLS = list(self._kis_symbols) if self._kis_symbols else _RETRAIN_STOCK_FALLBACK
 
         coin_ohlcv: list[dict] = []
         for ticker in COIN_TICKERS:

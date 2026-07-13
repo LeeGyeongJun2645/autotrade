@@ -126,8 +126,8 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI16", 15, 0.006, 0.60, "trend",    "stock", 8, "lgbm"),
     ("AI17", 15, 0.011, 0.62, "momentum", "stock", 3, "lgbm"),
     ("AI18", 15, 0.007, 0.60, "volume",   "stock", 5, "lgbm"),
-    ("AI19", 15, 0.013, 0.65, "all",      "stock", 8, "lgbm"),
-    ("AI20", 15, 0.013, 0.60, "trend",    "stock", 3, "lgbm"),
+    ("AI19", 15, 0.010, 0.65, "all",      "stock", 8, "lgbm"),
+    ("AI20", 15, 0.008, 0.60, "trend",    "stock", 3, "lgbm"),
 ]
 
 
