@@ -1777,6 +1777,9 @@ class TradingScheduler:
                             _best_ea = max(_ea_cands, key=lambda a: a.win_rate if a.total_trades >= 5 else 0.0)
                             _ea._last_signal_snapshot = dict(_best_ea._last_signal_snapshot)
                             _ea._last_atr_pct = _best_ea._last_atr_pct
+                            # ADX/RVOL 동기화: _last_adx_14=0.0이면 ADX<18 하드차단 우회됨
+                            _ea._last_adx_14 = _best_ea._last_adx_14
+                            _ea._last_vol_ratio = _best_ea._last_vol_ratio
                         await self._agent_execute(_edb, _ea, _eticker, _esig, _eprob, _eprice)
                     await _edb.execute(
                         """INSERT INTO agent_stats

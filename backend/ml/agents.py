@@ -1885,6 +1885,10 @@ class SimAgent:
             else:
                 break
         self._consecutive_losses = consecutive
+        # 5연속 손실 상태 유지: needs_retrain은 인메모리라 재시작 시 소실
+        # → consecutive 복원 후 재설정 (하루 3회 한도 체크는 생략, 재학습 기회 제공)
+        if consecutive >= 5:
+            self.needs_retrain = True
 
         # 재시작 시 최근 SL 거래 기준 쿨다운 복구 (30분 이내 -0.3% 이하 손절)
         from datetime import datetime as _dt, timedelta as _td
