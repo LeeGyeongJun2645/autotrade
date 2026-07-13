@@ -1953,27 +1953,27 @@ class TradingScheduler:
                             f"[부분청산30%] {symbol} @ {price:,.0f}원 +{(_ptrade.profit_rate or 0)*100:.1f}%",
                             "BUY")
 
-                # 트레일링 스탑: TP의 50% 도달 시 최고점 추적으로 전환 (90%→50%: 수익 조기 보호 + 추가 상승 포착)
-                # 연구: trailing stop이 fixed TP보다 MFE 포착률 높음 (40% 이상 개선)
-                if unreal >= take_profit * 0.5:
+                # 트레일링 스탑: TP의 30% 도달 시 최고점 추적 전환 (수익 조기 보호 + 추가 상승 포착)
+                # TP 도달 시 즉시매도 대신 Chandelier 전환으로 추가 상승 홀딩 후 하락 시 청산
+                if unreal >= take_profit * 0.3:
                     agent._trailing_mode.add(symbol)
                 if symbol in agent._trailing_mode:
                     _peak = agent._peak_price.get(symbol, price)
                     agent._peak_price[symbol] = max(_peak, price)
-                    # Chandelier Exit: 업계 최검증 ATR×3 (수익팩터 1.61)
-                    # sl_abs=ATR×1.2이므로 ×2.5=ATR×3.0 (Chandelier 동치)
-                    # max(atr_pct×3, sl_abs×2.0, 1.5%): ATR 불유효 시 sl_abs×2 폴백, 최소 1.5% 보장
-                    _chandelier_pct = max(atr_pct * 3.0, sl_abs * 2.0, 0.015)
+                    # Chandelier Exit: ATR×2.0 (기존 ×3.0 대비 수익 조기 보호, 최소 1.2%)
+                    # sl_abs×1.2: SL 대비 타이트한 트레일 → 충분히 올랐을 때 빠른 수익 확정
+                    _chandelier_pct = max(atr_pct * 2.0, sl_abs * 1.2, 0.012)
                     _trail_sl = agent._peak_price[symbol] * (1 - _chandelier_pct)
-                    if price <= _trail_sl and unreal > 0:
+                    if price <= _trail_sl:
                         signal = "sell"
-                        sim_log.push(agent.agent_id, f"[트레일링] {symbol} 최고점 대비 하락 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
+                        sim_log.push(agent.agent_id, f"[트레일링] {symbol} 최고점 대비 {_chandelier_pct*100:.1f}% 하락 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
 
                 if signal != "sell":
-                    # 트레일링 활성 시 하드 TP 스킵 → 트레일링이 더 많은 수익 포착 담당
+                    # TP 도달 시 즉시매도 대신 트레일링 전환 → 추가 상승 포착 후 Chandelier 청산
                     if symbol not in agent._trailing_mode and unreal >= take_profit:
-                        signal = "sell"
-                        sim_log.push(agent.agent_id, f"[익절] {symbol} +{unreal*100:.1f}% ({held_min:.0f}분) ATR손익({tp_base*100:.1f}%/{STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
+                        agent._trailing_mode.add(symbol)
+                        agent._peak_price[symbol] = max(agent._peak_price.get(symbol, price), price)
+                        sim_log.push(agent.agent_id, f"[TP트레일전환] {symbol} +{unreal*100:.1f}% TP도달→Chandelier홀딩 @ {price:,.0f}원", "INFO")
                     elif unreal <= STOP_LOSS:
                         signal = "sell"
                         sim_log.push(agent.agent_id, f"[손절] {symbol} {unreal*100:.1f}% (ATR기준 {STOP_LOSS*100:.1f}%) @ {price:,.0f}원", "SELL")
@@ -2520,7 +2520,7 @@ class TradingScheduler:
         # 주식 에이전트 재학습용 multi-stock 딕셔너리 (위에서 이미 구성됨)
         _stock_ohlcv_by_sym = _stock_retrain_map
 
-        # ── 에이전트별 재학습 (AI01-AI20 + ENSEMBLE_COIN/ENSEMBLE_STOCK) ───
+        # ── 에이전트별 재학습 (AI01-AI28 + ENSEMBLE_COIN/ENSEMBLE_STOCK) ───
         from backend.ml.agents import ENSEMBLE_AGENTS
         success = 0
         for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
@@ -2572,7 +2572,7 @@ class TradingScheduler:
             except Exception:
                 logger.exception("[Retrain][%s] 재학습 중 예외", agent.agent_id)
 
-        logger.info("[Retrain] 완료: %d/22 에이전트 재학습 (AI01-AI20 + ENSEMBLE_COIN/STOCK)", success)
+        logger.info("[Retrain] 완료: %d/30 에이전트 재학습 (AI01-AI28 + ENSEMBLE_COIN/STOCK)", success)
 
         # ── MFE/MAE 기반 동적 TP 배수 갱신 (R비율 분석) ─────────────────────
         for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
@@ -2605,7 +2605,7 @@ class TradingScheduler:
         try:
             await telegram.notify_message(
                 f"🔄 <b>AI 일일 재학습 완료</b>\n"
-                f"성공: {success}/22 에이전트 (AI01-AI20 + ENSEMBLE×2)\n"
+                f"성공: {success}/30 에이전트 (AI01-AI28 + ENSEMBLE×2)\n"
                 f"Meta-Labeling: {meta_success}개 학습\n"
                 f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv_pool)}종목\n"
                 f"※ 전일 거래내역 sample_weight 반영 → 수익률 지속 개선"
