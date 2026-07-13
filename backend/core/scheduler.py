@@ -2341,7 +2341,7 @@ class TradingScheduler:
             for symbol in STOCK_SYMBOLS:
                 for attempt in range(3):
                     try:
-                        _tmp = await _kis.get_minute_ohlcv(symbol, 15, count=500)
+                        _tmp = await _kis.get_minute_ohlcv(symbol, 15, count=200)
                         if len(_tmp) >= 50:
                             _stock_retrain_map[symbol] = _tmp
                             logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉, 15분봉)", symbol, len(_tmp))
