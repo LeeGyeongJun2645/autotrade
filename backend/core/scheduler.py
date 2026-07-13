@@ -479,6 +479,33 @@ class TradingScheduler:
             except Exception:
                 logger.warning("[쿨다운복원] 글로벌쿨다운 복원 실패 — 인메모리 빈 상태로 시작")
 
+            # _RECENT_LOSSES 복원: 재시작 직후 30분간 클러스터 스탑 감지 불가 방지
+            try:
+                import time as _time_rc
+                _cutoff_rl = (_dt_gc.now(KST) - _td_gc(minutes=30)).isoformat()
+                async with connect_db() as _db_rl:
+                    _db_rl.row_factory = aiosqlite.Row
+                    async with _db_rl.execute("""
+                        SELECT ticker, traded_at FROM agent_trades
+                        WHERE action IN ('SELL', 'SELL_PARTIAL')
+                          AND profit_rate < -0.003
+                          AND traded_at > ?
+                        ORDER BY traded_at
+                    """, (_cutoff_rl,)) as cur:
+                        _rl_rows = [dict(r) async for r in cur]
+                for _rl in _rl_rows:
+                    try:
+                        _rl_t = _dt_gc.fromisoformat(_rl["traded_at"])
+                        if _rl_t.tzinfo is None:
+                            _rl_t = _rl_t.replace(tzinfo=KST)
+                        _RECENT_LOSSES.append((_rl["ticker"], _rl_t.timestamp()))
+                    except Exception:
+                        pass
+                if _rl_rows:
+                    logger.info("[클러스터복원] _RECENT_LOSSES %d건 복원", len(_rl_rows))
+            except Exception:
+                logger.warning("[클러스터복원] _RECENT_LOSSES 복원 실패")
+
         except Exception:
             logger.exception("[복구] 에이전트 stats 복구 실패")
 
