@@ -188,8 +188,8 @@ class RiskManager:
 
         판단 우선순위:
             1. 손절 (stop_loss_price 이하) — 무조건 최우선
-            2. 익절 (take_profit_price 이상) — 목표 도달 즉시 청산
-            3. 트레일링 스탑 (이익 구간에서 고점 대비 하락)
+            2. TP 도달 → 즉시매도 아님, 타이트 트레일링 전환 (추가 상승 포착)
+            3. 트레일링 스탑 (이익 구간에서 고점 대비 1% 하락 시 청산)
 
         Args:
             position:      현재 포지션
@@ -211,16 +211,15 @@ class RiskManager:
                 profit_rate=profit_rate,
             )
 
-        # 2. 익절
+        # 2. TP 도달 → 즉시매도 대신 타이트 트레일링 전환 (추가 상승 홀딩 후 하락 시 청산)
         if current_price >= position.take_profit_price:
-            return ExitSignal(
-                should_exit=True,
-                reason="TAKE_PROFIT",
-                current_price=current_price,
-                profit_rate=profit_rate,
-            )
+            ts_rate = settings.trailing_stop_rate
+            new_trail = current_price * (1 - ts_rate)
+            if new_trail > position.trailing_stop_price:
+                position.trailing_stop_price = new_trail
+            position.take_profit_price = float("inf")  # 재트리거 방지
 
-        # 3. 트레일링 스탑 — 이익 구간(trailing_stop > entry)에서만 작동
+        # 3. 트레일링 스탑 — 이익 구간(trailing_stop > entry)에서 고점 대비 하락 시 청산
         if (
             position.trailing_stop_price > position.entry_price
             and current_price < position.trailing_stop_price
