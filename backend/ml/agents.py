@@ -2033,10 +2033,12 @@ async def predict_ensemble(
         pass
 
     # ── 가중 예측 집계 (샤프비율 × 수익률 × 레짐 부스터) ─────────
-    weighted_prob = 0.0
-    weighted_thr  = 0.0  # 임계값도 동일 가중치로 집계 (단순평균 불일치 방지)
-    total_weight  = 0.0
-    buy_votes     = 0    # 개별 에이전트 "buy" 투표 수
+    weighted_prob    = 0.0
+    weighted_thr     = 0.0  # 임계값도 동일 가중치로 집계 (단순평균 불일치 방지)
+    total_weight     = 0.0
+    buy_votes        = 0    # 개별 에이전트 "buy" 투표 수
+    buy_weighted_prob = 0.0  # buy 투표 에이전트만의 가중 확률 합
+    buy_total_weight  = 0.0  # buy 투표 에이전트의 가중치 합
     for agent in candidates:
         ret    = max(agent.total_return, -0.5)
         sharpe = agent._sharpe_weight()
@@ -2075,9 +2077,13 @@ async def predict_ensemble(
         weighted_thr  += agent.buy_threshold * weight
         total_weight  += weight
         if sig == "buy":
-            buy_votes += 1
+            buy_votes        += 1
+            buy_weighted_prob += prob * weight
+            buy_total_weight  += weight
 
     final_prob = weighted_prob / total_weight if total_weight > 0 else 0.5
+    # buy 투표 에이전트만의 평균 확률 — hold 에이전트가 끌어내리지 않는 진짜 매수 신호 강도
+    buy_avg_prob = buy_weighted_prob / buy_total_weight if buy_total_weight > 0 else 0.0
 
     # ── 실시간 보정 (시장 데이터 1회씩만 조회) ──────────────────
     if market == "coin" and ticker:
@@ -2139,12 +2145,18 @@ async def predict_ensemble(
 
     # 투표 로그 (앙상블 진단용)
     logger.warning(
-        "[앙상블-%s] ticker=%s final_prob=%.4f avg_thr=%.4f buy_votes=%d/%d",
-        market, ticker or "-", final_prob, avg_thr, buy_votes, len(candidates),
+        "[앙상블-%s] ticker=%s final_prob=%.4f buy_avg=%.4f avg_thr=%.4f buy_votes=%d/%d",
+        market, ticker or "-", final_prob, buy_avg_prob, avg_thr, buy_votes, len(candidates),
     )
 
-    # 매수: 가중확률 임계 초과 OR 에이전트 40% 이상 buy + 확률 ≥ 0.55 (공포장 대응 완화)
-    if final_prob >= avg_thr or (vote_ratio >= 0.40 and final_prob >= 0.55):
+    # ── 매수 판단: buy_avg_prob(buy 에이전트만의 평균) 기준 사용 ──────────────
+    # final_prob(전체 에이전트 평균)은 hold 에이전트 8명이 끌어내려 항상 0.3~0.4 → 사용 불가
+    # buy_avg_prob: 매수 신호 낸 에이전트들의 진짜 확신도
+    if buy_votes >= 3 and buy_avg_prob >= 0.62:      # 강한 합의: 3명 이상, 각자 자신감 높음
+        return "buy", round(buy_avg_prob, 4)
+    if buy_votes >= 2 and buy_avg_prob >= 0.68:      # 소수 합의: 2명이지만 매우 자신 있을 때
+        return "buy", round(buy_avg_prob, 4)
+    if final_prob >= avg_thr:                        # 기존 조건 (전체 평균이 임계 초과시)
         return "buy", round(final_prob, 4)
     if final_prob <= (1.0 - avg_thr):
         return "sell", round(final_prob, 4)
