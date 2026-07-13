@@ -1381,6 +1381,22 @@ class SimAgent:
             except Exception:
                 pass
 
+        # ── ADX 횡보장 필터: ADX<18 진입 시 확률 억제 (저추세 = 모멘텀 신호가 노이즈)
+        # 실전 데이터: ADX 15-22 진입 = ETH/BTC 손실 집중 구간. 반전 신호 동반 시만 완화
+        try:
+            _adx_val = float(full_df.get("adx_14", pd.Series([25.0])).iloc[-1]) if "adx_14" in full_df.columns else 25.0
+            if _adx_val < 18.0:
+                _strong_reversal = (
+                    bool(full_df.get("double_bottom_signal", pd.Series([0])).iloc[-1])
+                    or bool(full_df.get("exhaustion_bounce", pd.Series([0])).iloc[-1])
+                    or bool(full_df.get("fib_618_support", pd.Series([0])).iloc[-1])
+                    or bool(full_df.get("near_support_3pct", pd.Series([0])).iloc[-1])
+                ) if not full_df.empty else False
+                if not _strong_reversal:
+                    prob = min(prob, 0.52)  # buy_threshold 통상 0.60+ → 사실상 hold
+        except Exception:
+            pass
+
         # ── 차트 종합 분석 진입 필터 (캔들 + 지지선 + 거래량 + 다중봉 확인) ────────
         # 실전 원칙: 캔들 하나만 보지 말고 ① 지지선 위치 ② 거래량 ③ 여러 봉의 흐름 동시 확인
         # 연구 결과: 최소 3번 터치된 수평 지지선 근처 + 거래량 급증 + 2봉 이상 양봉 = 고승률 진입
@@ -2127,8 +2143,8 @@ async def predict_ensemble(
         market, ticker or "-", final_prob, avg_thr, buy_votes, len(candidates),
     )
 
-    # 매수: 가중확률 임계 초과 OR 에이전트 50% 이상 buy + 확률 ≥ 0.58 (기존 40%+0.54에서 강화)
-    if final_prob >= avg_thr or (vote_ratio >= 0.50 and final_prob >= 0.58):
+    # 매수: 가중확률 임계 초과 OR 에이전트 40% 이상 buy + 확률 ≥ 0.55 (공포장 대응 완화)
+    if final_prob >= avg_thr or (vote_ratio >= 0.40 and final_prob >= 0.55):
         return "buy", round(final_prob, 4)
     if final_prob <= (1.0 - avg_thr):
         return "sell", round(final_prob, 4)
