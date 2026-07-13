@@ -444,6 +444,41 @@ class TradingScheduler:
                     # 동적 블랙리스트 복원
                     agent._ticker_blacklist = restored_bl.get(agent.agent_id, set())
             logger.info("[복구] 에이전트 stats %d개 복구 완료 (오늘BUY: %s)", len(stats_rows), dict(list(today_buy_counts.items())[:5]))
+
+            # 글로벌 쿨다운 복원: 재시작 전 60분 이내 손절 내역 → cooldown 재등록
+            # 재시작 시 _GLOBAL_COOLDOWN(인메모리) 초기화 → 손절 직후 같은 종목 재진입 가능
+            try:
+                from datetime import datetime as _dt_gc, timedelta as _td_gc
+                _now_gc = _dt_gc.now(KST)
+                _cutoff_gc = (_now_gc - _td_gc(hours=1)).isoformat()
+                async with connect_db() as _db_gc:
+                    _db_gc.row_factory = aiosqlite.Row
+                    async with _db_gc.execute("""
+                        SELECT ticker, MAX(traded_at) as last_loss
+                        FROM agent_trades
+                        WHERE action IN ('SELL', 'SELL_PARTIAL')
+                          AND profit_rate < -0.003
+                          AND traded_at > ?
+                        GROUP BY ticker
+                    """, (_cutoff_gc,)) as cur:
+                        _gc_rows = [dict(r) async for r in cur]
+                _restored_gc = 0
+                for _gcr in _gc_rows:
+                    try:
+                        _loss_time = _dt_gc.fromisoformat(_gcr["last_loss"])
+                        if _loss_time.tzinfo is None:
+                            _loss_time = _loss_time.replace(tzinfo=KST)
+                        _until_gc = _loss_time + _td_gc(minutes=60)
+                        if _until_gc > _now_gc:
+                            _GLOBAL_COOLDOWN[_gcr["ticker"]] = _until_gc.isoformat()
+                            _restored_gc += 1
+                    except Exception:
+                        pass
+                if _restored_gc:
+                    logger.info("[쿨다운복원] 재시작 후 %d개 종목 글로벌쿨다운 복원", _restored_gc)
+            except Exception:
+                logger.warning("[쿨다운복원] 글로벌쿨다운 복원 실패 — 인메모리 빈 상태로 시작")
+
         except Exception:
             logger.exception("[복구] 에이전트 stats 복구 실패")
 
@@ -2103,13 +2138,15 @@ class TradingScheduler:
                     1 for _a in list(_AGENTS_CHK.values()) + list(_EA_CHK.values())
                     if symbol in _a._positions and _a.agent_id != agent.agent_id
                 )
-                if _already_holding >= 2:
+                # >= 1: 개별 에이전트는 티커당 1개만 허용 (ENSEMBLE은 제외)
+                # AI01+AI04+ENSEMBLE 동시 WLD 보유 → KAITO 재현 방지
+                if _already_holding >= 1:
                     sim_log.push(agent.agent_id, f"[중복차단] {symbol} 이미 {_already_holding}개 에이전트 보유 → 분산", "INFO")
                     return
-            # ADX 필터: 코인 횡보장(ADX<15) 진입 차단 — 추세 없는 구간에서 WR 급락 방지
-            # 20→15: VSA·FVG 반전 신호는 ADX 15~20 구간(횡보→추세 전환 직전)에서 유효
-            if agent.market == "coin" and 0 < agent._last_adx_14 < 15:
-                sim_log.push(agent.agent_id, f"[ADX차단] {symbol} ADX={agent._last_adx_14:.1f}<15 횡보장", "INFO")
+            # ADX 필터: 코인 횡보장(ADX<18) 진입 차단 — 실전 데이터: ADX 15-18 WR=45.8% avg=-0.038%
+            # agents.py ADX cap(0.52)과 이중 방어: cap은 threshold 아슬한 경우 뚫릴 수 있음
+            if agent.market == "coin" and 0 < agent._last_adx_14 < 18:
+                sim_log.push(agent.agent_id, f"[ADX차단] {symbol} ADX={agent._last_adx_14:.1f}<18 횡보장", "INFO")
                 return
             # KOSPI MIM: 개장 30분 하락 방향 시 주식 당일 BUY 억제 (MDPI Finance 검증 전략)
             if agent.market == "stock" and self._morning_direction == -1:
