@@ -116,7 +116,7 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI07", 60, 0.012, 0.62, "trend",    "coin",  3, "lgbm"),
     ("AI08", 15, 0.005, 0.60, "momentum", "coin",  5, "xgb"),   # 15분봉 모멘텀
     ("AI09", 60, 0.015, 0.65, "all",      "coin",  8, "lgbm"),
-    ("AI10", 15, 0.006, 0.58, "volume",   "coin",  6, "xgb"),   # 15분봉 거래량
+    ("AI10", 15, 0.006, 0.65, "volume",   "coin",  6, "xgb"),   # 15분봉 거래량
     # 주식: 15분봉 — 장중 충분한 데이터 확보 + 노이즈 감소
     ("AI11", 15, 0.007, 0.58, "all",      "stock", 3, "lgbm"),
     ("AI12", 15, 0.006, 0.60, "trend",    "stock", 5, "lgbm"),
@@ -127,7 +127,7 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI17", 15, 0.011, 0.62, "momentum", "stock", 3, "lgbm"),
     ("AI18", 15, 0.007, 0.60, "volume",   "stock", 5, "lgbm"),
     ("AI19", 15, 0.010, 0.65, "all",      "stock", 8, "lgbm"),
-    ("AI20", 15, 0.008, 0.60, "trend",    "stock", 3, "lgbm"),
+    ("AI20", 15, 0.008, 0.60, "trend",    "stock", 6, "lgbm"),
     # ── 신규 코인 에이전트 (AI21-AI24): 상위 전략(AI01 WR=71%, AI03 WR=80%) 변형 확장
     ("AI21", 60, 0.012, 0.67, "trend",    "coin",  8, "lgbm"),  # AI03 변형 — 60분봉 추세, 임계값↑
     ("AI22", 15, 0.005, 0.70, "trend",    "coin",  5, "lgbm"),  # AI01 변형 — 15분봉 추세, 높은 임계값
@@ -716,7 +716,7 @@ class SimAgent:
                 # n_buy=0: 검증셋에서 buy 예측 0개 → threshold 너무 높거나 완전 보수 모델
                 # 이런 모델은 실거래에서도 threshold 근처 확률이 불안정 → 차단
                 _wf_fail = val_acc < 0.50 or (_val_prec < 0.40 and _n_val_buy > 5) or (
-                    _n_val_buy == 0 and len(X_val) > 20
+                    _n_val_buy < 2 and len(X_val) > 20
                 )
                 if _wf_fail:
                     logger.warning(
@@ -2038,17 +2038,17 @@ async def predict_ensemble(
     candidates = [
         a for a in AGENTS.values()
         if a.market == market and a._model is not None
-        # 승률 40% 미만 (30거래 이상 검증된 경우)
-        and not (a.total_trades >= 30 and a.win_rate < 0.40)
-        # 수익률 -2% 이하 (50거래 이상 검증된 경우) — 손실 에이전트를 앙상블에서 제외
-        and not (a.total_trades >= 50 and a.total_return < -0.02)
+        # 승률 40% 미만 (10거래 이상 검증된 경우) — 초기 30건 기준은 나쁜 에이전트를 너무 오래 포함시킴
+        and not (a.total_trades >= 10 and a.win_rate < 0.40)
+        # 수익률 -2% 이하 (20거래 이상 검증된 경우)
+        and not (a.total_trades >= 20 and a.total_return < -0.02)
     ]
     if not candidates:
         # 폴백: 수익률 기준만 유지, 모델 있는 에이전트 사용
         candidates = [
             a for a in AGENTS.values()
             if a.market == market and a._model is not None
-            and not (a.total_trades >= 50 and a.total_return < -0.03)
+            and not (a.total_trades >= 20 and a.total_return < -0.03)
         ]
     if not candidates:
         candidates = [a for a in AGENTS.values() if a.market == market and a._model is not None]
