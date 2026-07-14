@@ -204,6 +204,7 @@ class SimAgent:
         self._last_atr_pct: float = 0.0          # ATR 기반 동적 손익용 (predict()에서 업데이트)
         self._last_vol_ratio: float = 1.0        # 최근 거래량 비율 (vol/ma20) — RVOL 필터용
         self._last_adx_14: float = 0.0           # ADX(14) — BUY 필터: 횡보장 진입 차단용
+        self._last_hold_reason: str = ""         # 마지막 hold 반환 이유 (앙상블 원인분석용)
         self._meta_model: LGBMClassifier | None = None   # Meta-Labeling 2차 필터 모델
         self._meta_scaler: StandardScaler | None = None
         self._meta_path = MODEL_DIR / f"meta_agent_{agent_id}_{interval_min}m.pkl"
@@ -1396,11 +1397,11 @@ class SimAgent:
             except Exception:
                 pass
 
-        # ── ADX 횡보장 필터: ADX<18 진입 시 확률 억제 (저추세 = 모멘텀 신호가 노이즈)
-        # 실전 데이터: ADX 15-22 진입 = ETH/BTC 손실 집중 구간. 반전 신호 동반 시만 완화
+        # ── ADX 횡보장 필터: 코인 전용 (ETH/BTC 15-22 구간 손실 집중 데이터 기반)
+        # 주식은 ADX 특성이 달라 적용 제외 — 주식 hold 원인은 chart analysis에서 관리
         try:
             _adx_val = float(full_df.get("adx_14", pd.Series([25.0])).iloc[-1]) if "adx_14" in full_df.columns else 25.0
-            if _adx_val < 18.0:
+            if _adx_val < 18.0 and self.market == "coin":
                 _strong_reversal = (
                     bool(full_df.get("double_bottom_signal", pd.Series([0])).iloc[-1])
                     or bool(full_df.get("exhaustion_bounce", pd.Series([0])).iloc[-1])
@@ -1408,7 +1409,8 @@ class SimAgent:
                     or bool(full_df.get("near_support_3pct", pd.Series([0])).iloc[-1])
                 ) if not full_df.empty else False
                 if not _strong_reversal:
-                    prob = min(prob, 0.52)  # buy_threshold 통상 0.60+ → 사실상 hold
+                    self._last_hold_reason = f"adx_low:{_adx_val:.1f}"
+                    prob = min(prob, 0.52)  # buy_threshold 통상 0.65+ → 사실상 hold
         except Exception:
             pass
 
@@ -1464,18 +1466,22 @@ class SimAgent:
             _ma_align_bear  = _cf("ma_bear_align")
             if _bearish_candle:
                 _penalty = 0.30 if _near_resistance else 0.40
+                self._last_hold_reason = "bearish_candle" + ("+near_res" if _near_resistance else "")
                 return "hold", round(prob * _penalty, 4)
 
             # ── 완전 역배열 + 가짜돌파 경고 → 강한 매수 차단 ──────────
             if _ma_align_bear and _cf("false_breakout_warn"):
+                self._last_hold_reason = "ma_bear+false_brk"
                 return "hold", round(prob * 0.25, 4)
 
             # ── 저항선 2% 이내 + 음봉 추세 → 매수 차단 (벽 앞에서 들어가면 안됨)
             if _near_resistance and _fv("bearish_count_3") >= 2:
+                self._last_hold_reason = "near_res+bear3"
                 return "hold", round(prob * 0.45, 4)
 
             # ── 가짜 돌파 경고 단독 → 확률 약화 ────────────────────────
             if _cf("false_breakout_warn") and not (_near_support or _fib_support):
+                self._last_hold_reason = "false_brk"
                 return "hold", round(prob * 0.60, 4)
 
             # ── 상승 근거가 하나도 없으면 매수 차단 (캔들 하나만 보면 안됨)
@@ -1486,6 +1492,7 @@ class SimAgent:
                 _exhaustion_buy
             )
             if not _has_signal:
+                self._last_hold_reason = "no_signal"
                 return "hold", round(prob * 0.55, 4)
 
             # ── 이중바닥 + 매도소진 → 확률 강화 (고승률 조합) ──────────
@@ -2058,6 +2065,7 @@ async def predict_ensemble(
     buy_votes        = 0    # 개별 에이전트 "buy" 투표 수
     buy_weighted_prob = 0.0  # buy 투표 에이전트만의 가중 확률 합
     buy_total_weight  = 0.0  # buy 투표 에이전트의 가중치 합
+    _agent_results: list[tuple[str, str, float, str]] = []  # (aid, sig, prob, hold_reason)
     for agent in candidates:
         ret    = max(agent.total_return, -0.5)
         sharpe = agent._sharpe_weight()
@@ -2091,7 +2099,9 @@ async def predict_ensemble(
 
         # 에이전트 봉 타입에 맞는 OHLCV 선택 (15분봉 에이전트에 60분봉 줬을 때 hold 고착 방지)
         _agent_ohlcv = (ohlcv_by_interval or {}).get(agent.interval_min, ohlcv_list) or ohlcv_list
+        agent._last_hold_reason = ""
         sig, prob = agent.predict(_agent_ohlcv, ticker=ticker, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps)
+        _agent_results.append((agent.agent_id, sig, round(prob, 3), agent._last_hold_reason))
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight
         total_weight  += weight
@@ -2167,6 +2177,12 @@ async def predict_ensemble(
         "[앙상블-%s] ticker=%s final_prob=%.4f buy_avg=%.4f avg_thr=%.4f buy_votes=%d/%d",
         market, ticker or "-", final_prob, buy_avg_prob, avg_thr, buy_votes, len(candidates),
     )
+    # buy_votes=0 시 hold 원인 분석 (원인 파악용 — 빈번 로그 방지: market/ticker당 1건)
+    if buy_votes == 0 and _agent_results:
+        _reason_summary = " | ".join(
+            f"{aid}:{rsn or 'raw_low'}" for aid, sig, prob, rsn in _agent_results[:8]
+        )
+        logger.warning("[앙상블-%s][원인] ticker=%s 에이전트별 hold이유: %s", market, ticker or "-", _reason_summary)
 
     # ── 매수 판단: buy_avg_prob(buy 에이전트만의 평균) 기준 사용 ──────────────
     # final_prob(전체 에이전트 평균)은 hold 에이전트 8명이 끌어내려 항상 0.3~0.4 → 사용 불가
