@@ -4,9 +4,12 @@ OHLCV 리스트 → Feature DataFrame 반환.
 XGBoost 학습 및 예측에서 공통 사용.
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 from ta import momentum, trend, volatility, volume
+
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 FEATURE_NAMES = [
     # ── 모멘텀 ────────────────────────────
