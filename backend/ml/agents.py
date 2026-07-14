@@ -790,9 +790,11 @@ class SimAgent:
             _seg_cols = [c for c in self.feature_names
                          if c in feat_df.columns and c not in self._low_importance_feats]
             if not _seg_cols:
+                logger.debug("[%s] _build_labeled_segment: _seg_cols 없음 (feat_df cols=%d)", self.agent_id, len(feat_df.columns))
                 return None
             feat_df = feat_df[_seg_cols].dropna()
             if len(feat_df) < 30:
+                logger.debug("[%s] _build_labeled_segment: dropna 후 %d행 < 30", self.agent_id, len(feat_df))
                 return None
             _atr_series = _atr_full.reindex(feat_df.index) if _atr_full is not None else None
 
@@ -803,6 +805,7 @@ class SimAgent:
             close_all = close_all[~close_all.index.duplicated(keep="last")]
             close = close_all.reindex(feat_df.index).reset_index(drop=True)
             if close.isna().any():
+                logger.debug("[%s] _build_labeled_segment: close NaN %d개 (날짜 불일치)", self.agent_id, close.isna().sum())
                 return None
             feat_df = feat_df.reset_index(drop=True)
             if _atr_series is not None:
@@ -815,7 +818,8 @@ class SimAgent:
                 entry = close.iloc[i]
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr   = float(_atr_series.iloc[i])
-                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)  # ATR×3.0: scheduler TP와 정합
+                    # ATR×2.0: 기존 3.0 대비 낮춰 레이블 생성량 증가 (주식 단기봉 ATR이 작아 레이블 부족 방지)
+                    tp_pct = max(min(_atr * 2.0, 0.08), self.label_threshold)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -845,7 +849,9 @@ class SimAgent:
             feat_df    = feat_df[clear_mask.values]
             label      = label[clear_mask.values]
 
+            _n_pos = int(label.sum())
             if len(feat_df) < 30 or len(set(label.values)) < 2:
+                logger.debug("[%s] _build_labeled_segment: 최종 %d행 / 양성 %d개 → 스킵", self.agent_id, len(feat_df), _n_pos)
                 return None
             return feat_df.values, label.values.astype(int), list(feat_df.columns)
         except Exception as e:

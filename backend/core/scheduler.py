@@ -1602,7 +1602,7 @@ class TradingScheduler:
         except Exception:
             pass
 
-        # 주식 학습 데이터 캐시 누적 갱신 (최대 500봉 rolling) — 틱마다 쌓아서 데이터 풍부하게
+        # 주식 학습 데이터 캐시 누적 갱신 (최대 1000봉 rolling) — 틱마다 쌓아서 데이터 풍부하게
         if stock_ohlcv_cache:
             for _k, _new in stock_ohlcv_cache.items():
                 _existing = self._stock_train_cache.get(_k, [])
@@ -1612,14 +1612,14 @@ class TradingScheduler:
                     _exist_dates = {c["date"] for c in _existing}
                     _extra = [c for c in _new if c["date"] not in _exist_dates]
                     _combined = _extra + _existing  # 신규 봉 앞에 추가
-                    self._stock_train_cache[_k] = _combined[:500]
+                    self._stock_train_cache[_k] = _combined[:1000]
         if kospi_ohlcv:
             if not self._kospi_train_cache:
                 self._kospi_train_cache = list(kospi_ohlcv)
             else:
                 _exist_dates = {c["date"] for c in self._kospi_train_cache}
                 _extra = [c for c in kospi_ohlcv if c["date"] not in _exist_dates]
-                self._kospi_train_cache = (_extra + self._kospi_train_cache)[:500]
+                self._kospi_train_cache = (_extra + self._kospi_train_cache)[:1000]
 
         # 주식 온더플라이 학습용 공유 캐시 — 10개 에이전트가 같은 데이터 재사용 (API 중복 방지)
         _otf_stock_ohlcv: dict[str, list[dict]] = {}   # key: symbol
@@ -2407,10 +2407,11 @@ class TradingScheduler:
             logger.info("[Retrain] 주식 학습 데이터(틱캐시): %d종목", len(_stock_retrain_map))
         else:
             # 2순위: 캐시 없으면(재시작 직후) 대표 종목 API 직접 조회, 최대 3회 재시도
+            # count=1000: 15분봉 1000봉 ≈ 250시간 ≈ 38거래일 → 레이블 생성 충분
             for symbol in STOCK_SYMBOLS:
                 for attempt in range(3):
                     try:
-                        _tmp = await _kis.get_minute_ohlcv(symbol, 15, count=200)
+                        _tmp = await _kis.get_minute_ohlcv(symbol, 15, count=1000)
                         if len(_tmp) >= 50:
                             _stock_retrain_map[symbol] = _tmp
                             logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉, 15분봉)", symbol, len(_tmp))
@@ -2456,7 +2457,7 @@ class TradingScheduler:
             logger.info("[Retrain] KOSPI 학습 데이터(캐시): %d봉", len(kospi_train_ohlcv))
         else:
             try:
-                kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 15, count=200)
+                kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 15, count=1000)
                 logger.info("[Retrain] KOSPI 학습 데이터(API): %d봉 (15분봉)", len(kospi_train_ohlcv))
             except Exception:
                 logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
