@@ -1606,6 +1606,7 @@ class SimAgent:
             return "buy", round(prob, 4)
         if prob <= (1.0 - self.buy_threshold):
             return "sell", round(prob, 4)
+        self._last_hold_reason = f"prob:{prob:.3f}<thr:{self.buy_threshold}"
         return "hold", round(prob, 4)
 
     async def predict_live(self, ohlcv_list: list[dict], ticker: str | None = None) -> tuple[str, float]:
