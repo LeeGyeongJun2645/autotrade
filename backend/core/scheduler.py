@@ -2396,31 +2396,50 @@ class TradingScheduler:
                 except Exception as e:
                     logger.warning("[Retrain] 코인 15분봉 OHLCV 수집 실패 (%s): %s", ticker, e)
 
-        # 주식 학습 데이터 수집 (symbol → ohlcv 딕셔너리)
-        # 1순위: _agent_tick 이 누적한 틱 캐시 전체 활용 (재시작 후 25분 이상 경과 시 50종목 데이터)
-        _stock_retrain_map: dict[str, list[dict]] = {}
+        # 주식 학습 데이터 수집 (interval_min → {symbol → ohlcv} 인터벌별 분리)
+        # AI28(60분봉) 같은 에이전트가 15분봉 데이터로 잘못 학습되는 것을 방지
+        _stock_retrain_by_iv: dict[int, dict[str, list[dict]]] = {}  # {interval_min: {sym: ohlcv}}
         for _k, _v in self._stock_train_cache.items():
-            sym = _k.split(":")[0]
-            if len(_v) >= 50 and sym not in _stock_retrain_map:
-                _stock_retrain_map[sym] = list(_v)
-        if _stock_retrain_map:
-            logger.info("[Retrain] 주식 학습 데이터(틱캐시): %d종목", len(_stock_retrain_map))
+            _parts = _k.rsplit(":", 1)
+            if len(_parts) == 2:
+                _sym_k, _iv_str = _parts
+                try:
+                    _iv_k = int(_iv_str)
+                except ValueError:
+                    continue
+                if len(_v) >= 50:
+                    _stock_retrain_by_iv.setdefault(_iv_k, {})[_sym_k] = list(_v)
+        # 하위 호환: 15분봉을 기본 map으로 사용 (텔레그램 알림 등 참조용)
+        _stock_retrain_map: dict[str, list[dict]] = _stock_retrain_by_iv.get(15, {})
+        if _stock_retrain_by_iv:
+            logger.info("[Retrain] 주식 학습 데이터(틱캐시): %s종목",
+                        {iv: len(m) for iv, m in _stock_retrain_by_iv.items()})
         else:
             # 2순위: 캐시 없으면(재시작 직후) 대표 종목 API 직접 조회, 최대 3회 재시도
             # count=1000: 15분봉 1000봉 ≈ 250시간 ≈ 38거래일 → 레이블 생성 충분
             for symbol in STOCK_SYMBOLS:
                 for attempt in range(3):
                     try:
-                        _tmp = await _kis.get_minute_ohlcv(symbol, 15, count=1000)
-                        if len(_tmp) >= 50:
-                            _stock_retrain_map[symbol] = _tmp
-                            logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉, 15분봉)", symbol, len(_tmp))
+                        _tmp15 = await _kis.get_minute_ohlcv(symbol, 15, count=1000)
+                        if len(_tmp15) >= 50:
+                            _stock_retrain_by_iv.setdefault(15, {})[symbol] = _tmp15
+                            logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉, 15분봉)", symbol, len(_tmp15))
                             break
                         await asyncio.sleep(3)
                     except Exception as e:
                         logger.warning("[Retrain] 주식 OHLCV 수집 실패 %s (시도%d): %s", symbol, attempt+1, e)
                         await asyncio.sleep(5)
-        # 하위 호환: pool/map 변수 유지 (텔레그램 알림 등에서 참조)
+            # 60분봉 에이전트(AI28 등)용 별도 수집
+            _stock_agents_60 = [a for a in AGENTS.values() if a.market == "stock" and a.interval_min == 60]
+            if _stock_agents_60:
+                for symbol in STOCK_SYMBOLS[:5]:
+                    try:
+                        _tmp60 = await _kis.get_minute_ohlcv(symbol, 60, count=500)
+                        if len(_tmp60) >= 50:
+                            _stock_retrain_by_iv.setdefault(60, {})[symbol] = _tmp60
+                    except Exception:
+                        pass
+            _stock_retrain_map = _stock_retrain_by_iv.get(15, {})
         stock_ohlcv_pool = list(_stock_retrain_map.values())
         stock_ohlcv      = stock_ohlcv_pool[0] if stock_ohlcv_pool else []
 
@@ -2547,12 +2566,14 @@ class TradingScheduler:
             try:
                 async with agent._train_lock:
                     if agent.market == "stock":
-                        # 전체 종목 데이터 풀링으로 학습 (분포 다양성 확보)
-                        if not _stock_ohlcv_by_sym:
-                            logger.warning("[Retrain][%s] 주식 학습 데이터 없음, 스킵", agent.agent_id)
+                        # 에이전트 봉 타입에 맞는 인터벌 데이터 선택 (AI28=60분봉, 나머지=15분봉)
+                        _iv_map = _stock_retrain_by_iv.get(agent.interval_min) or _stock_ohlcv_by_sym
+                        if not _iv_map:
+                            logger.warning("[Retrain][%s] 주식 학습 데이터 없음(%dmin), 스킵",
+                                           agent.agent_id, agent.interval_min)
                             continue
                         trained = await asyncio.to_thread(
-                            agent.train_multi, _stock_ohlcv_by_sym, _kospi_ref
+                            agent.train_multi, _iv_map, _kospi_ref
                         )
                     else:
                         # 15분봉 코인 에이전트는 15분봉 데이터로 학습 (봉 단위 일치)

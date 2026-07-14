@@ -970,8 +970,19 @@ class SimAgent:
                 _val_s    = scaler.transform(X_val)
                 _val_prob = clf.predict_proba(_val_s)[:, 1]
                 val_acc   = clf.score(_val_s, y_val)
-                if val_acc < 0.50:
-                    logger.warning("[%s] train_multi WF검증 %.1f%% < 50%% → 실패", self.agent_id, val_acc * 100)
+                _val_pred    = (_val_prob >= self.buy_threshold).astype(int)
+                from sklearn.metrics import precision_score as _ps, recall_score as _rs
+                _val_prec    = _ps(y_val, _val_pred, zero_division=0)
+                _n_val_buy   = int(_val_pred.sum())
+                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < 0.40 and _n_val_buy > 5) or (
+                    _n_val_buy < 2 and len(X_val) > 20
+                )
+                if _tm_wf_fail:
+                    logger.warning(
+                        "[%s] train_multi WF검증 실패 acc=%.1f%% prec=%.1f%% (thr=%.2f n_buy=%d)",
+                        self.agent_id, val_acc * 100, _val_prec * 100,
+                        self.buy_threshold, _n_val_buy,
+                    )
                     return False
 
                 from sklearn.metrics import precision_score as _ps
