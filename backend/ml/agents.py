@@ -2206,9 +2206,9 @@ async def predict_ensemble(
     # ── 매수 판단: buy_avg_prob(buy 에이전트만의 평균) 기준 사용 ──────────────
     # final_prob(전체 에이전트 평균)은 hold 에이전트 8명이 끌어내려 항상 0.3~0.4 → 사용 불가
     # buy_avg_prob: 매수 신호 낸 에이전트들의 진짜 확신도
-    if buy_votes >= 3 and buy_avg_prob >= 0.62:      # 강한 합의: 3명 이상, 각자 자신감 높음
+    if buy_votes >= 3 and buy_avg_prob >= 0.60:      # 강한 합의: 3명 이상
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 2 and buy_avg_prob >= 0.68:      # 소수 합의: 2명이지만 매우 자신 있을 때
+    if buy_votes >= 2 and buy_avg_prob >= 0.63:      # 소수 합의: 2명이지만 자신 있을 때
         return "buy", round(buy_avg_prob, 4)
     if final_prob >= avg_thr:                        # 기존 조건 (전체 평균이 임계 초과시)
         return "buy", round(final_prob, 4)

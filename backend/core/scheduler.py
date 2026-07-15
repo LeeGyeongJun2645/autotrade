@@ -204,16 +204,15 @@ def _is_daily_loss_exceeded(agent) -> bool:
 
 
 def _is_coin_night_risk() -> bool:
-    """코인 저승률 시간대 차단 (거래내역 분석 기반).
+    """코인 저승률 시간대 차단 (실거래 WR 분석 기반).
 
-    KST 01~04시: WR 30.8~41.4% (야간 저유동성)
-    KST 05~06시: 미국 장 마감 후 (UTC 20~21시) 유동성 공백
-    KST 09시: WR=35.5% (아시아 개장 노이즈)
-    KST 12시: WR=37.7% (점심 저유동성)
-    KST 17시: WR=33.3% (실거래 확인)
+    KST 01시: WR=10% (저유동성 최악)
+    KST 02~06시: 야간 저유동성 구간
+    KST 14시: WR=25% (실거래 데이터 기반)
+    제외: 09시(WR=75%), 12시(WR=40%), 17시(WR=60%) → 차단 해제
     """
     h = datetime.now(KST).hour
-    return h in {1, 2, 3, 4, 5, 6, 9, 12, 17}
+    return h in {1, 2, 3, 4, 5, 6, 14}
 
 
 def _is_stock_open_noise() -> bool:
