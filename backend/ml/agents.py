@@ -715,8 +715,8 @@ class SimAgent:
                 _n_val_buy = int(_val_pred.sum())
                 # n_buy=0: 검증셋에서 buy 예측 0개 → threshold 너무 높거나 완전 보수 모델
                 # 이런 모델은 실거래에서도 threshold 근처 확률이 불안정 → 차단
-                _wf_fail = val_acc < 0.50 or (_val_prec < 0.40 and _n_val_buy > 5) or (
-                    _n_val_buy < 2 and len(X_val) > 20
+                _wf_fail = val_acc < 0.50 or (_val_prec < 0.25 and _n_val_buy > 5) or (
+                    _n_val_buy < 2 and len(X_val) > 50
                 )
                 if _wf_fail:
                     logger.warning(
@@ -974,8 +974,8 @@ class SimAgent:
                 from sklearn.metrics import precision_score as _ps, recall_score as _rs
                 _val_prec    = _ps(y_val, _val_pred, zero_division=0)
                 _n_val_buy   = int(_val_pred.sum())
-                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < 0.40 and _n_val_buy > 5) or (
-                    _n_val_buy < 2 and len(X_val) > 20
+                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < 0.25 and _n_val_buy > 5) or (
+                    _n_val_buy < 2 and len(X_val) > 50
                 )
                 if _tm_wf_fail:
                     logger.warning(
@@ -1894,10 +1894,11 @@ class SimAgent:
         self.win_trades    = int(stats.get("win_trades") or 0)
         self.is_champion   = bool(stats.get("is_champion", 0))
         self.is_active     = bool(stats.get("is_active", 1))
-        # 자동 조정된 임계값 복구 (0이거나 없으면 AGENT_CONFIGS 기본값 유지, 상한 0.72 클램핑)
+        # 자동 조정된 임계값 복구 (AGENT_CONFIGS 기본값 기준 +0.05까지만 허용 → 자동상향 누적 방지)
         thr = stats.get("buy_threshold")
         if thr is not None and float(thr) > 0:
-            self.buy_threshold = min(float(thr), 0.72)  # DB 과거 높은 임계값 상한 강제 적용
+            _default_thr = self.buy_threshold  # AGENT_CONFIGS 초기값
+            self.buy_threshold = min(float(thr), _default_thr + 0.05)
         for p in positions:
             pos = AgentPosition(
                 ticker=p["ticker"],
