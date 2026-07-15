@@ -469,9 +469,9 @@ class SimAgent:
             )
             # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
-            # ADX 필터: 코인만 추세장 구간 학습 — predict() BUY 필터(>=20)와 동일 임계값
+            # ADX 필터: 코인만 약추세 이상 구간 학습 — predict() BUY 필터(>=14)와 동일 임계값
             _adx_mask = (
-                feat_df["adx_14"] >= 20
+                feat_df["adx_14"] >= 14
                 if (self.market == "coin" and "adx_14" in feat_df.columns)
                 else None
             )
@@ -1418,7 +1418,7 @@ class SimAgent:
         # 주식은 ADX 특성이 달라 적용 제외 — 주식 hold 원인은 chart analysis에서 관리
         try:
             _adx_val = float(full_df.get("adx_14", pd.Series([25.0])).iloc[-1]) if "adx_14" in full_df.columns else 25.0
-            if _adx_val < 18.0 and self.market == "coin":
+            if _adx_val < 14.0 and self.market == "coin":
                 _strong_reversal = (
                     bool(full_df.get("double_bottom_signal", pd.Series([0])).iloc[-1])
                     or bool(full_df.get("exhaustion_bounce", pd.Series([0])).iloc[-1])
@@ -1427,7 +1427,7 @@ class SimAgent:
                 ) if not full_df.empty else False
                 if not _strong_reversal:
                     self._last_hold_reason = f"adx_low:{_adx_val:.1f}"
-                    prob = min(prob, 0.52)  # buy_threshold 통상 0.65+ → 사실상 hold
+                    prob = min(prob, 0.56)  # 14 미만만 차단 (14~18 구간 해제)
         except Exception:
             pass
 
@@ -1829,7 +1829,7 @@ class SimAgent:
         snap = self._last_signal_snapshot
         current: set[str] = set()
         if snap.get("rsi_9",       50.0) > 65:   current.add("rsi_overbought")
-        if snap.get("adx_14",      20.0) < 18:   current.add("low_adx")
+        if snap.get("adx_14",      20.0) < 14:   current.add("low_adx")
         if snap.get("mtf_align",    1.5) < 2.0:  current.add("mtf_misalign")
         if snap.get("bb_pband",     0.5) > 0.85: current.add("bb_upper")
         if snap.get("vol_ratio",    1.0) < 0.8:  current.add("low_volume")
@@ -1840,7 +1840,7 @@ class SimAgent:
         for pattern_key, count in self._loss_patterns.items():
             overlap = len(current & pattern_key)  # pattern_key는 frozenset → 직접 set 교집합
             if overlap >= 2:
-                penalty = min(0.50, overlap * 0.10 * min(count, 4))
+                penalty = min(0.25, overlap * 0.05 * min(count, 3))
                 max_penalty = max(max_penalty, penalty)
         return max_penalty
 

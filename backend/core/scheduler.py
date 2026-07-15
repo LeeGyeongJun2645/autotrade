@@ -673,6 +673,14 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # 기본 코인 자동 등록 (재시작 후 _upbit_tickers 비어있으면 실매매 불가)
+        _default_coins = [
+            "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE",
+            "KRW-ADA", "KRW-AVAX", "KRW-DOT", "KRW-LINK", "KRW-MATIC",
+        ]
+        for _c in _default_coins:
+            self.add_upbit_ticker(_c)
+
         self._scheduler.start()
         logger.info(
             "스케줄러 시작 | KIS: %s | Upbit: %s",
