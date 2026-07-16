@@ -752,23 +752,26 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.55 if self.market == "stock" else 0.58
-                        self.buy_threshold = round(min(max(_combined, _thr_min), 0.70), 2)
+                        _thr_min = 0.55 if self.market == "stock" else 0.50
+                        _thr_max = 0.70 if self.market == "stock" else 0.62
+                        self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.55 if self.market == "stock" else 0.58
-                        self.buy_threshold = round(min(max(thr_b, _thr_min), 0.70), 2)
+                        _thr_min = 0.55 if self.market == "stock" else 0.50
+                        _thr_max = 0.70 if self.market == "stock" else 0.62
+                        self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
                     logger.info(
                         "[%s] WF검증 acc=%.1f%% prec=%.1f%% rec=%.1f%% | thr=%.2f | n_train=%d n_val=%d",
                         self.agent_id, val_acc*100, prec_b*100, _val_rec*100,
                         self.buy_threshold, len(X_train), len(X_val),
                     )
 
-            # 최소 임계값 — 주식 0.55, 코인 0.58 (거래 빈도 개선)
-            _min_thr = 0.55 if self.market == "stock" else 0.58
-            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.70)
+            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.50~0.62
+            _min_thr = 0.55 if self.market == "stock" else 0.50
+            _max_thr = 0.70 if self.market == "stock" else 0.62
+            self.buy_threshold = min(max(self.buy_threshold, _min_thr), _max_thr)
             self._model = clf
             self._scaler = scaler
             self._trained_feature_names = list(feat_df.columns)  # predict() 피처 일관성 보장
@@ -1009,16 +1012,19 @@ class SimAgent:
                     thr_a, _ = _find_best_thr(_va_prob, y_val_a)
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.55 if self.market == "stock" else 0.58
-                        self.buy_threshold = round(min(max(_combined, _thr_min), 0.70), 2)
+                        _thr_min = 0.55 if self.market == "stock" else 0.50
+                        _thr_max = 0.70 if self.market == "stock" else 0.62
+                        self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.55 if self.market == "stock" else 0.58
-                        self.buy_threshold = round(min(max(thr_b, _thr_min), 0.70), 2)
+                        _thr_min = 0.55 if self.market == "stock" else 0.50
+                        _thr_max = 0.70 if self.market == "stock" else 0.62
+                        self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
 
-            # 최소 임계값 — 주식 0.55, 코인 0.58 (거래 빈도 개선)
-            _min_thr = 0.55 if self.market == "stock" else 0.58
-            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.70)
+            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.50~0.62
+            _min_thr = 0.55 if self.market == "stock" else 0.50
+            _max_thr = 0.70 if self.market == "stock" else 0.62
+            self.buy_threshold = min(max(self.buy_threshold, _min_thr), _max_thr)
             self._model   = clf
             self._scaler  = scaler
             self._trained_feature_names = _actual_cols  # 실제 학습에 사용된 컬럼
