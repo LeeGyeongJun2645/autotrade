@@ -752,15 +752,15 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.55 if self.market == "stock" else 0.50
-                        _thr_max = 0.70 if self.market == "stock" else 0.62
+                        _thr_min = 0.55 if self.market == "stock" else 0.38
+                        _thr_max = 0.70 if self.market == "stock" else 0.55
                         self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.55 if self.market == "stock" else 0.50
-                        _thr_max = 0.70 if self.market == "stock" else 0.62
+                        _thr_min = 0.55 if self.market == "stock" else 0.38
+                        _thr_max = 0.70 if self.market == "stock" else 0.55
                         self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
                     logger.info(
                         "[%s] WF검증 acc=%.1f%% prec=%.1f%% rec=%.1f%% | thr=%.2f | n_train=%d n_val=%d",
@@ -768,9 +768,9 @@ class SimAgent:
                         self.buy_threshold, len(X_train), len(X_val),
                     )
 
-            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.50~0.62
-            _min_thr = 0.55 if self.market == "stock" else 0.50
-            _max_thr = 0.70 if self.market == "stock" else 0.62
+            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.38~0.55
+            _min_thr = 0.55 if self.market == "stock" else 0.38
+            _max_thr = 0.70 if self.market == "stock" else 0.55
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), _max_thr)
             self._model = clf
             self._scaler = scaler
@@ -1012,18 +1012,18 @@ class SimAgent:
                     thr_a, _ = _find_best_thr(_va_prob, y_val_a)
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.55 if self.market == "stock" else 0.50
-                        _thr_max = 0.70 if self.market == "stock" else 0.62
+                        _thr_min = 0.55 if self.market == "stock" else 0.38
+                        _thr_max = 0.70 if self.market == "stock" else 0.55
                         self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.55 if self.market == "stock" else 0.50
-                        _thr_max = 0.70 if self.market == "stock" else 0.62
+                        _thr_min = 0.55 if self.market == "stock" else 0.38
+                        _thr_max = 0.70 if self.market == "stock" else 0.55
                         self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
 
-            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.50~0.62
-            _min_thr = 0.55 if self.market == "stock" else 0.50
-            _max_thr = 0.70 if self.market == "stock" else 0.62
+            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.38~0.55
+            _min_thr = 0.55 if self.market == "stock" else 0.38
+            _max_thr = 0.70 if self.market == "stock" else 0.55
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), _max_thr)
             self._model   = clf
             self._scaler  = scaler
@@ -1506,12 +1506,12 @@ class SimAgent:
                 self._last_hold_reason = "near_res+bear3"
                 return "hold", round(prob * 0.45, 4)
 
-            # ── 가짜 돌파 경고 단독 → 확률 약화 ────────────────────────
+            # ── 가짜 돌파 경고 단독 → 확률 약화 (hold 강제 없음)
             if _cf("false_breakout_warn") and not (_near_support or _fib_support):
                 self._last_hold_reason = "false_brk"
-                return "hold", round(prob * 0.60, 4)
+                prob = round(prob * 0.70, 4)
 
-            # ── 상승 근거가 하나도 없으면 매수 차단 (캔들 하나만 보면 안됨)
+            # ── 상승 근거가 하나도 없으면 확률 약화 (hold 강제 없음)
             _has_signal = (
                 _bullish_candle or _ichi_ok or _trend_ok or
                 _pullback_ok or _bb_bounce or _vol_reversal or
@@ -1520,7 +1520,7 @@ class SimAgent:
             )
             if not _has_signal:
                 self._last_hold_reason = "no_signal"
-                return "hold", round(prob * 0.55, 4)
+                prob = round(prob * 0.75, 4)
 
             # ── 이중바닥 + 매도소진 → 확률 강화 (고승률 조합) ──────────
             if _double_bottom and _exhaustion_buy:
@@ -1540,11 +1540,11 @@ class SimAgent:
                 _fib_support or _double_bottom or _sup_slope_up
             )
             if _bullish_candle and not _context_ok:
-                return "hold", round(prob * 0.70, 4)
+                prob = round(prob * 0.80, 4)
 
             # ── 거래량 미동반 캔들만 단독: 신호 강도 약화 ─────────────────
             if _bullish_candle and not _vol_ok and not _near_support and not _fib_support:
-                return "hold", round(prob * 0.75, 4)
+                prob = round(prob * 0.85, 4)
 
         except Exception:
             pass
