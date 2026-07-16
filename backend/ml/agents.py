@@ -716,7 +716,7 @@ class SimAgent:
                 # n_buy=0: 검증셋에서 buy 예측 0개 → threshold 너무 높거나 완전 보수 모델
                 # 이런 모델은 실거래에서도 threshold 근처 확률이 불안정 → 차단
                 _wf_fail = val_acc < 0.50 or (_val_prec < 0.25 and _n_val_buy > 5) or (
-                    _n_val_buy < 2 and len(X_val) > 50
+                    _n_val_buy < 1 and len(X_val) > 100
                 )
                 if _wf_fail:
                     logger.warning(
@@ -752,21 +752,23 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        self.buy_threshold = round(min(max(_combined, 0.65), 0.75), 2)
+                        _thr_min = 0.55 if self.market == "stock" else 0.58
+                        self.buy_threshold = round(min(max(_combined, _thr_min), 0.70), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        self.buy_threshold = round(min(max(thr_b, 0.65), 0.75), 2)
+                        _thr_min = 0.55 if self.market == "stock" else 0.58
+                        self.buy_threshold = round(min(max(thr_b, _thr_min), 0.70), 2)
                     logger.info(
                         "[%s] WF검증 acc=%.1f%% prec=%.1f%% rec=%.1f%% | thr=%.2f | n_train=%d n_val=%d",
                         self.agent_id, val_acc*100, prec_b*100, _val_rec*100,
                         self.buy_threshold, len(X_train), len(X_val),
                     )
 
-            # 최소 임계값 — 수익률 중심: 주식 0.60, 코인 0.65 (낮은 임계값이 손실의 주원인)
-            _min_thr = 0.60 if self.market == "stock" else 0.65
-            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.75)
+            # 최소 임계값 — 주식 0.55, 코인 0.58 (거래 빈도 개선)
+            _min_thr = 0.55 if self.market == "stock" else 0.58
+            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.70)
             self._model = clf
             self._scaler = scaler
             self._trained_feature_names = list(feat_df.columns)  # predict() 피처 일관성 보장
@@ -975,7 +977,7 @@ class SimAgent:
                 _val_prec    = _ps(y_val, _val_pred, zero_division=0)
                 _n_val_buy   = int(_val_pred.sum())
                 _tm_wf_fail  = val_acc < 0.50 or (_val_prec < 0.25 and _n_val_buy > 5) or (
-                    _n_val_buy < 2 and len(X_val) > 50
+                    _n_val_buy < 1 and len(X_val) > 100
                 )
                 if _tm_wf_fail:
                     logger.warning(
@@ -1007,14 +1009,16 @@ class SimAgent:
                     thr_a, _ = _find_best_thr(_va_prob, y_val_a)
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        self.buy_threshold = round(min(max(_combined, 0.60), 0.75), 2)
+                        _thr_min = 0.55 if self.market == "stock" else 0.58
+                        self.buy_threshold = round(min(max(_combined, _thr_min), 0.70), 2)
                 else:
                     if prec_b > 0:
-                        self.buy_threshold = round(min(max(thr_b, 0.60), 0.75), 2)
+                        _thr_min = 0.55 if self.market == "stock" else 0.58
+                        self.buy_threshold = round(min(max(thr_b, _thr_min), 0.70), 2)
 
-            # 수익률 중심: 주식 최소 0.60 (기존 0.55에서 상향)
-            _min_thr = 0.60 if self.market == "stock" else 0.65
-            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.75)
+            # 최소 임계값 — 주식 0.55, 코인 0.58 (거래 빈도 개선)
+            _min_thr = 0.55 if self.market == "stock" else 0.58
+            self.buy_threshold = min(max(self.buy_threshold, _min_thr), 0.70)
             self._model   = clf
             self._scaler  = scaler
             self._trained_feature_names = _actual_cols  # 실제 학습에 사용된 컬럼

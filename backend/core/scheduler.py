@@ -676,7 +676,7 @@ class TradingScheduler:
         # 기본 코인 자동 등록 (재시작 후 _upbit_tickers 비어있으면 실매매 불가)
         _default_coins = [
             "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE",
-            "KRW-ADA", "KRW-AVAX", "KRW-DOT", "KRW-LINK", "KRW-MATIC",
+            "KRW-ADA", "KRW-AVAX", "KRW-DOT", "KRW-LINK", "KRW-POL",
         ]
         for _c in _default_coins:
             self.add_upbit_ticker(_c)
