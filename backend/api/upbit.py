@@ -116,6 +116,61 @@ async def get_top_tickers(n: int = 50) -> list[str]:
     return top[:n]
 
 
+async def get_momentum_tickers(n: int = 7, max_change: float = 0.15) -> list[str]:
+    """24h 상승률 + 거래대금 기반 모멘텀 상위 N개 티커.
+
+    - 거래대금 50억↑, 가격 500원↑ 필터
+    - 24h 상승률 0~15% 구간만 (하락 및 과열 제외)
+    - 스테이블코인(USDT/USDC/DAI) 제외
+    - 스코어 = 상승률 60% + 거래대금 40% (정규화)
+    - KRW-BTC 항상 포함 (기준 종목)
+    """
+    import time
+    _EXCLUDE = {"KRW-USDT", "KRW-USDC", "KRW-DAI"}
+    _MIN_PRICE = 500
+    _MIN_DAILY_VOLUME = 5_000_000_000  # 50억
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(f"{_BASE}/market/all", params={"isDetails": "false"})
+        resp.raise_for_status()
+        krw_markets = [m["market"] for m in resp.json() if m["market"].startswith("KRW-")]
+
+        all_tickers: list[dict] = []
+        for i in range(0, len(krw_markets), 100):
+            batch = krw_markets[i:i + 100]
+            r = await client.get(f"{_BASE}/ticker", params={"markets": ",".join(batch)})
+            r.raise_for_status()
+            all_tickers.extend(r.json())
+
+    candidates = [
+        d for d in all_tickers
+        if d["market"] not in _EXCLUDE
+        and float(d.get("trade_price") or 0) >= _MIN_PRICE
+        and float(d.get("acc_trade_price_24h") or 0) >= _MIN_DAILY_VOLUME
+        and 0 < float(d.get("signed_change_rate") or 0) < max_change
+    ]
+
+    if not candidates:
+        logger.warning("[모멘텀] 상승 종목 없음 → BTC 단독 반환")
+        return ["KRW-BTC"]
+
+    max_vol = max(float(d.get("acc_trade_price_24h") or 1) for d in candidates)
+    for d in candidates:
+        norm_chg = float(d.get("signed_change_rate") or 0) / max_change
+        norm_vol = float(d.get("acc_trade_price_24h") or 0) / max_vol
+        d["_score"] = 0.6 * norm_chg + 0.4 * norm_vol
+
+    candidates.sort(key=lambda d: d["_score"], reverse=True)
+    selected = [d["market"] for d in candidates[:n]]
+
+    if "KRW-BTC" not in selected:
+        selected[-1] = "KRW-BTC"
+
+    logger.info("[모멘텀] 상위%d 선택: %s", len(selected),
+                [(d["market"], f"{float(d.get('signed_change_rate',0))*100:.1f}%") for d in candidates[:n]])
+    return selected
+
+
 # ── 현재가 조회 (공개) ───────────────────────────────────────────
 
 async def get_price(ticker: str) -> dict[str, Any]:

@@ -299,6 +299,23 @@ class TradingScheduler:
     def remove_upbit_ticker(self, ticker: str) -> None:
         self._upbit_tickers = [t for t in self._upbit_tickers if t != ticker]
 
+    async def _refresh_momentum_tickers(self) -> None:
+        """30분마다 24h 상승률+거래대금 기반으로 실매매 종목 자동 교체."""
+        from backend.api import upbit as _upbit
+        try:
+            new_tickers = await _upbit.get_momentum_tickers(n=7)
+            old_set = set(self._upbit_tickers)
+            new_set = set(new_tickers)
+            added   = new_set - old_set
+            removed = old_set - new_set
+            self._upbit_tickers = new_tickers
+            if added or removed:
+                logger.warning("[모멘텀] 종목 교체 +%s -%s → %s", sorted(added), sorted(removed), new_tickers)
+            else:
+                logger.info("[모멘텀] 종목 유지: %s", new_tickers)
+        except Exception as e:
+            logger.warning("[모멘텀] 종목 갱신 실패: %s", e)
+
     def get_positions(self) -> dict[str, Position]:
         """현재 보유 포지션 스냅샷 반환."""
         return dict(self._positions)
@@ -673,11 +690,18 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # 기본 코인 자동 등록 (재시작 후 _upbit_tickers 비어있으면 실매매 불가)
-        _default_coins = [
-            "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE",
-            "KRW-ADA", "KRW-AVAX", "KRW-DOT", "KRW-LINK", "KRW-POL",
-        ]
+        # 모멘텀 기반 종목 자동 교체: 30분마다 24h 상승률+거래대금 상위 7개로 갱신
+        self._scheduler.add_job(
+            self._refresh_momentum_tickers,
+            CronTrigger(minute="*/30", timezone=KST),
+            id="momentum_refresh",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 기본 코인 임시 등록 (첫 모멘텀 갱신 전까지 실매매 가능하도록)
+        _default_coins = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE",
+                          "KRW-ADA", "KRW-AVAX", "KRW-DOT", "KRW-LINK", "KRW-POL"]
         for _c in _default_coins:
             self.add_upbit_ticker(_c)
 
@@ -687,6 +711,9 @@ class TradingScheduler:
             self._kis_symbols,
             self._upbit_tickers,
         )
+        # 시작 직후 즉시 모멘텀 종목 갱신 (첫 30분 cron 전에 적용)
+        import asyncio as _asyncio
+        _asyncio.create_task(self._refresh_momentum_tickers())
 
     def stop(self) -> None:
         """스케줄러 중지. FastAPI lifespan shutdown 에서 호출."""
