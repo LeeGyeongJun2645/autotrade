@@ -2423,11 +2423,11 @@ class TradingScheduler:
                         {iv: len(m) for iv, m in _stock_retrain_by_iv.items()})
         else:
             # 2순위: 캐시 없으면(재시작 직후) 대표 종목 API 직접 조회, 최대 3회 재시도
-            # count=1000: 15분봉 1000봉 ≈ 250시간 ≈ 38거래일 → 레이블 생성 충분
+            # count=500: 15분봉 500봉 ≈ 19거래일 (재시작 직후 빠른 수집, 정상 운영은 캐시 사용)
             for symbol in STOCK_SYMBOLS:
                 for attempt in range(3):
                     try:
-                        _tmp15 = await _kis.get_minute_ohlcv(symbol, 15, count=1000)
+                        _tmp15 = await _kis.get_minute_ohlcv(symbol, 15, count=500)
                         if len(_tmp15) >= 50:
                             _stock_retrain_by_iv.setdefault(15, {})[symbol] = _tmp15
                             logger.info("[Retrain] 주식 학습 데이터(API): %s (%d봉, 15분봉)", symbol, len(_tmp15))
@@ -2483,7 +2483,7 @@ class TradingScheduler:
             logger.info("[Retrain] KOSPI 학습 데이터(캐시): %d봉", len(kospi_train_ohlcv))
         else:
             try:
-                kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 15, count=1000)
+                kospi_train_ohlcv = await _kis.get_minute_ohlcv("0001", 15, count=500)
                 logger.info("[Retrain] KOSPI 학습 데이터(API): %d봉 (15분봉)", len(kospi_train_ohlcv))
             except Exception:
                 logger.warning("[Retrain] KOSPI 학습 데이터 수집 실패")
