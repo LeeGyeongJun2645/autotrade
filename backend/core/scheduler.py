@@ -2423,8 +2423,8 @@ class TradingScheduler:
                         {iv: len(m) for iv, m in _stock_retrain_by_iv.items()})
         else:
             # 2순위: 캐시 없으면(재시작 직후) 대표 종목 API 직접 조회, 최대 3회 재시도
-            # count=500: 15분봉 500봉 ≈ 19거래일 (재시작 직후 빠른 수집, 정상 운영은 캐시 사용)
-            for symbol in STOCK_SYMBOLS:
+            # count=500, 3종목만: 정상 자동재학습은 캐시 사용이라 이 경로는 재시작 직후만 해당
+            for symbol in STOCK_SYMBOLS[:3]:
                 for attempt in range(3):
                     try:
                         _tmp15 = await _kis.get_minute_ohlcv(symbol, 15, count=500)
