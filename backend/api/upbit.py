@@ -163,6 +163,20 @@ async def get_momentum_tickers(n: int = 7, max_change: float = 0.15) -> list[str
     candidates.sort(key=lambda d: d["_score"], reverse=True)
     selected = [d["market"] for d in candidates[:n]]
 
+    # 상승 종목이 n개 미만이면 거래대금 상위로 나머지 채움 (하락장 안전장치)
+    if len(selected) < n:
+        vol_pool = sorted(
+            [d for d in all_tickers
+             if d["market"] not in _EXCLUDE
+             and float(d.get("trade_price") or 0) >= _MIN_PRICE
+             and float(d.get("acc_trade_price_24h") or 0) >= _MIN_DAILY_VOLUME
+             and d["market"] not in set(selected)],
+            key=lambda d: float(d.get("acc_trade_price_24h") or 0),
+            reverse=True,
+        )
+        selected.extend(d["market"] for d in vol_pool[:n - len(selected)])
+        logger.info("[모멘텀] 상승 종목 부족 → 거래대금 상위로 보완: %s", selected)
+
     if "KRW-BTC" not in selected:
         selected[-1] = "KRW-BTC"
 
