@@ -752,15 +752,15 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.55 if self.market == "stock" else 0.38
-                        _thr_max = 0.70 if self.market == "stock" else 0.55
+                        _thr_min = 0.55 if self.market == "stock" else 0.45
+                        _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.55 if self.market == "stock" else 0.38
-                        _thr_max = 0.70 if self.market == "stock" else 0.55
+                        _thr_min = 0.55 if self.market == "stock" else 0.45
+                        _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
                     logger.info(
                         "[%s] WF검증 acc=%.1f%% prec=%.1f%% rec=%.1f%% | thr=%.2f | n_train=%d n_val=%d",
@@ -768,9 +768,9 @@ class SimAgent:
                         self.buy_threshold, len(X_train), len(X_val),
                     )
 
-            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.38~0.55
-            _min_thr = 0.55 if self.market == "stock" else 0.38
-            _max_thr = 0.70 if self.market == "stock" else 0.55
+            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.45~0.52
+            _min_thr = 0.55 if self.market == "stock" else 0.45
+            _max_thr = 0.70 if self.market == "stock" else 0.52
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), _max_thr)
             self._model = clf
             self._scaler = scaler
@@ -823,8 +823,8 @@ class SimAgent:
                 entry = close.iloc[i]
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr   = float(_atr_series.iloc[i])
-                    # ATR×2.0: 기존 3.0 대비 낮춰 레이블 생성량 증가 (주식 단기봉 ATR이 작아 레이블 부족 방지)
-                    tp_pct = max(min(_atr * 2.0, 0.08), self.label_threshold)
+                    # ATR×3.0: TP 목표를 실행 시 ATR×3.0과 일치 (학습-실행 불일치 수정)
+                    tp_pct = max(min(_atr * 3.0, 0.08), self.label_threshold)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -1012,18 +1012,18 @@ class SimAgent:
                     thr_a, _ = _find_best_thr(_va_prob, y_val_a)
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.55 if self.market == "stock" else 0.38
-                        _thr_max = 0.70 if self.market == "stock" else 0.55
+                        _thr_min = 0.55 if self.market == "stock" else 0.45
+                        _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.55 if self.market == "stock" else 0.38
-                        _thr_max = 0.70 if self.market == "stock" else 0.55
+                        _thr_min = 0.55 if self.market == "stock" else 0.45
+                        _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
 
-            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.38~0.55
-            _min_thr = 0.55 if self.market == "stock" else 0.38
-            _max_thr = 0.70 if self.market == "stock" else 0.55
+            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.45~0.52
+            _min_thr = 0.55 if self.market == "stock" else 0.45
+            _max_thr = 0.70 if self.market == "stock" else 0.52
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), _max_thr)
             self._model   = clf
             self._scaler  = scaler
@@ -1424,8 +1424,7 @@ class SimAgent:
             except Exception:
                 pass
 
-        # ── ADX 횡보장 필터: 코인 전용 (ETH/BTC 15-22 구간 손실 집중 데이터 기반)
-        # 주식은 ADX 특성이 달라 적용 제외 — 주식 hold 원인은 chart analysis에서 관리
+        # ── ADX 횡보장 필터 ────────────────────────────────────────────────────
         try:
             _adx_val = float(full_df.get("adx_14", pd.Series([25.0])).iloc[-1]) if "adx_14" in full_df.columns else 25.0
             if _adx_val < 14.0 and self.market == "coin":
@@ -1437,7 +1436,11 @@ class SimAgent:
                 ) if not full_df.empty else False
                 if not _strong_reversal:
                     self._last_hold_reason = f"adx_low:{_adx_val:.1f}"
-                    prob = min(prob, 0.56)  # 14 미만만 차단 (14~18 구간 해제)
+                    prob = min(prob, 0.56)
+            elif self.market == "stock" and _adx_val < 18.0:
+                # 주식 횡보장(ADX<18): 추세 없이 진입 시 승률 저하 → 확률 약화
+                self._last_hold_reason = f"adx_stock_low:{_adx_val:.1f}"
+                prob = min(prob, 0.60)
         except Exception:
             pass
 
@@ -1565,9 +1568,9 @@ class SimAgent:
                 if _sess == 3:
                     return "hold", round(prob * 0.25, 4)
 
-                # 개장 초변동 (session_phase==0: 09:00~09:30): 범위 확정 전 확률 약화
+                # 개장 초변동 (session_phase==0: 09:00~09:30): ORB 범위 미확정 → 완전 차단
                 if _sess == 0:
-                    prob = prob * 0.75
+                    return "hold", round(prob * 0.20, 4)
 
                 # ORB 하단 돌파 중 → 하락 압력, 신규 진입 완전 차단
                 _orb_break = _ssf("orb_breakout")
@@ -1740,7 +1743,10 @@ class SimAgent:
         pos = self._positions.pop(ticker, None)
         if pos is None:
             return None
-        actual_sell = price * 0.9995  # 매도 수수료 0.05% (Upbit/KIS 기준)
+        if self.market == "stock":
+            actual_sell = price * (1 - 0.0023)  # 주식: 거래세 0.18% + 증권사 수수료 0.05% = 0.23%
+        else:
+            actual_sell = price * 0.9995  # 코인: Upbit 수수료 0.05%
         proceeds = pos.qty * actual_sell
         profit_rate = (actual_sell - pos.entry_price) / pos.entry_price
         self._balance += proceeds

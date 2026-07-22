@@ -84,6 +84,11 @@ _STOCK_PRICE_BLACKLIST: frozenset[str] = frozenset({
     "0167A0", "0193T0", "0193W0", "0195S0", "0195R0", "0162Z0", "0193L0", "0197X0",  # ELW/ETN 코드
 })
 
+# 가상매매 전패 종목 블랙리스트 (승률 0%, 전 에이전트 손실 기록)
+_STOCK_QUALITY_BLACKLIST: frozenset[str] = frozenset({
+    "008290", "066590", "034940", "012690", "413630", "252670",
+})
+
 # ── 글로벌 크로스-에이전트 상태 (모든 에이전트 공유) ──────────────────────
 # 에이전트별 독립 cooldown의 한계: AI01 손절 → AI02~AI22는 즉시 재진입 가능
 # 해결: 모듈 레벨 공유 상태로 전체 에이전트 동시 차단
@@ -1462,6 +1467,8 @@ class TradingScheduler:
                 logger.warning("[AgentTick] 거래량 순위 빈 결과 → 폴백 %d개 사용", len(stock_symbols))
             # inquire-price 지원 안 되는 ELW/구조화상품 제거
             stock_symbols = [s for s in stock_symbols if s not in _STOCK_PRICE_BLACKLIST]
+            # 전패 종목 제거
+            stock_symbols = [s for s in stock_symbols if s not in _STOCK_QUALITY_BLACKLIST]
 
         # ── 코인 인터벌별 OHLCV + 현재가 병렬 프리패치 ────────────
         coin_intervals = list({a.interval_str for a in AGENTS.values() if a.market == "coin"})
@@ -1879,8 +1886,12 @@ class TradingScheduler:
         # ATR이 유효하면(>0.1%) 시장 변동성에 자동 적응, 없으면 고정값 폴백
         atr_pct = agent._last_atr_pct
         if atr_pct > 0.001:
-            STOP_LOSS   = min(-(atr_pct * 1.2), -0.005)  # ATR×1.2, 최소 -0.5% 보장 (min: ATR 클수록 넓어짐)
-            STOP_LOSS   = max(STOP_LOSS, -0.015)          # 상한 -1.5% (대손절 방지)
+            if agent.market == "stock":
+                STOP_LOSS = min(-(atr_pct * 1.5), -0.007)  # 주식: ATR×1.5, 최소 -0.7% (학습 SL 일치)
+                STOP_LOSS = max(STOP_LOSS, -0.025)          # 주식 상한 -2.5%
+            else:
+                STOP_LOSS = min(-(atr_pct * 1.2), -0.005)  # 코인: ATR×1.2, 최소 -0.5%
+                STOP_LOSS = max(STOP_LOSS, -0.015)          # 코인 상한 -1.5%
             tp_base     = max(atr_pct * agent._dynamic_tp_mult, 0.012)  # 동적 배수 (R비율 기반, 기본 3.0)
         else:
             STOP_LOSS   = -0.015
