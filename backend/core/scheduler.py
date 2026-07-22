@@ -239,9 +239,11 @@ async def _refresh_market_context() -> None:
         return
     try:
         from backend.ml.news import get_crypto_market_context
+        from backend.ml.market_sentiment import update_coin_sentiment
         ctx = await get_crypto_market_context()
         _scheduler_mkt_cache["ctx"] = ctx
         _scheduler_mkt_expires = time.time() + 600
+        update_coin_sentiment(ctx["fear_greed"], ctx["btc_dominance"])
         logger.info(
             "[시장] BTC도미넌스=%.1f%% F&G=%d(%s) 알트시즌=%s",
             ctx["btc_dominance"], ctx["fear_greed"], ctx["fear_greed_label"],
@@ -1600,6 +1602,19 @@ class TradingScheduler:
                         self._morning_direction_date = _today_str
                         logger.info("[KOSPI MIM] 개장 하락(%+.2f%%) → 당일 BUY 억제",
                                     (_latest_close / _first_open - 1) * 100)
+            except Exception:
+                pass
+
+        # KOSPI 실시간 등락률 → 주식 글로벌 sentiment 업데이트 (30분마다)
+        if is_market_open and kospi_ohlcv:
+            try:
+                from backend.ml.market_sentiment import update_stock_sentiment
+                _sk = sorted(kospi_ohlcv, key=lambda x: x["date"])
+                if len(_sk) >= 2:
+                    _day_open = float(_sk[0]["open"])
+                    _now_close = float(_sk[-1]["close"])
+                    _kospi_chg = (_now_close - _day_open) / _day_open
+                    update_stock_sentiment(_kospi_chg)
             except Exception:
                 pass
 

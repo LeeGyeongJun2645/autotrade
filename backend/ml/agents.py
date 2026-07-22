@@ -1663,6 +1663,15 @@ class SimAgent:
             except Exception:
                 pass
 
+            # 글로벌 코인 sentiment (F&G + BTC 도미넌스 통합)
+            try:
+                from backend.ml.market_sentiment import get_coin_sentiment
+                _cs = get_coin_sentiment()  # -1 ~ +1
+                if _cs != 0.0:
+                    prob = max(0.01, min(0.99, prob * (1 + _cs * 0.08)))
+            except Exception:
+                pass
+
             # 김치프리미엄 + 펀딩비
             try:
                 coin_sym = ticker.replace("KRW-", "") + "USDT"
@@ -1708,6 +1717,19 @@ class SimAgent:
                 _total = abs(_inst) + abs(_frgn) + 1
                 _net_ratio = max(-1.0, min(1.0, _net / _total))
                 prob = max(0.01, min(0.99, prob + _net_ratio * 0.04))
+            except Exception:
+                pass
+
+            # 글로벌 주식 sentiment (KOSPI 실시간 등락률 기반)
+            try:
+                from backend.ml.market_sentiment import get_stock_sentiment
+                _ss = get_stock_sentiment()  # -1 ~ +1
+                if _ss <= -0.5:
+                    # KOSPI -1% 이하 약세장: 신규 진입 강하게 억제
+                    prob = max(0.01, prob * (1 + _ss * 0.15))
+                elif _ss > 0:
+                    # KOSPI 상승장: 소폭 가중
+                    prob = min(0.99, prob * (1 + _ss * 0.05))
             except Exception:
                 pass
 
