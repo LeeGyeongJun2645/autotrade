@@ -209,15 +209,19 @@ def _is_daily_loss_exceeded(agent) -> bool:
 
 
 def _is_coin_night_risk() -> bool:
-    """코인 저승률 시간대 차단 (실거래 WR 분석 기반).
+    """코인 저승률 시간대 차단 (가상매매 234건 실데이터 기반).
 
-    KST 01시: WR=10% (저유동성 최악)
-    KST 02~06시: 야간 저유동성 구간
-    KST 14시: WR=25% (실거래 데이터 기반)
-    제외: 09시(WR=75%), 12시(WR=40%), 17시(WR=60%) → 차단 해제
+    차단 시간대 (KST):
+      01시: WR=25.0% (야간 저유동성)
+      02~06시: WR<30% (야간 저유동성)
+      07시: WR=33.3%
+      08시: WR=20.0% (장 개장 전 최악)
+      12시: WR=16.7% (점심 횡보, 실데이터 최악)
+      14시: WR=26.7%
+      16시: WR=15.4% (유럽장 개장 직전 최악)
     """
     h = datetime.now(KST).hour
-    return h in {1, 2, 3, 4, 5, 6, 14}
+    return h in {1, 2, 3, 4, 5, 6, 7, 8, 12, 14, 16}
 
 
 def _is_stock_open_noise() -> bool:
@@ -1104,6 +1108,79 @@ class TradingScheduler:
             except Exception:
                 logger.exception("[Upbit][%s] 틱 처리 중 예외", ticker)
 
+        # 코인 가상 포지션 실시간 TP/SL 체크 (5분마다)
+        # agent_tick은 30분마다라 TP 도달 후 다시 내려와도 미발동 → 5분 틱에서 보완
+        await self._check_coin_virtual_positions()
+
+    async def _check_coin_virtual_positions(self) -> None:
+        """코인 가상 포지션 5분마다 실시간 TP/SL 체크."""
+        # 현재 보유 중인 코인 가상 포지션 목록 수집
+        coin_positions: dict[str, list[tuple]] = {}  # ticker → [(agent, pos)]
+        for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
+            if agent.market != "coin":
+                continue
+            for ticker, pos in list(agent._positions.items()):
+                if ticker.startswith("KRW-"):
+                    coin_positions.setdefault(ticker, []).append((agent, pos))
+
+        if not coin_positions:
+            return
+
+        # 현재가 일괄 조회
+        prices: dict[str, float] = {}
+        for ticker in coin_positions:
+            try:
+                pd_ = await upbit.get_price(ticker)
+                prices[ticker] = float(pd_["current_price"])
+            except Exception:
+                pass
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            for ticker, agent_pos_list in coin_positions.items():
+                cur_price = prices.get(ticker, 0.0)
+                if cur_price <= 0:
+                    continue
+                for agent, pos in agent_pos_list:
+                    try:
+                        unreal = (cur_price - pos.entry_price) / pos.entry_price
+                        atr_pct = agent._last_atr_pct
+                        sl_abs = max(atr_pct * 1.2, 0.005) if atr_pct > 0.001 else 0.015
+                        tp_pct = max(atr_pct * agent._dynamic_tp_mult, 0.012) if atr_pct > 0.001 else 0.05
+
+                        should_sell = False
+                        reason = ""
+                        if unreal >= tp_pct:
+                            should_sell = True
+                            reason = f"[실시간TP] +{unreal*100:.2f}%"
+                        elif unreal <= -sl_abs:
+                            should_sell = True
+                            reason = f"[실시간SL] {unreal*100:.2f}%"
+
+                        if should_sell and ticker in agent._positions:
+                            trade = agent.virtual_sell(ticker, cur_price)
+                            if trade:
+                                _buy_ctx = agent._buy_prob_cache.pop(ticker, (0.0, 0.0, 0.0))
+                                await db.execute(
+                                    "INSERT INTO agent_trades (agent_id, ticker, action, price, qty,"
+                                    " entry_price, profit_rate, balance, buy_prob, buy_adx,"
+                                    " buy_vol_ratio, traded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                    (trade.agent_id, ticker, "SELL", cur_price, trade.qty,
+                                     trade.entry_price, trade.profit_rate, trade.balance,
+                                     _buy_ctx[0], _buy_ctx[1], _buy_ctx[2], trade.traded_at),
+                                )
+                                await db.execute(
+                                    "DELETE FROM agent_positions WHERE agent_id=? AND ticker=?",
+                                    (trade.agent_id, ticker),
+                                )
+                                sim_log.push(
+                                    agent.agent_id,
+                                    f"{reason} {ticker} @ {cur_price:,.0f}원 | {(trade.profit_rate or 0)*100:+.2f}%",
+                                    "BUY" if (trade.profit_rate or 0) > 0 else "SELL",
+                                )
+                    except Exception:
+                        logger.debug("[실시간체크] %s %s 예외", agent.agent_id, ticker)
+            await db.commit()
+
     async def _process_upbit_ticker(self, ticker: str) -> None:
         price_data = await upbit.get_price(ticker)
         current_price = float(price_data["current_price"])
@@ -1784,8 +1861,9 @@ class TradingScheduler:
                         """INSERT INTO agent_stats
                            (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
                             total_trades, win_trades, win_rate, total_return, current_balance,
-                            is_champion, is_active, today_buy_count, dynamic_tp_mult, updated_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            is_champion, is_active, today_buy_count, dynamic_tp_mult,
+                            day_start_balance, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
                              interval_min=excluded.interval_min,
                              label_threshold=excluded.label_threshold,
@@ -1796,6 +1874,7 @@ class TradingScheduler:
                              buy_threshold=excluded.buy_threshold, is_active=excluded.is_active,
                              today_buy_count=excluded.today_buy_count,
                              dynamic_tp_mult=excluded.dynamic_tp_mult,
+                             day_start_balance=excluded.day_start_balance,
                              updated_at=excluded.updated_at""",
                         (
                             agent.agent_id, agent.interval_min, agent.label_threshold,
@@ -1805,6 +1884,7 @@ class TradingScheduler:
                             round(agent._balance, 2), int(agent.is_champion),
                             int(agent.is_active), agent._today_buy_count,
                             round(agent._dynamic_tp_mult, 4),
+                            round(agent.day_start_balance, 2),
                             now.strftime("%Y-%m-%dT%H:%M:%S"),
                         ),
                     )
@@ -1905,7 +1985,7 @@ class TradingScheduler:
                 STOP_LOSS = min(-(atr_pct * 1.5), -0.007)  # 주식: ATR×1.5, 최소 -0.7% (학습 SL 일치)
                 STOP_LOSS = max(STOP_LOSS, -0.025)          # 주식 상한 -2.5%
             else:
-                STOP_LOSS = min(-(atr_pct * 1.2), -0.005)  # 코인: ATR×1.2, 최소 -0.5%
+                STOP_LOSS = min(-(atr_pct * 1.5), -0.005)  # 코인: ATR×1.5 (레이블 SL과 일치)
                 STOP_LOSS = max(STOP_LOSS, -0.015)          # 코인 상한 -1.5%
             tp_base     = max(atr_pct * agent._dynamic_tp_mult, 0.012)  # 동적 배수 (R비율 기반, 기본 3.0)
         else:
@@ -2013,20 +2093,24 @@ class TradingScheduler:
                             f"[부분청산30%] {symbol} @ {price:,.0f}원 +{(_ptrade.profit_rate or 0)*100:.1f}%",
                             "BUY")
 
-                # 트레일링 스탑: TP의 30% 도달 시 최고점 추적 전환 (수익 조기 보호 + 추가 상승 포착)
-                # TP 도달 시 즉시매도 대신 Chandelier 전환으로 추가 상승 홀딩 후 하락 시 청산
-                if unreal >= take_profit * 0.3:
+                # 트레일링 스탑: TP의 65% 도달 시 최고점 추적 전환 (수익 충분히 확보 후 전환)
+                # 30%→65%: 30% 때는 너무 일찍 활성화되어 작은 반락에도 손실 전환됨
+                if unreal >= take_profit * 0.65:
                     agent._trailing_mode.add(symbol)
                 if symbol in agent._trailing_mode:
                     _peak = agent._peak_price.get(symbol, price)
                     agent._peak_price[symbol] = max(_peak, price)
-                    # Chandelier Exit: ATR×2.0 (기존 ×3.0 대비 수익 조기 보호, 최소 1.2%)
-                    # sl_abs×1.2: SL 대비 타이트한 트레일 → 충분히 올랐을 때 빠른 수익 확정
-                    _chandelier_pct = max(atr_pct * 2.0, sl_abs * 1.2, 0.012)
+                    # Chandelier Exit: ATR×1.5 (타이트하게 조임 → 수익 더 빠르게 확정)
+                    # 최소선: 진입가 대비 +0.1% 이상 수익 상태에서만 청산 (손실 전환 방지)
+                    _chandelier_pct = max(atr_pct * 1.5, sl_abs * 0.8, 0.008)
                     _trail_sl = agent._peak_price[symbol] * (1 - _chandelier_pct)
-                    if price <= _trail_sl:
+                    _entry_floor = pos.entry_price * 1.001  # 최소 +0.1% 수익 보장선
+                    if price <= _trail_sl and price > _entry_floor:
                         signal = "sell"
                         sim_log.push(agent.agent_id, f"[트레일링] {symbol} 최고점 대비 {_chandelier_pct*100:.1f}% 하락 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
+                    elif price <= _trail_sl:  # 수익선 아래면 그냥 SL로 청산
+                        signal = "sell"
+                        sim_log.push(agent.agent_id, f"[트레일링손절] {symbol} {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
 
                 if signal != "sell":
                     # TP 도달 시 즉시매도 대신 트레일링 전환 → 추가 상승 포착 후 Chandelier 청산
@@ -2135,7 +2219,7 @@ class TradingScheduler:
             # 코인: 야간 고위험 시간대 (KST 01:00~04:59) 신규 매수 차단
             # KST 00시(WR=57.5%) 해제, KST 04시(WR=34.4%) 추가, KST 16-17시 해제(WR=52%)
             if agent.market == "coin" and _is_coin_night_risk():
-                sim_log.push(agent.agent_id, f"[시간차단] {symbol} 저승률 시간대(01~04/09/12시)", "INFO")
+                sim_log.push(agent.agent_id, f"[시간차단] {symbol} 저승률 시간대(01~08/12/14/16시)", "INFO")
                 return
             # 주식: 개장 첫 25분 노이즈 구간 신규 매수 차단
             if agent.market == "stock" and _is_stock_open_noise():
@@ -2295,6 +2379,8 @@ class TradingScheduler:
                 )
                 agent._today_buy_count += 1
                 agent.record_buy_context(symbol)  # 매수 시점 신호 스냅샷 저장 (손실 분석용)
+                # SELL 기록에 buy_prob 저장을 위해 BUY prob 보관
+                agent._buy_prob_cache[symbol] = (round(prob, 4), round(agent._last_adx_14, 2), round(agent._last_vol_ratio, 3))
                 sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%} / 진입{_portion*100:.0f}% / 일{agent._today_buy_count}건)", "BUY")
                 # 부분 청산 1차 목표가 설정 (ATR×2.0), ATR 없으면 미설정
                 if atr_pct > 0.001:
@@ -2317,13 +2403,15 @@ class TradingScheduler:
             trade = agent.virtual_sell(symbol, price)
             if trade:
                 pct = (trade.profit_rate or 0) * 100
+                # BUY 시점 prob/adx/vol 복원 (SELL 기록에도 저장해 사후 분석 가능하게)
+                _buy_ctx = agent._buy_prob_cache.pop(symbol, (0.0, 0.0, 0.0))
                 await db.execute(
                     "INSERT INTO agent_trades (agent_id, ticker, action, price, qty, entry_price,"
                     " profit_rate, balance, buy_prob, buy_adx, buy_vol_ratio, traded_at)"
                     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty,
                      trade.entry_price, trade.profit_rate, trade.balance,
-                     0.0, 0.0, 0.0, trade.traded_at),
+                     _buy_ctx[0], _buy_ctx[1], _buy_ctx[2], trade.traded_at),
                 )
                 # 포지션 영속성: 청산 시 제거
                 await db.execute(

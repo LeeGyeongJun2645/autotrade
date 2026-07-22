@@ -236,6 +236,7 @@ class SimAgent:
         # ── 손실 분석 / 패턴 학습 ────────────────────────────────────────
         self._last_signal_snapshot: dict = {}         # 마지막 predict() 신호값 캐시
         self._buy_context: dict[str, dict] = {}       # 매수 시점 신호 스냅샷 (소급 분석용)
+        self._buy_prob_cache: dict[str, tuple] = {}   # BUY 시점 (prob, adx, vol_ratio) → SELL 기록 저장용
         self._loss_patterns: dict[tuple, int] = {}    # (wrong_signal_조합) → 손실 횟수
         self._loss_analysis_log: list[dict] = []      # 최근 30건 손실 분석 결과
 
@@ -518,7 +519,7 @@ class SimAgent:
                 # TP 2.0→2.5: 실행 TP 변경에 맞춰 학습 레이블 상향 (수익률 우선 전략)
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr = float(_atr_series.iloc[i])
-                    tp_pct = max(min(_atr * 3.0, 0.10), self.label_threshold)
+                    tp_pct = max(min(_atr * 3.0, 0.08), self.label_threshold)  # 상한 0.08 (train_multi와 통일)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -790,7 +791,10 @@ class SimAgent:
     ) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
         """단일 종목 OHLCV → (X, y, feature_cols) 배열 반환. 실패/샘플 부족 시 None."""
         try:
-            feat_df = compute_features(ohlcv_list, kospi_ohlcv=kospi_ohlcv, interval_min=self.interval_min)
+            feat_df = compute_features(
+                ohlcv_list, kospi_ohlcv=kospi_ohlcv, interval_min=self.interval_min,
+                funding_rates=None, oi_hist=None, taker_hist=None, ls_hist=None,
+            )
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
             _seg_cols = [c for c in self.feature_names
                          if c in feat_df.columns and c not in self._low_importance_feats]
@@ -1651,6 +1655,7 @@ class SimAgent:
             ohlcv_list,
             oi_hist=self._cached_oi_hist or None,
             taker_hist=self._cached_taker_hist or None,
+            ls_hist=self._cached_ls_hist or None,
             obi_snaps=None,
         )
 
@@ -1867,7 +1872,7 @@ class SimAgent:
         snap = self._last_signal_snapshot
         current: set[str] = set()
         if snap.get("rsi_9",       50.0) > 65:   current.add("rsi_overbought")
-        if snap.get("adx_14",      20.0) < 14:   current.add("low_adx")
+        if snap.get("adx_14",      20.0) < 18:   current.add("low_adx")  # analyze_loss ADX<18과 통일
         if snap.get("mtf_align",    1.5) < 2.0:  current.add("mtf_misalign")
         if snap.get("bb_pband",     0.5) > 0.85: current.add("bb_upper")
         if snap.get("vol_ratio",    1.0) < 0.8:  current.add("low_volume")
@@ -1894,12 +1899,19 @@ class SimAgent:
         sell_qty = pos.qty * ratio
         if sell_qty <= 0:
             return None
-        actual_sell = price * 0.9995
+        if self.market == "stock":
+            actual_sell = price * (1 - 0.0023)
+        else:
+            actual_sell = price * 0.9995
         proceeds    = sell_qty * actual_sell
         profit_rate = (actual_sell - pos.entry_price) / pos.entry_price
         self._balance += proceeds
         pos.qty -= sell_qty             # 잔량 갱신 (포지션 유지)
         self._partial_tp_done.add(ticker)
+        # 부분 청산도 win/lose 통계에 반영
+        self.total_trades += 1
+        if profit_rate > 0:
+            self.win_trades += 1
         now   = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         trade = AgentTrade(self.agent_id, ticker, "SELL_PARTIAL", price, sell_qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
         self._push_recent(trade)
