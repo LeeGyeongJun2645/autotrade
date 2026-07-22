@@ -148,6 +148,8 @@ def _is_blacklisted(symbol: str, agent) -> bool:
     """정적 블랙리스트 + 글로벌 동적 저승률 차단."""
     if symbol in _TICKER_BLACKLIST:
         return True
+    if symbol in _STOCK_QUALITY_BLACKLIST:
+        return True
     # 글로벌 집계 기준 동적 차단 (인메모리 30개 한도 문제 해소)
     s = _TICKER_STATS.get(symbol)
     if s and s["total"] >= 5:
@@ -1099,16 +1101,15 @@ class TradingScheduler:
     async def _upbit_tick(self) -> None:
         if not settings.upbit_access_key:
             return  # Upbit 키 미설정 시 전체 스킵
-        if settings.is_paper:
-            return  # PAPER 모드: 업비트 모의투자 API 없음 → 실주문 방지
 
-        for ticker in list(self._upbit_tickers):
-            try:
-                await self._process_upbit_ticker(ticker)
-            except Exception:
-                logger.exception("[Upbit][%s] 틱 처리 중 예외", ticker)
+        if not settings.is_paper:
+            for ticker in list(self._upbit_tickers):
+                try:
+                    await self._process_upbit_ticker(ticker)
+                except Exception:
+                    logger.exception("[Upbit][%s] 틱 처리 중 예외", ticker)
 
-        # 코인 가상 포지션 실시간 TP/SL 체크 (5분마다)
+        # 코인 가상 포지션 실시간 TP/SL 체크 (5분마다, PAPER 모드 포함)
         # agent_tick은 30분마다라 TP 도달 후 다시 내려와도 미발동 → 5분 틱에서 보완
         await self._check_coin_virtual_positions()
 
@@ -1135,7 +1136,9 @@ class TradingScheduler:
             except Exception:
                 pass
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        from backend.db.database import connect_db as _conn_db
+        import aiosqlite as _aiosqlite
+        async with _conn_db() as db:
             for ticker, agent_pos_list in coin_positions.items():
                 cur_price = prices.get(ticker, 0.0)
                 if cur_price <= 0:
@@ -1144,7 +1147,7 @@ class TradingScheduler:
                     try:
                         unreal = (cur_price - pos.entry_price) / pos.entry_price
                         atr_pct = agent._last_atr_pct
-                        sl_abs = max(atr_pct * 1.2, 0.005) if atr_pct > 0.001 else 0.015
+                        sl_abs = max(atr_pct * 1.5, 0.005) if atr_pct > 0.001 else 0.015
                         tp_pct = max(atr_pct * agent._dynamic_tp_mult, 0.012) if atr_pct > 0.001 else 0.05
 
                         should_sell = False
@@ -1948,8 +1951,9 @@ class TradingScheduler:
                         """INSERT INTO agent_stats
                            (agent_id, interval_min, label_threshold, buy_threshold, feature_set,
                             total_trades, win_trades, win_rate, total_return, current_balance,
-                            is_champion, is_active, today_buy_count, dynamic_tp_mult, updated_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?,?,?)
+                            is_champion, is_active, today_buy_count, dynamic_tp_mult,
+                            day_start_balance, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?)
                            ON CONFLICT(agent_id) DO UPDATE SET
                              interval_min=excluded.interval_min,
                              label_threshold=excluded.label_threshold,
@@ -1960,6 +1964,7 @@ class TradingScheduler:
                              buy_threshold=excluded.buy_threshold,
                              today_buy_count=excluded.today_buy_count,
                              dynamic_tp_mult=excluded.dynamic_tp_mult,
+                             day_start_balance=excluded.day_start_balance,
                              updated_at=excluded.updated_at""",
                         (_ea.agent_id, _ea.interval_min, _ea.label_threshold,
                          round(_ea.buy_threshold, 4), _ea.feature_set,
@@ -1967,6 +1972,7 @@ class TradingScheduler:
                          round(_ea.win_rate, 4), round(_ea.total_return, 4),
                          round(_ea._balance, 2), _ea._today_buy_count,
                          round(_ea._dynamic_tp_mult, 4),
+                         round(_ea.day_start_balance, 2),
                          now.strftime("%Y-%m-%dT%H:%M:%S")),
                     )
                 await _edb.commit()
@@ -2267,7 +2273,7 @@ class TradingScheduler:
                     return
             # 3연속 손실 → 매수 차단 후 재학습 예약 (다음 주기에 자동 처리)
             if agent.needs_retrain:
-                sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 3연속손실 — 매수 보류", "INFO")
+                sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 5연속손실 — 매수 보류", "INFO")
                 return
             # 동적 블랙리스트: WR<35% + 20건 이상인 종목 진입 차단 (반복 손실 종목 자동 제외)
             if symbol in agent._ticker_blacklist:
@@ -3095,6 +3101,7 @@ class TradingScheduler:
                        CAST(SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as wr
                 FROM agent_trades
                 WHERE action = 'SELL' AND profit_rate IS NOT NULL
+                  AND traded_at >= datetime('now', '-90 days')
                 GROUP BY agent_id, ticker
                 HAVING cnt >= 20
             """) as cur:
