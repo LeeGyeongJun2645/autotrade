@@ -2709,8 +2709,34 @@ class TradingScheduler:
         # 주식 에이전트 재학습용 multi-stock 딕셔너리 (위에서 이미 구성됨)
         _stock_ohlcv_by_sym = _stock_retrain_map
 
-        # ── 에이전트별 재학습 (AI01-AI28 + ENSEMBLE_COIN/ENSEMBLE_STOCK) ───
+        # ── ENSEMBLE 에이전트 전략 동적 채택 (학습 전) ──────────────────────────
+        # 학습 전에 좋은 에이전트의 feature_set/interval을 ENSEMBLE에 복사
+        # 이것이 "좋은 에이전트의 전략을 실매매 에이전트로 옮기는" 핵심 로직
         from backend.ml.agents import ENSEMBLE_AGENTS
+        for _mkt, _eid in [("coin", "ENSEMBLE_COIN"), ("stock", "ENSEMBLE_STOCK")]:
+            _good = sorted(
+                [a for a in AGENTS.values()
+                 if a.market == _mkt and a.total_trades >= 5 and a.win_rate >= 0.50],
+                key=lambda a: a.win_rate * max(1.0 + a.total_return, 0.1),
+                reverse=True,
+            )
+            if _good:
+                _best = _good[0]
+                _ea = ENSEMBLE_AGENTS.get(_eid)
+                if _ea:
+                    _old_fs  = _ea.feature_set
+                    _old_int = _ea.interval_min
+                    _ea.feature_set  = _best.feature_set
+                    _ea.interval_min = _best.interval_min
+                    # threshold: 최고 에이전트 기준 + 0.03 (ENSEMBLE은 더 보수적)
+                    _ea.buy_threshold = min(round(_best.buy_threshold + 0.03, 3), 0.70)
+                    logger.info(
+                        "[ENSEMBLE전략채택] %s ← %s (WR=%.1f%% ret=%.2f%%) fs=%s→%s int=%d→%d thr=%.3f",
+                        _eid, _best.agent_id, _best.win_rate * 100, _best.total_return * 100,
+                        _old_fs, _ea.feature_set, _old_int, _ea.interval_min, _ea.buy_threshold,
+                    )
+
+        # ── 에이전트별 재학습 (AI01-AI28 + ENSEMBLE_COIN/ENSEMBLE_STOCK) ───
         success = 0
         for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
             fr = coin_funding if agent.market == "coin" else None
