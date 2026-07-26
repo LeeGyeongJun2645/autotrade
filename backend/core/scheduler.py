@@ -472,6 +472,21 @@ class TradingScheduler:
                             agent._partial_tp_price[ticker] = pos.entry_price * 1.015
                     # 동적 블랙리스트 복원
                     agent._ticker_blacklist = restored_bl.get(agent.agent_id, set())
+
+            # ENSEMBLE 에이전트 adaptive 상태 강제 리셋
+            # 연속손실로 adaptive_buy_threshold가 낮아지면 저품질 신호로 BUY하는 문제 방지
+            _ensemble_defaults = {
+                "ENSEMBLE_COIN":  {"thr": 0.62, "tp": 3.0},
+                "ENSEMBLE_STOCK": {"thr": 0.65, "tp": 3.5},
+            }
+            for _ea in ENSEMBLE_AGENTS.values():
+                _ed = _ensemble_defaults.get(_ea.agent_id, {})
+                if _ed:
+                    _ea.buy_threshold = _ed["thr"]
+                    _ea._dynamic_tp_mult = _ed["tp"]
+                    _ea._consecutive_losses = 0   # adaptive_buy_threshold 악순환 리셋
+                    _ea.needs_retrain = False
+
             logger.info("[복구] 에이전트 stats %d개 복구 완료 (오늘BUY: %s)", len(stats_rows), dict(list(today_buy_counts.items())[:5]))
 
             # 글로벌 쿨다운 복원: 재시작 전 60분 이내 손절 내역 → cooldown 재등록

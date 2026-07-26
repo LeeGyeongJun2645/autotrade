@@ -2053,8 +2053,8 @@ AGENTS: dict[str, SimAgent] = build_agents()
 # ── 앙상블 그림자 에이전트 — 실매매 앙상블 신호를 가상 포트폴리오로 추적 ──────
 # predict_ensemble() 호출 결과를 동일 TP/SL 로직으로 가상 매매해 앙상블 기대수익 검증
 ENSEMBLE_AGENTS: dict[str, SimAgent] = {
-    "ENSEMBLE_COIN":  SimAgent("ENSEMBLE_COIN",  60, 0.010, 0.65, "all", "coin",  5, "lgbm"),
-    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 15, 0.007, 0.60, "all", "stock", 5, "lgbm"),
+    "ENSEMBLE_COIN":  SimAgent("ENSEMBLE_COIN",  60, 0.010, 0.62, "all", "coin",  5, "lgbm"),
+    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 15, 0.007, 0.65, "all", "stock", 5, "lgbm"),
 }
 
 
@@ -2103,17 +2103,17 @@ async def predict_ensemble(
     candidates = [
         a for a in AGENTS.values()
         if a.market == market and a._model is not None
-        # 승률 40% 미만 (10거래 이상 검증된 경우) — 초기 30건 기준은 나쁜 에이전트를 너무 오래 포함시킴
-        and not (a.total_trades >= 10 and a.win_rate < 0.40)
-        # 수익률 -2% 이하 (20거래 이상 검증된 경우)
-        and not (a.total_trades >= 20 and a.total_return < -0.02)
+        # WR<40% 차단: 검증 기준 5거래(기존 10)로 낮춰서 나쁜 에이전트 빠르게 배제
+        and not (a.total_trades >= 5 and a.win_rate < 0.40)
+        # 수익률 -2% 이하 (10거래 이상 검증)
+        and not (a.total_trades >= 10 and a.total_return < -0.02)
     ]
     if not candidates:
         # 폴백: 수익률 기준만 유지, 모델 있는 에이전트 사용
         candidates = [
             a for a in AGENTS.values()
             if a.market == market and a._model is not None
-            and not (a.total_trades >= 20 and a.total_return < -0.03)
+            and not (a.total_trades >= 15 and a.total_return < -0.03)
         ]
     if not candidates:
         candidates = [a for a in AGENTS.values() if a.market == market and a._model is not None]
@@ -2142,21 +2142,27 @@ async def predict_ensemble(
         ret    = max(agent.total_return, -0.5)
         sharpe = agent._sharpe_weight()
         weight = max(sharpe * max(1.0 + ret, 0.1), 0.1)
-        # 고승률 에이전트 발언권 강화 (30거래 이상 검증된 경우만)
-        if agent.total_trades >= 30:
-            if agent.win_rate >= 0.60:
+        # 고승률 에이전트 발언권 강화 (5거래 이상이면 적용 — 기존 30거래는 너무 늦음)
+        if agent.total_trades >= 5:
+            if agent.win_rate >= 0.70:
+                weight *= 3.0   # AI21(83%), AI16(75%), AI19(100%) 발언권 대폭 강화
+            elif agent.win_rate >= 0.60:
                 weight *= 2.0
             elif agent.win_rate >= 0.55:
                 weight *= 1.5
             elif agent.win_rate >= 0.50:
                 weight *= 1.2
 
+        # 주식에서 volume 피처셋 가중치 하향 (데이터상 주식에서 일관 실패)
+        if market == "stock" and agent.feature_set == "volume":
+            weight *= 0.3
+
         # 레짐별 전략 가중치 조정 (regime_state: 0=하락, 1=횡보, 2=상승, 3=고변동)
         if current_regime == 2:    # 상승추세: trend 우대, volume 축소
             if agent.feature_set == "trend":
                 weight *= 1.5
             elif agent.feature_set == "volume":
-                weight *= 0.7
+                weight *= 0.5
         elif current_regime == 1:  # 횡보: momentum 우대, trend 축소
             if agent.feature_set == "momentum":
                 weight *= 1.4
@@ -2240,8 +2246,11 @@ async def predict_ensemble(
         except Exception:
             pass
 
-    # ── 임계값: 개별 임계값 가중평균 × 0.98 (수익률 중심 — 진입 기준 상향)
-    avg_thr = (weighted_thr / total_weight) * 0.98 if total_weight > 0 else 0.62
+    # ── 임계값: adaptive 하락 영향 차단 — buy_threshold(고정값) 가중평균 사용
+    # agent.buy_threshold (고정) 사용, adaptive_buy_threshold 사용 안 함 (연속손실 오염 방지)
+    _fixed_thr_sum = sum(a.label_threshold * 10 + a.buy_threshold for a in candidates)  # 더미 계산용
+    avg_thr_raw = (weighted_thr / total_weight) if total_weight > 0 else 0.60
+    avg_thr = max(avg_thr_raw, 0.58)  # 최솟값 0.58 — adaptive 하락으로 avg_thr이 0.1대로 내려가는 것 차단
     vote_ratio = buy_votes / len(candidates) if candidates else 0.0
 
     # 투표 로그 (앙상블 진단용)
@@ -2249,7 +2258,7 @@ async def predict_ensemble(
         "[앙상블-%s] ticker=%s final_prob=%.4f buy_avg=%.4f avg_thr=%.4f buy_votes=%d/%d",
         market, ticker or "-", final_prob, buy_avg_prob, avg_thr, buy_votes, len(candidates),
     )
-    # buy_votes=0 시 hold 원인 분석 (원인 파악용 — 빈번 로그 방지: market/ticker당 1건)
+    # buy_votes=0 시 hold 원인 분석
     if buy_votes == 0 and _agent_results:
         _reason_summary = " | ".join(
             f"{aid}:{rsn or 'raw_low'}" for aid, sig, prob, rsn in _agent_results[:8]
@@ -2257,14 +2266,14 @@ async def predict_ensemble(
         logger.warning("[앙상블-%s][원인] ticker=%s 에이전트별 hold이유: %s", market, ticker or "-", _reason_summary)
 
     # ── 매수 판단: buy_avg_prob(buy 에이전트만의 평균) 기준 사용 ──────────────
-    # final_prob(전체 에이전트 평균)은 hold 에이전트 8명이 끌어내려 항상 0.3~0.4 → 사용 불가
-    # buy_avg_prob: 매수 신호 낸 에이전트들의 진짜 확신도
-    if buy_votes >= 3 and buy_avg_prob >= 0.60:      # 강한 합의: 3명 이상
+    # final_prob >= avg_thr 조건 제거: avg_thr이 adaptive 하락으로 낮아지면 0.14 확률로도 BUY하는 문제
+    # buy_votes 기반 투표만 사용 — 실제로 buy 신호를 낸 에이전트들의 합의만 허용
+    if buy_votes >= 3 and buy_avg_prob >= 0.60:      # 강한 합의: 3명 이상 + 확신도 60%
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 2 and buy_avg_prob >= 0.63:      # 소수 합의: 2명이지만 자신 있을 때
+    if buy_votes >= 2 and buy_avg_prob >= 0.66:      # 소수 합의: 2명 + 확신도 강화(기존 0.63→0.66)
         return "buy", round(buy_avg_prob, 4)
-    if final_prob >= avg_thr:                        # 기존 조건 (전체 평균이 임계 초과시)
-        return "buy", round(final_prob, 4)
+    if buy_votes >= 4 and buy_avg_prob >= 0.55:      # 압도적 다수 합의 (완화)
+        return "buy", round(buy_avg_prob, 4)
     if final_prob <= (1.0 - avg_thr):
         return "sell", round(final_prob, 4)
     return "hold", round(final_prob, 4)
