@@ -97,6 +97,7 @@ _GLOBAL_COOLDOWN: dict[str, str] = {}       # ticker → 만료 ISO 시각(KST)
 _GLOBAL_LOSS_COUNT: dict[str, int] = {}      # ticker → 전체 에이전트 손절 누적 횟수
 _TICKER_STATS: dict[str, dict] = {}          # ticker → {"wins":0, "total":0}
 _RECENT_LOSSES: list[tuple] = []             # (ticker, time.time()) — 클러스터 감지용
+_PENDING_BUYS: set[str] = set()             # 현재 BUY 진행 중인 (agent_id, ticker) — 군집매수 동시진입 방지
 
 
 def _set_global_cooldown(symbol: str, minutes: int = 60) -> None:
@@ -488,6 +489,31 @@ class TradingScheduler:
                     _ea.needs_retrain = False
 
             logger.info("[복구] 에이전트 stats %d개 복구 완료 (오늘BUY: %s)", len(stats_rows), dict(list(today_buy_counts.items())[:5]))
+
+            # 글로벌 _TICKER_STATS 복원: 재시작 후 동적 블랙리스트 초기화 방지
+            # 최근 90일 전체 에이전트 합산 SELL 기준으로 집계
+            try:
+                async with connect_db() as _db_ts:
+                    _db_ts.row_factory = aiosqlite.Row
+                    async with _db_ts.execute("""
+                        SELECT ticker,
+                               COUNT(*) as total,
+                               SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) as wins
+                        FROM agent_trades
+                        WHERE action IN ('SELL', 'SELL_PARTIAL')
+                          AND profit_rate IS NOT NULL
+                          AND date(traded_at) >= date('now', '-90 days')
+                        GROUP BY ticker
+                    """) as _ts_cur:
+                        async for _ts_row in _ts_cur:
+                            _TICKER_STATS[_ts_row["ticker"]] = {
+                                "wins":  int(_ts_row["wins"]),
+                                "total": int(_ts_row["total"]),
+                            }
+                _blocked = [t for t, s in _TICKER_STATS.items() if s["total"] >= 5 and s["wins"] / s["total"] < 0.25]
+                logger.info("[복구] _TICKER_STATS %d개 복원 (차단대상 %d개: %s)", len(_TICKER_STATS), len(_blocked), _blocked[:10])
+            except Exception:
+                logger.exception("[복구] _TICKER_STATS 복원 실패 (무시)")
 
             # 글로벌 쿨다운 복원: 재시작 전 60분 이내 손절 내역 → cooldown 재등록
             # 재시작 시 _GLOBAL_COOLDOWN(인메모리) 초기화 → 손절 직후 같은 종목 재진입 가능
@@ -2242,6 +2268,13 @@ class TradingScheduler:
             if agent.market == "coin" and _is_coin_night_risk():
                 sim_log.push(agent.agent_id, f"[시간차단] {symbol} 저승률 시간대(01~08/12/14/16시)", "INFO")
                 return
+            # 주식: 14:30 이후 신규 매수 차단 (오버나이트 방지)
+            # 15:04에 매수 → 다음날 -10.16% 사례: 장 마감 근처 BUY는 EOD 청산 전에 손실 확정
+            if agent.market == "stock":
+                _now_k = datetime.now(KST)
+                if _now_k.hour > 14 or (_now_k.hour == 14 and _now_k.minute >= 30):
+                    sim_log.push(agent.agent_id, f"[마감차단] {symbol} 14:30 이후 신규매수 금지 (오버나이트 방지)", "INFO")
+                    return
             # 주식: 개장 첫 25분 노이즈 구간 신규 매수 차단
             if agent.market == "stock" and _is_stock_open_noise():
                 sim_log.push(agent.agent_id, f"[개장차단] {symbol} 09:00~09:25 노이즈 구간", "INFO")
@@ -2277,15 +2310,17 @@ class TradingScheduler:
                             return
                 except Exception:
                     pass
-            # 군집매수 방지: 동일 종목을 3개+ 에이전트가 이미 보유 시 차단
-            # (BTC 하락 시 동일 종목 전 에이전트 동시 손절 방지)
-            # 앙상블 에이전트는 제외 — 이미 다수결 합의(40%+ buy_votes)로 필터링됨
+            # 군집매수 방지: 동일 종목을 3개+ 에이전트가 이미 보유하거나 BUY 진행 중이면 차단
+            # asyncio 동시 실행 시 _positions 체크만으로는 동시 진입을 막지 못함
+            # → _PENDING_BUYS에 (agent_id, symbol) 등록해서 진행 중인 BUY도 카운트
             from backend.ml.agents import AGENTS as _ALL_AGENTS, ENSEMBLE_AGENTS as _EA
             if agent.agent_id not in _EA:
                 _holders = sum(1 for a in _ALL_AGENTS.values() if a.market == agent.market and symbol in a._positions)
-                if _holders >= 3:
-                    sim_log.push(agent.agent_id, f"[군집매수차단] {symbol} {_holders}개 에이전트 보유 중", "INFO")
+                _pending = sum(1 for _aid, _sym in _PENDING_BUYS if _sym == symbol)
+                if _holders + _pending >= 3:
+                    sim_log.push(agent.agent_id, f"[군집매수차단] {symbol} 보유{_holders}+진행중{_pending}개", "INFO")
                     return
+            _PENDING_BUYS.add((agent.agent_id, symbol))
             # 3연속 손실 → 매수 차단 후 재학습 예약 (다음 주기에 자동 처리)
             if agent.needs_retrain:
                 sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 5연속손실 — 매수 보류", "INFO")
@@ -2324,8 +2359,8 @@ class TradingScheduler:
                     _daily_limit = 12
             if agent._today_buy_count >= _daily_limit:
                 return
-            # 동일 코인 중복 매수 제한: 이미 다른 에이전트가 보유 중이면 신규 진입 차단
-            # KAITO처럼 3개 에이전트가 동시에 같은 코인 → 집중리스크 + 손실 배수 문제
+            # 동일 코인 중복 매수 제한: 이미 다른 에이전트가 보유 중이거나 BUY 진행 중이면 신규 진입 차단
+            # asyncio 동시 실행 시 _positions만으로는 동시 진입 막지 못함 → _PENDING_BUYS도 포함
             # 앙상블 에이전트는 제외 — 독립 포트폴리오, 위에서 buy_votes 합의로 이미 필터링됨
             from backend.ml.agents import AGENTS as _AGENTS_CHK, ENSEMBLE_AGENTS as _EA_CHK
             if agent.agent_id not in _EA_CHK:
@@ -2333,10 +2368,15 @@ class TradingScheduler:
                     1 for _a in list(_AGENTS_CHK.values()) + list(_EA_CHK.values())
                     if symbol in _a._positions and _a.agent_id != agent.agent_id
                 )
-                # >= 1: 개별 에이전트는 티커당 1개만 허용 (ENSEMBLE은 제외)
-                # AI01+AI04+ENSEMBLE 동시 WLD 보유 → KAITO 재현 방지
-                if _already_holding >= 1:
-                    sim_log.push(agent.agent_id, f"[중복차단] {symbol} 이미 {_already_holding}개 에이전트 보유 → 분산", "INFO")
+                _already_pending = sum(
+                    1 for _aid, _sym in _PENDING_BUYS
+                    if _sym == symbol and _aid != agent.agent_id
+                )
+                # >= 1: 개별 에이전트는 티커당 1개만 허용 (보유 + BUY 진행 중 합산)
+                # AI01+ENSEMBLE 동시 KRW-O BUY → _PENDING_BUYS로 동시 진입 차단
+                if _already_holding + _already_pending >= 1:
+                    sim_log.push(agent.agent_id, f"[중복차단] {symbol} 보유{_already_holding}+진행중{_already_pending}개 → 분산", "INFO")
+                    _PENDING_BUYS.discard((agent.agent_id, symbol))
                     return
             # ADX 필터: 코인 횡보장(ADX<18) 진입 차단 — 실전 데이터: ADX 15-18 WR=45.8% avg=-0.038%
             # agents.py ADX cap(0.52)과 이중 방어: cap은 threshold 아슬한 경우 뚫릴 수 있음
@@ -2363,6 +2403,7 @@ class TradingScheduler:
                         _inv = {"foreign_net_buy": 0}
                 if _inv.get("foreign_net_buy", 0) < -500:
                     sim_log.push(agent.agent_id, f"[외국인차단] {symbol} 외국인 {_inv['foreign_net_buy']:,}주 순매도", "INFO")
+                    _PENDING_BUYS.discard((agent.agent_id, symbol))
                     return
             # 뉴스 감성 필터: -0.5 이하 강한 부정 뉴스 → BUY 차단 (캐시 없으면 통과)
             try:
@@ -2372,6 +2413,7 @@ class TradingScheduler:
                     _ns = await get_sentiment_score(symbol)
                 if _ns is not None and _ns < -0.5:
                     sim_log.push(agent.agent_id, f"[뉴스차단] {symbol} 감성점수={_ns:.2f} 부정뉴스 급락우려", "WARN")
+                    _PENDING_BUYS.discard((agent.agent_id, symbol))
                     return
             except Exception:
                 pass
@@ -2406,6 +2448,7 @@ class TradingScheduler:
                 # 부분 청산 1차 목표가 설정 (ATR×2.0), ATR 없으면 미설정
                 if atr_pct > 0.001:
                     agent._partial_tp_price[symbol] = price * (1 + atr_pct * 2.0)
+            _PENDING_BUYS.discard((agent.agent_id, symbol))
 
         elif signal == "sell" and symbol in agent._positions:
             # 손실 분석: 매도 전 보유 시간 계산 (virtual_sell 후 포지션 소멸)
