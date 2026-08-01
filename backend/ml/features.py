@@ -201,6 +201,36 @@ FEATURE_NAMES = [
     "false_breakout_warn",  # 전봉 저항 돌파 후 현재봉 복귀 → 휩쏘 경고
     # ── 지지선 기울기 ────────────────────────────────────────────────────
     "support_slope",  # 최근 10봉 저가 선형회귀 기울기 (양수=상승지지선, 음수=하락)
+    # ── RSI(2) 역추세 — Larry Connors 검증 전략 ──────────────────────────
+    "rsi_2",             # 2기간 RSI: 극단 과매도(<10)/과매수(>90) 포착용
+    "rsi_2_extreme_low", # rsi_2 < 10 → 극단 과매도, 역추세 반등 신호
+    "rsi_2_extreme_hi",  # rsi_2 > 90 → 극단 과매수, 역추세 하락 신호
+    # ── Connors RSI (CRSI) — 3요소 복합 역추세 지표 ─────────────────────
+    "crsi",              # [RSI(3) + streak_RSI(2) + ROC백분위(100)] / 3, <10=강한매수
+    # ── Donchian Channel — 거북이 트레이딩 돌파 신호 ─────────────────────
+    "dc_position",       # (close - 20봉저가)/(20봉고가-20봉저가): 채널 내 위치 0~1
+    "dc_upper_break",    # close >= 20봉 최고가 → 1 (거북이 상향돌파)
+    "dc_lower_break",    # close <= 20봉 최저가 → 1 (거북이 하향돌파)
+    # ── Z-Score 편차 — 통계적 평균회귀 신호 ─────────────────────────────
+    "zscore_20",         # (close - MA20) / std20: -3~+3, 극단값=역추세 진입
+    # ── Keltner Channel 이탈 — 역추세 과매도/과매수 신호 ────────────────
+    "kc_lower_breach",   # close < KC 하단 → 1 (역추세 매수 후보, 77% 백테스트)
+    "kc_upper_breach",   # close > KC 상단 → 1 (역추세 매도 후보)
+    # ── 갭(Gap) 피처 — 갭업/갭다운 방향성 및 갭필 신호 ──────────────────
+    "gap_pct",           # (open - prev_close) / prev_close: 갭 크기
+    "gap_up",            # gap_pct > 0.005 → 1 (0.5% 이상 갭업)
+    "gap_down",          # gap_pct < -0.005 → 1 (0.5% 이상 갭다운)
+    # ── 선형회귀 채널 — 통계적 추세 채널 편차 ───────────────────────────
+    "lrc_deviation",     # (close - 20봉 선형회귀 예측값) / close: 회귀선 대비 편차
+    "lrc_slope",         # 20봉 선형회귀 정규화 기울기 (양수=상승추세)
+    # ── 이중천장(Double Top / M 패턴) — 이중바닥의 반대 ─────────────────
+    "double_top_signal", # 40봉 내 두 유사고점+RSI 부정 다이버전스+넥라인 하향돌파
+    # ── 변동성 돌파 k값 신호 — Larry Williams ML 피처화 ──────────────────
+    "vb_signal",         # open + (prev_high - prev_low) * 0.5 초과 시 1
+    # ── 추세선 피처 — 스윙포인트 기반 동적 추세선 ──────────────────────
+    "tl_support_dist",   # 상승 추세선(저점 연결) 대비 현재가 거리 % (음수=이탈)
+    "tl_resist_dist",    # 하락 추세선(고점 연결) 대비 현재가 거리 % (음수=저항 아래)
+    "tl_near_bounce",    # 추세선 ±1.5% 이내 접근 → 1 (반발 매매 구간)
 ]
 
 
@@ -1048,6 +1078,214 @@ def compute_features(
         df["double_bottom_signal"] = _db_sig
     except Exception:
         df["double_bottom_signal"] = 0.0
+
+    # ── RSI(2) 역추세 — Larry Connors, 승률 70~80% (200MA 위 조건 결합 시) ──
+    try:
+        _rsi2 = momentum.RSIIndicator(close, window=2).rsi()
+        df["rsi_2"]             = _rsi2
+        df["rsi_2_extreme_low"] = (_rsi2 < 10).astype(float)
+        df["rsi_2_extreme_hi"]  = (_rsi2 > 90).astype(float)
+    except Exception:
+        df["rsi_2"] = df["rsi_9"]
+        df["rsi_2_extreme_low"] = 0.0
+        df["rsi_2_extreme_hi"]  = 0.0
+
+    # ── Connors RSI (CRSI) — RSI(3) + 연속방향 RSI(2) + ROC 100봉 백분위 ──
+    try:
+        _rsi3 = momentum.RSIIndicator(close, window=3).rsi()
+        # 연속 상승/하락 기간 계산
+        _up   = (close > close.shift(1)).astype(int)
+        _dn   = (close < close.shift(1)).astype(int)
+        _streak = pd.Series(0.0, index=close.index)
+        for _si in range(1, len(close)):
+            if _up.iloc[_si]:
+                _streak.iloc[_si] = max(_streak.iloc[_si - 1] + 1, 1)
+            elif _dn.iloc[_si]:
+                _streak.iloc[_si] = min(_streak.iloc[_si - 1] - 1, -1)
+        _streak_rsi = momentum.RSIIndicator(_streak, window=2).rsi()
+        # ROC 100봉 백분위 (rank)
+        _roc3 = momentum.ROCIndicator(close, window=3).roc()
+        _roc_pct = _roc3.rolling(100, min_periods=20).apply(
+            lambda x: float(pd.Series(x).rank(pct=True).iloc[-1]) * 100, raw=False
+        )
+        df["crsi"] = (_rsi3 + _streak_rsi + _roc_pct) / 3
+    except Exception:
+        df["crsi"] = df["rsi_9"]
+
+    # ── Donchian Channel (20봉) — 거북이 트레이딩 돌파 신호 ───────────────
+    try:
+        _dc_high = high.rolling(20, min_periods=5).max()
+        _dc_low  = low.rolling(20, min_periods=5).min()
+        _dc_rng  = (_dc_high - _dc_low).replace(0, np.nan)
+        df["dc_position"]   = ((close - _dc_low) / _dc_rng).fillna(0.5)
+        df["dc_upper_break"] = (close >= _dc_high).astype(float)
+        df["dc_lower_break"] = (close <= _dc_low).astype(float)
+    except Exception:
+        df["dc_position"]    = 0.5
+        df["dc_upper_break"] = 0.0
+        df["dc_lower_break"] = 0.0
+
+    # ── Z-Score 편차 (20봉) — 통계적 평균회귀 이탈 강도 ─────────────────
+    try:
+        _ma20_z  = close.rolling(20, min_periods=10).mean()
+        _std20_z = close.rolling(20, min_periods=10).std()
+        df["zscore_20"] = ((close - _ma20_z) / _std20_z.replace(0, np.nan)).fillna(0.0).clip(-4, 4)
+    except Exception:
+        df["zscore_20"] = 0.0
+
+    # ── Keltner Channel 이탈 신호 (역추세) — 백테스트 승률 77% ─────────────
+    try:
+        _kc_ema  = trend.EMAIndicator(close, window=20).ema_indicator()
+        _kc_atr  = volatility.AverageTrueRange(high, low, close, window=10).average_true_range()
+        _kc_mult = 1.5
+        _kc_up   = _kc_ema + _kc_mult * _kc_atr
+        _kc_dn   = _kc_ema - _kc_mult * _kc_atr
+        df["kc_lower_breach"] = (close < _kc_dn).astype(float)
+        df["kc_upper_breach"] = (close > _kc_up).astype(float)
+    except Exception:
+        df["kc_lower_breach"] = 0.0
+        df["kc_upper_breach"] = 0.0
+
+    # ── 갭(Gap) 피처 — 갭업/갭다운 방향 및 크기 ─────────────────────────
+    try:
+        _prev_close   = close.shift(1)
+        _gap          = (open_ - _prev_close) / _prev_close.replace(0, np.nan)
+        df["gap_pct"]  = _gap.fillna(0.0).clip(-0.15, 0.15)
+        df["gap_up"]   = (_gap > 0.005).astype(float)
+        df["gap_down"] = (_gap < -0.005).astype(float)
+    except Exception:
+        df["gap_pct"]  = 0.0
+        df["gap_up"]   = 0.0
+        df["gap_down"] = 0.0
+
+    # ── 선형회귀 채널 편차 (20봉) — 통계적 추세 채널 ───────────────────
+    try:
+        _lrc_win  = 20
+        _lrc_x    = np.arange(_lrc_win, dtype=float)
+        _lrc_dev  = np.full(len(df), np.nan)
+        _lrc_slp  = np.full(len(df), np.nan)
+        _cv_lrc   = close.values
+        for _li in range(_lrc_win - 1, len(df)):
+            _y = _cv_lrc[_li - _lrc_win + 1: _li + 1]
+            if np.any(np.isnan(_y)) or _y[-1] == 0:
+                continue
+            _coef   = np.polyfit(_lrc_x, _y, 1)
+            _pred   = _coef[0] * (_lrc_win - 1) + _coef[1]
+            _lrc_dev[_li] = (_cv_lrc[_li] - _pred) / (_cv_lrc[_li] + 1e-9)
+            _lrc_slp[_li] = _coef[0] / (np.mean(_y) + 1e-9)
+        df["lrc_deviation"] = pd.Series(_lrc_dev, index=df.index).fillna(0.0).clip(-0.1, 0.1)
+        df["lrc_slope"]     = pd.Series(_lrc_slp, index=df.index).fillna(0.0).clip(-0.05, 0.05)
+    except Exception:
+        df["lrc_deviation"] = 0.0
+        df["lrc_slope"]     = 0.0
+
+    # ── 이중천장(Double Top / M 패턴) — double_bottom_signal의 반대 ────────
+    try:
+        _lb_dt   = 40
+        _half_dt = _lb_dt // 2
+        _dt_sig  = np.zeros(len(df))
+        _hv_dt   = high.values
+        _lv_dt   = low.values
+        _cv_dt   = close.values
+        _rv_dt   = df["rsi_9"].values
+        for _di in range(_lb_dt, len(df)):
+            _sh = _hv_dt[_di - _lb_dt: _di]
+            _sl = _lv_dt[_di - _lb_dt: _di]
+            _sr = _rv_dt[_di - _lb_dt: _di]
+            # 1차 고점: 앞쪽 절반 최대
+            _i1  = int(np.argmax(_sh[:_half_dt]))
+            _v1  = _sh[_i1]
+            # 2차 고점: 뒤쪽 절반 최대
+            _i2  = int(np.argmax(_sh[_half_dt:])) + _half_dt
+            _v2  = _sh[_i2]
+            _avg = (_v1 + _v2) / 2 + 1e-9
+            if abs(_v1 - _v2) / _avg > 0.03:
+                continue
+            if _i2 <= _i1:
+                continue
+            # 두 고점 사이 넥라인(최저점)
+            _between = _sl[_i1 + 1: _i2]
+            if len(_between) == 0:
+                continue
+            _neckline = float(_between.min())
+            if _neckline <= 0:
+                continue
+            # 현재 종가가 넥라인 아래 (M 패턴 완성)
+            if _cv_dt[_di] >= _neckline:
+                continue
+            # RSI 부정 다이버전스: 두 고점 RSI 중 2차가 더 낮아야 함
+            _rsi1, _rsi2 = _sr[_i1], _sr[_i2]
+            if np.isfinite(_rsi1) and np.isfinite(_rsi2) and _rsi2 < _rsi1:
+                _dt_sig[_di] = 1.0
+        df["double_top_signal"] = _dt_sig
+    except Exception:
+        df["double_top_signal"] = 0.0
+
+    # ── 변동성 돌파 k=0.5 신호 (Larry Williams) — ML 피처화 ──────────────
+    try:
+        _prev_h  = high.shift(1)
+        _prev_l  = low.shift(1)
+        _vb_thr  = open_ + (_prev_h - _prev_l) * 0.5
+        df["vb_signal"] = (close > _vb_thr).astype(float)
+    except Exception:
+        df["vb_signal"] = 0.0
+
+    # ── 추세선 피처 — 스윙포인트 기반 동적 지지/저항 추세선 ─────────────
+    # 최적화: 전체 피벗 포인트 1회 계산 후 슬라이딩 윈도우로 추세선 투영 (O(N × order))
+    try:
+        _tl_order = 5    # 좌우 5봉 기준 피벗
+        _tl_win   = 60   # 최근 60봉 피벗만 사용
+        _lv_tl    = low.values
+        _hv_tl    = high.values
+        _cv_tl    = close.values
+        _n_tl     = len(df)
+
+        # 전체 배열에서 피벗 저점/고점 한 번에 탐지
+        _piv_low_mask  = np.zeros(_n_tl, dtype=bool)
+        _piv_high_mask = np.zeros(_n_tl, dtype=bool)
+        for _pi in range(_tl_order, _n_tl - _tl_order):
+            _win_l = _lv_tl[_pi - _tl_order: _pi + _tl_order + 1]
+            _win_h = _hv_tl[_pi - _tl_order: _pi + _tl_order + 1]
+            if _lv_tl[_pi] == _win_l.min():
+                _piv_low_mask[_pi] = True
+            if _hv_tl[_pi] == _win_h.max():
+                _piv_high_mask[_pi] = True
+
+        _piv_low_idx  = np.where(_piv_low_mask)[0]
+        _piv_high_idx = np.where(_piv_high_mask)[0]
+
+        _tl_sd = np.zeros(_n_tl)
+        _tl_rd = np.zeros(_n_tl)
+
+        for _ti in range(_tl_win, _n_tl):
+            _cutoff = _ti - _tl_win
+            # 현재봉 기준 최근 60봉 내 피벗만 사용
+            _sl_idx = _piv_low_idx[(_piv_low_idx >= _cutoff) & (_piv_low_idx < _ti)]
+            _sh_idx = _piv_high_idx[(_piv_high_idx >= _cutoff) & (_piv_high_idx < _ti)]
+            if len(_sl_idx) >= 2:
+                # 피벗 저점들의 절대 인덱스로 선형 회귀 → 현재봉(_ti) 투영
+                _coef_s = np.polyfit(_sl_idx.astype(float), _lv_tl[_sl_idx], 1)
+                _tl_val = _coef_s[0] * _ti + _coef_s[1]
+                if _tl_val > 0:
+                    _tl_sd[_ti] = (_cv_tl[_ti] - _tl_val) / (_tl_val + 1e-9)
+            if len(_sh_idx) >= 2:
+                _coef_r = np.polyfit(_sh_idx.astype(float), _hv_tl[_sh_idx], 1)
+                _tl_val = _coef_r[0] * _ti + _coef_r[1]
+                if _tl_val > 0:
+                    _tl_rd[_ti] = (_cv_tl[_ti] - _tl_val) / (_tl_val + 1e-9)
+
+        _tl_sd_s = pd.Series(_tl_sd, index=df.index).clip(-0.1, 0.1)
+        _tl_rd_s = pd.Series(_tl_rd, index=df.index).clip(-0.1, 0.1)
+        df["tl_support_dist"] = _tl_sd_s
+        df["tl_resist_dist"]  = _tl_rd_s
+        df["tl_near_bounce"]  = (
+            ((_tl_sd_s.abs() < 0.015) & (_tl_sd_s.abs() > 0.0)) |
+            ((_tl_rd_s.abs() < 0.015) & (_tl_rd_s.abs() > 0.0))
+        ).astype(float)
+    except Exception:
+        df["tl_support_dist"] = 0.0
+        df["tl_resist_dist"]  = 0.0
+        df["tl_near_bounce"]  = 0.0
 
     _pre_drop = df[FEATURE_NAMES].copy()
     # 전체가 NaN인 컬럼(가격 변동 없는 종목의 bb_pband 등) → 0으로 대체 후 dropna

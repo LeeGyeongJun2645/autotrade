@@ -54,6 +54,10 @@ FEATURE_SETS: dict[str, list[str]] = {
         # 이중바닥 + 매도소진 (모멘텀 반전 신호)
         "double_bottom_signal", "exhaustion_bounce",
         "stoch_rsi_k", "stoch_rsi_d", "stoch_rsi_cross",
+        # 신규: 갭 + 도치안 돌파 + Z-Score (모멘텀 이탈 강도)
+        "gap_pct", "gap_up", "gap_down",
+        "dc_upper_break", "dc_lower_break",
+        "zscore_20", "vb_signal",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -77,6 +81,10 @@ FEATURE_SETS: dict[str, list[str]] = {
         "ma_bull_align", "ma_bear_align",
         "fib_382_support", "fib_50_support", "fib_618_support",
         "support_slope", "double_bottom_signal",
+        # 신규: 추세선 피처 + 선형회귀채널 + 도치안 위치 (추세선 기반 매매)
+        "tl_support_dist", "tl_resist_dist", "tl_near_bounce",
+        "lrc_deviation", "lrc_slope",
+        "dc_position", "dc_upper_break",
     ],
     "volume": [
         "vol_ratio", "cmf_20",
@@ -93,6 +101,42 @@ FEATURE_SETS: dict[str, list[str]] = {
         "session_phase", "ret_since_open",
         # 매도소진 + 가짜돌파 필터 (거래량 신호 품질 강화)
         "exhaustion_bounce", "false_breakout_warn", "vol_reversal_signal",
+        # 신규: 갭 + Z-Score (거래량 폭발 맥락)
+        "gap_pct", "gap_up", "gap_down", "zscore_20",
+    ],
+    # ── 역추세 전용 feature_set (ADX<20 횡보장 평균회귀 신호 집중) ──────
+    "reversal": [
+        # 핵심 역추세 지표
+        "rsi_2", "rsi_2_extreme_low", "rsi_2_extreme_hi",
+        "crsi",
+        "stoch_rsi", "stoch_rsi_k", "stoch_rsi_d", "stoch_rsi_cross",
+        "williams_r",
+        "cci_20",
+        # 볼린저밴드 역추세 (과매도/과매수 이탈)
+        "bb_pband", "bb_squeeze", "bb_inside_kc",
+        "kc_lower_breach", "kc_upper_breach",
+        # Z-Score 편차 + 켈트너 + 도치안
+        "zscore_20",
+        "dc_position", "dc_lower_break", "dc_upper_break",
+        # RSI 다이버전스
+        "hidden_bull_div", "hidden_bear_div",
+        # 레짐 (횡보 = 역추세 유리)
+        "regime_state", "adx_14",
+        # 패턴
+        "double_bottom_signal", "double_top_signal",
+        "is_hammer", "is_shooting_star", "is_bullish_engulf", "is_bearish_engulf",
+        "exhaustion_bounce", "ls_extreme_long", "ls_extreme_short",
+        # 모멘텀 래그
+        "rsi_lag_1", "rsi_lag_2", "ret_lag_1", "ret_lag_2",
+        "ret_1d", "ret_3d", "ret_5d",
+        # 시간
+        "hour_sin", "hour_cos", "is_opening_hour",
+        # 피보나치 지지 (되돌림 레벨 반발)
+        "fib_382_support", "fib_50_support", "fib_618_support",
+        # 갭
+        "gap_pct", "gap_up", "gap_down",
+        # 추세선 근접 (반발 구간)
+        "tl_near_bounce", "tl_support_dist",
     ],
 }
 
@@ -138,6 +182,11 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI26", 15, 0.008, 0.65, "trend",    "stock", 5, "lgbm"),  # 중간 label 추세 (AI16/AI20 사이)
     ("AI27", 15, 0.005, 0.63, "volume",   "stock", 3, "lgbm"),  # 거래량 기반 단기 주식
     ("AI28", 60, 0.010, 0.65, "trend",    "stock", 8, "lgbm"),  # 60분봉 추세 주식 (새 타임프레임)
+    # ── 역추세 에이전트 (AI29-AI32): ADX<20 횡보장 평균회귀 전용
+    ("AI29", 60, 0.008, 0.62, "reversal", "coin",  5, "lgbm"),  # 코인 60분봉 역추세 lgbm
+    ("AI30", 15, 0.006, 0.63, "reversal", "coin",  5, "xgb"),   # 코인 15분봉 역추세 xgb (빠른 반응)
+    ("AI31", 15, 0.006, 0.63, "reversal", "stock", 8, "lgbm"),  # 주식 15분봉 역추세 lgbm
+    ("AI32", 15, 0.007, 0.64, "reversal", "stock", 5, "xgb"),   # 주식 15분봉 역추세 xgb
 ]
 
 
