@@ -1292,4 +1292,8 @@ def compute_features(
     for _c in FEATURE_NAMES:
         if _pre_drop[_c].isna().all():
             _pre_drop[_c] = 0.0
-    return _pre_drop.dropna()
+    _result = _pre_drop.dropna()
+    # close 컬럼 보존 — RL 에이전트 시뮬레이션 및 predict()에서 참조
+    _result = _result.copy()
+    _result["close"] = df.loc[_result.index, "close"]
+    return _result
