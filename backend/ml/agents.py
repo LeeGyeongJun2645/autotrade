@@ -2345,3 +2345,12 @@ def refresh_champion_flags() -> None:
         active = [a for a in market_agents if a.total_trades >= 10 and a.win_trades > 0]
         if active:
             max(active, key=lambda a: a.total_return).is_champion = True
+
+
+# ── RL 에이전트 통합 — 순환 임포트 방지를 위해 파일 맨 끝에서 지연 임포트 ──
+try:
+    from backend.ml.rl_agent import RL_AGENTS  # noqa: E402
+    AGENTS.update(RL_AGENTS)
+except Exception as _rl_err:
+    import logging as _log
+    _log.getLogger(__name__).warning("RL 에이전트 로드 실패 (무시): %s", _rl_err)
