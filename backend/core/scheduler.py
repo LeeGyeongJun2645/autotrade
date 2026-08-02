@@ -1884,6 +1884,19 @@ class TradingScheduler:
                             _kospi_tr = _otf_kospi_ohlcv
                             # 유효 데이터 있는 종목만 선별
                             _ohlcv_by_sym = {s: v for s, v in _otf_stock_ohlcv.items() if len(v) >= 50}
+                            # 캐시 모두 비어있으면 KIS API 직접 조회 (재시작 직후 신규 에이전트 즉시 학습용)
+                            if not _ohlcv_by_sym:
+                                for _sym in list(stock_symbols)[:3]:
+                                    if len(_otf_stock_ohlcv.get(_sym, [])) < 50:
+                                        try:
+                                            _api_ohlcv = await _kis.get_minute_ohlcv(
+                                                _sym, agent.interval_min, count=500
+                                            )
+                                            if len(_api_ohlcv) >= 50:
+                                                _otf_stock_ohlcv[_sym] = _api_ohlcv
+                                        except Exception:
+                                            pass
+                                _ohlcv_by_sym = {s: v for s, v in _otf_stock_ohlcv.items() if len(v) >= 50}
                             if _ohlcv_by_sym:
                                 async with agent._train_lock:
                                     await asyncio.to_thread(
@@ -2379,9 +2392,9 @@ class TradingScheduler:
                     sim_log.push(agent.agent_id, f"[중복차단] {symbol} 보유{_already_holding}+진행중{_already_pending}개 → 분산", "INFO")
                     _PENDING_BUYS.discard((agent.agent_id, symbol))
                     return
-            # ADX 필터: 코인 횡보장(ADX<18) 진입 차단 — 실전 데이터: ADX 15-18 WR=45.8% avg=-0.038%
-            # agents.py ADX cap(0.52)과 이중 방어: cap은 threshold 아슬한 경우 뚫릴 수 있음
-            if agent.market == "coin" and 0 < agent._last_adx_14 < 18:
+            # ADX 필터: 코인 횡보장(ADX<18) 진입 차단 — reversal 에이전트는 횡보장이 주 매매 구간이므로 제외
+            # 실전 데이터: ADX 15-18 추세 에이전트 WR=45.8% avg=-0.038%
+            if agent.market == "coin" and agent.feature_set != "reversal" and 0 < agent._last_adx_14 < 18:
                 sim_log.push(agent.agent_id, f"[ADX차단] {symbol} ADX={agent._last_adx_14:.1f}<18 횡보장", "INFO")
                 return
             # KOSPI MIM: 개장 30분 하락 방향 시 주식 당일 BUY 억제 (MDPI Finance 검증 전략)

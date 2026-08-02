@@ -519,10 +519,11 @@ class SimAgent:
             )
             # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
             _atr_full = feat_df["atr_pct"].copy() if "atr_pct" in feat_df.columns else None
-            # ADX 필터: 코인만 약추세 이상 구간 학습 — scheduler BUY 차단 기준(>=18)과 통일
+            # ADX 필터: 코인 추세 에이전트만 약추세 이상 구간 학습 (reversal은 저ADX 횡보장이 주 학습 구간)
             _adx_mask = (
                 feat_df["adx_14"] >= 18
-                if (self.market == "coin" and "adx_14" in feat_df.columns)
+                if (self.market == "coin" and self.feature_set != "reversal"
+                    and "adx_14" in feat_df.columns)
                 else None
             )
             _train_cols = [c for c in self.feature_names
