@@ -753,6 +753,24 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # 펀딩레이트 차익거래 — 30분마다 스캔/청산 체크
+        self._scheduler.add_job(
+            self._funding_arb_tick,
+            CronTrigger(minute="*/30", timezone=KST),
+            id="funding_arb",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 펀딩비 지급 시점(UTC 0/8/16시)에 수취 업데이트
+        self._scheduler.add_job(
+            self._funding_arb_collect,
+            CronTrigger(hour="0,8,16", minute=1, timezone="UTC"),
+            id="funding_arb_collect",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         # 기본 코인 임시 등록 (첫 모멘텀 갱신 전까지 실매매 가능하도록)
         _default_coins = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE",
                           "KRW-ADA", "KRW-AVAX", "KRW-DOT", "KRW-LINK", "KRW-POL"]
@@ -2571,6 +2589,23 @@ class TradingScheduler:
                         continue
         except Exception as e:
             logger.warning("[비상재학습] %s 실패: %s", agent.agent_id, e)
+
+    async def _funding_arb_tick(self) -> None:
+        """30분마다 펀딩레이트 차익거래 스캔 및 청산 체크."""
+        try:
+            from backend.core.funding_arb import funding_arb
+            await funding_arb.check_and_exit()
+            await funding_arb.scan_and_enter()
+        except Exception:
+            logger.exception("[FundingArb] tick 처리 중 예외")
+
+    async def _funding_arb_collect(self) -> None:
+        """펀딩비 지급 시점(UTC 0/8/16시)에 수취 펀딩비 업데이트."""
+        try:
+            from backend.core.funding_arb import funding_arb
+            await funding_arb.update_collected_funding()
+        except Exception:
+            logger.exception("[FundingArb] 펀딩비 수취 업데이트 예외")
 
     async def _daily_retrain(self) -> None:
         """매일 06:07 KST — 전 에이전트 최신 데이터로 재학습.

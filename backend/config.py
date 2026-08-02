@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     upbit_access_key: Optional[str] = None
     upbit_secret_key: Optional[str] = None
 
+    # ── 바이비트 API (미설정 시 펀딩 차익 비활성화) ─────────────────
+    bybit_api_key: Optional[str] = None
+    bybit_api_secret: Optional[str] = None
+
     # ── 텔레그램 (미설정 시 알림 비활성화) ───────────────────────────
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
