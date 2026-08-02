@@ -1156,6 +1156,7 @@ class TradingScheduler:
 
     async def _check_coin_virtual_positions(self) -> None:
         """코인 가상 포지션 5분마다 실시간 TP/SL 체크."""
+        from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
         # 현재 보유 중인 코인 가상 포지션 목록 수집
         coin_positions: dict[str, list[tuple]] = {}  # ticker → [(agent, pos)]
         for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
