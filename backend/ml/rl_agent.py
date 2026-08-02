@@ -210,12 +210,14 @@ class RLAgent(SimAgent):
     def train(
         self,
         ohlcv_list: list[dict],
+        funding_rates=None,
+        btc_ohlcv: list[dict] | None = None,
         *args,
         **kwargs,
     ) -> bool:
         try:
-            result = self._build_features(ohlcv_list, **{
-                k: v for k, v in kwargs.items() if k in ("btc_ohlcv", "ticker")
+            result = self._build_features(ohlcv_list, btc_ohlcv=btc_ohlcv, **{
+                k: v for k, v in kwargs.items() if k in ("ticker",)
             })
             if result is None:
                 return False

@@ -2882,7 +2882,7 @@ class TradingScheduler:
         try:
             await telegram.notify_message(
                 f"🔄 <b>AI 일일 재학습 완료</b>\n"
-                f"성공: {success}/30 에이전트 (AI01-AI28 + ENSEMBLE×2)\n"
+                f"성공: {success}/{_total_agents} 에이전트\n"
                 f"Meta-Labeling: {meta_success}개 학습\n"
                 f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv_pool)}종목\n"
                 f"※ 전일 거래내역 sample_weight 반영 → 수익률 지속 개선"
