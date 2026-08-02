@@ -129,13 +129,17 @@ class RLAgent(SimAgent):
         """augmented state → [Q(HOLD), Q(BUY), Q(SELL)]."""
         if self._rl_model is None or self._rl_scaler is None:
             return np.zeros(N_ACTIONS)
-        scaled = self._rl_scaler.transform(aug_state.reshape(1, -1))
-        q = np.zeros(N_ACTIONS)
-        for a in range(N_ACTIONS):
-            onehot = np.eye(N_ACTIONS)[a]
-            x = np.concatenate([scaled[0], onehot]).reshape(1, -1)
-            q[a] = float(self._rl_model.predict(x)[0])
-        return q
+        try:
+            scaled = self._rl_scaler.transform(aug_state.reshape(1, -1))
+            q = np.zeros(N_ACTIONS)
+            for a in range(N_ACTIONS):
+                onehot = np.eye(N_ACTIONS)[a]
+                x = np.concatenate([scaled[0], onehot]).reshape(1, -1)
+                q[a] = float(self._rl_model.predict(x)[0])
+            return q
+        except Exception as e:
+            logger.debug("[%s] Q-value 계산 실패 (차원 불일치 등): %s", self.agent_id, e)
+            return np.zeros(N_ACTIONS)
 
     # ── 예측 ─────────────────────────────────────────────────────────
 
@@ -237,9 +241,7 @@ class RLAgent(SimAgent):
         **kwargs,
     ) -> bool:
         """주식 에이전트: 다중 종목 OHLCV 풀링 후 학습."""
-        combined_feats: list[np.ndarray] = []
-        combined_closes: list[np.ndarray] = []
-        combined_cols: list[str] | None = None
+        per_sym: list[tuple[np.ndarray, list[str], np.ndarray]] = []
 
         for ohlcv in ohlcv_by_symbol.values():
             if len(ohlcv) < 60:
@@ -248,18 +250,28 @@ class RLAgent(SimAgent):
             if result is None:
                 continue
             feat_arr, cols, feat_df = result
-            combined_feats.append(feat_arr)
-            combined_closes.append(feat_df["close"].values.astype(float))
-            if combined_cols is None:
-                combined_cols = cols
+            per_sym.append((feat_arr, cols, feat_df["close"].values.astype(float)))
 
-        if not combined_feats or combined_cols is None:
+        if not per_sym:
             return False
 
-        # 동일 컬럼 기준으로 합침 (컬럼 순서가 다를 수 있으므로 최소 교집합 사용)
-        all_feats  = np.concatenate(combined_feats, axis=0)
-        all_closes = np.concatenate(combined_closes, axis=0)
-        return self._fit_fqi(all_feats, combined_cols, all_closes)
+        # 교집합 컬럼 기준으로 각 종목 정렬 — 종목별 피처 수 불일치 방지
+        ref_cols = per_sym[0][1]
+        aligned_feats:  list[np.ndarray] = []
+        aligned_closes: list[np.ndarray] = []
+
+        for feat_arr, cols, close_arr in per_sym:
+            col_pos = {c: i for i, c in enumerate(cols)}
+            aligned = np.zeros((len(feat_arr), len(ref_cols)), dtype=np.float64)
+            for j, c in enumerate(ref_cols):
+                if c in col_pos:
+                    aligned[:, j] = feat_arr[:, col_pos[c]]
+            aligned_feats.append(aligned)
+            aligned_closes.append(close_arr)
+
+        all_feats  = np.concatenate(aligned_feats,  axis=0)
+        all_closes = np.concatenate(aligned_closes, axis=0)
+        return self._fit_fqi(all_feats, ref_cols, all_closes)
 
     def _fit_fqi(
         self,

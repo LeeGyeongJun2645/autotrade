@@ -2770,10 +2770,12 @@ class TradingScheduler:
         # 학습 전에 좋은 에이전트의 feature_set/interval을 ENSEMBLE에 복사
         # 이것이 "좋은 에이전트의 전략을 실매매 에이전트로 옮기는" 핵심 로직
         from backend.ml.agents import ENSEMBLE_AGENTS
+        from backend.ml.rl_agent import RLAgent as _RLAgent
         for _mkt, _eid in [("coin", "ENSEMBLE_COIN"), ("stock", "ENSEMBLE_STOCK")]:
             _good = sorted(
                 [a for a in AGENTS.values()
-                 if a.market == _mkt and a.total_trades >= 5 and a.win_rate >= 0.50],
+                 if a.market == _mkt and a.total_trades >= 5 and a.win_rate >= 0.50
+                 and not isinstance(a, _RLAgent)],  # RL 에이전트는 전략 채택 제외
                 key=lambda a: a.win_rate * max(1.0 + a.total_return, 0.1),
                 reverse=True,
             )
@@ -2846,7 +2848,8 @@ class TradingScheduler:
             except Exception:
                 logger.exception("[Retrain][%s] 재학습 중 예외", agent.agent_id)
 
-        logger.info("[Retrain] 완료: %d/30 에이전트 재학습 (AI01-AI28 + ENSEMBLE_COIN/STOCK)", success)
+        _total_agents = len(AGENTS) + len(ENSEMBLE_AGENTS)
+        logger.info("[Retrain] 완료: %d/%d 에이전트 재학습", success, _total_agents)
 
         # ── MFE/MAE 기반 동적 TP 배수 갱신 (R비율 분석) ─────────────────────
         for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
