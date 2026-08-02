@@ -12,6 +12,8 @@
   - 연환산 펀딩비 < ARB_EXIT_APR (기본 5%)
   - 현물+선물 합산 손익 < -ARB_STOP_LOSS (기본 -3%)
   - 보유 기간 >= ARB_MAX_HOLD_HOURS (기본 168시간 = 1주)
+
+FUNDARB_PAPER=true 시 실제 주문 없이 가상 시뮬레이션 (수익/승률 통계 추적).
 """
 
 import asyncio
@@ -34,6 +36,9 @@ ARB_MAX_HOLD_HRS  = 168    # 최대 보유시간 (7일)
 MAX_POSITIONS     = 3      # 동시 최대 포지션 수
 POSITION_USDT     = 50.0   # 포지션당 투자금액 (USDT)
 FUNDING_PER_YEAR  = 3 * 365  # 8시간 주기 × 연365일 = 1095회
+
+# 가상 포트폴리오 초기 자본 (USDT)
+INITIAL_CAPITAL_USDT = MAX_POSITIONS * POSITION_USDT  # 150 USDT
 
 # 거래 가능한 최소 유동성 (일 거래대금 기준, USDT)
 MIN_VOLUME_USDT = 5_000_000
@@ -63,6 +68,12 @@ class ArbPosition:
         total_cost = self.spot_qty * self.spot_avg
         return (spot_pnl + fut_pnl + self.collected_fr) / total_cost if total_cost > 0 else 0.0
 
+    def pnl_usdt(self, current_price: float) -> float:
+        """포지션 손익 (USDT)."""
+        spot_pnl = (current_price - self.spot_avg) * self.spot_qty
+        fut_pnl  = (self.entry_price - current_price) * self.fut_qty
+        return spot_pnl + fut_pnl + self.collected_fr
+
 
 class FundingArbManager:
     """펀딩레이트 차익거래 매니저."""
@@ -71,11 +82,21 @@ class FundingArbManager:
         self._positions: dict[str, ArbPosition] = {}
         self._lock = asyncio.Lock()
 
+        # 통계 (가상/실제 공통)
+        self.total_trades: int   = 0
+        self.win_trades:   int   = 0
+        self.realized_pnl: float = 0.0  # 청산 완료 포지션 누적 손익 (USDT)
+
     # ── 공개 인터페이스 ────────────────────────────────────────────
+
+    @property
+    def _paper(self) -> bool:
+        from backend.config import settings
+        return settings.fundarb_paper
 
     async def scan_and_enter(self) -> None:
         """펀딩비 스캔 후 조건 충족 시 포지션 진입."""
-        if not _bybit._available():
+        if not self._paper and not _bybit._available():
             logger.debug("[FundingArb] API 키 미설정, 스캔 스킵")
             return
 
@@ -122,10 +143,10 @@ class FundingArbManager:
                     reason = f"최대 보유시간 ({pos.age_hours:.0f}h)"
 
                 if reason:
-                    to_exit.append((sym, reason, pnl))
+                    to_exit.append((sym, reason, price))
 
-            for sym, reason, pnl in to_exit:
-                await self._exit(sym, reason, pnl)
+            for sym, reason, price in to_exit:
+                await self._exit(sym, reason, price)
 
     async def update_collected_funding(self) -> None:
         """펀딩비 지급 시점(UTC 0/8/16시)에 누적 수취 펀딩비 업데이트."""
@@ -158,6 +179,51 @@ class FundingArbManager:
             }
             for sym, pos in self._positions.items()
         ]
+
+    def to_dict(self) -> dict:
+        """에이전트 탭 호환 딕셔너리 (AgentDashboard에서 market='arb'로 구분)."""
+        unrealized_pnl = sum(
+            pos.collected_fr for pos in self._positions.values()
+        )
+        total_pnl    = self.realized_pnl + unrealized_pnl
+        total_value  = INITIAL_CAPITAL_USDT + total_pnl
+        return_pct   = (total_pnl / INITIAL_CAPITAL_USDT * 100) if INITIAL_CAPITAL_USDT > 0 else 0.0
+        win_rate_pct = (self.win_trades / self.total_trades * 100) if self.total_trades > 0 else 0.0
+
+        positions_detail = {
+            sym: {
+                "spot_qty":     pos.spot_qty,
+                "entry_price":  pos.entry_price,
+                "age_hours":    round(pos.age_hours, 1),
+                "collected_fr": round(pos.collected_fr, 4),
+            }
+            for sym, pos in self._positions.items()
+        }
+
+        return {
+            "agent_id":         "FUNDARB",
+            "market":           "arb",
+            "feature_set":      "funding_rate",
+            "strategy":         "FundingArbitrage",
+            "paper":            self._paper,
+            "currency":         "USDT",
+            "current_balance":  round(total_value, 2),
+            "initial_capital":  INITIAL_CAPITAL_USDT,
+            "total_value":      round(total_value, 2),
+            "total_return_pct": round(return_pct, 2),
+            "today_return_pct": 0.0,
+            "day_start_balance": INITIAL_CAPITAL_USDT,
+            "win_rate":         round(win_rate_pct, 1),
+            "total_trades":     self.total_trades,
+            "win_trades":       self.win_trades,
+            "is_champion":      False,
+            "is_active":        True,
+            "trained_at":       None,
+            "realized_pnl":     round(self.realized_pnl, 4),
+            "unrealized_pnl":   round(unrealized_pnl, 4),
+            "positions":        positions_detail,
+            "open_positions":   len(self._positions),
+        }
 
     # ── 내부 로직 ──────────────────────────────────────────────────
 
@@ -195,31 +261,31 @@ class FundingArbManager:
         return candidates[:MAX_POSITIONS]
 
     async def _enter(self, symbol: str, apr: float, price: float) -> None:
-        """현물 매수 + 선물 숏 동시 진입."""
+        """현물 매수 + 선물 숏 동시 진입 (paper=True 시 가상 진입)."""
         qty = round(POSITION_USDT / price, 4)
         if qty <= 0:
             return
 
+        mode_label = "[가상]" if self._paper else ""
         logger.warning(
-            "[FundingArb] 진입 시도: %s 연%.1f%% | 현물매수+선물숏 %.4f개 (%.0f USDT)",
-            symbol, apr * 100, qty, POSITION_USDT,
+            "[FundingArb]%s 진입 시도: %s 연%.1f%% | 현물매수+선물숏 %.4f개 (%.0f USDT)",
+            mode_label, symbol, apr * 100, qty, POSITION_USDT,
         )
 
-        # 양방향 모드 확인 (선물 Hedge Mode)
-        await _bybit.set_position_mode(symbol)
+        if not self._paper:
+            # 실제 모드: 바이비트 API 호출
+            await _bybit.set_position_mode(symbol)
 
-        # 현물 매수
-        spot_result = await _bybit.spot_market_buy(symbol, qty)
-        if spot_result is None:
-            logger.error("[FundingArb] %s 현물 매수 실패, 진입 중단", symbol)
-            return
+            spot_result = await _bybit.spot_market_buy(symbol, qty)
+            if spot_result is None:
+                logger.error("[FundingArb] %s 현물 매수 실패, 진입 중단", symbol)
+                return
 
-        # 선물 숏
-        fut_result = await _bybit.futures_open_short(symbol, qty)
-        if fut_result is None:
-            logger.error("[FundingArb] %s 선물 숏 실패, 현물 매도로 롤백", symbol)
-            await _bybit.spot_market_sell(symbol, qty)
-            return
+            fut_result = await _bybit.futures_open_short(symbol, qty)
+            if fut_result is None:
+                logger.error("[FundingArb] %s 선물 숏 실패, 현물 매도로 롤백", symbol)
+                await _bybit.spot_market_sell(symbol, qty)
+                return
 
         self._positions[symbol] = ArbPosition(
             symbol=symbol,
@@ -230,34 +296,44 @@ class FundingArbManager:
         )
         expected_8h = qty * price * apr / FUNDING_PER_YEAR
         logger.warning(
-            "[FundingArb] 진입 완료: %s %.4f개 | 연%.1f%% | 예상 8h수익 %.4f USDT",
-            symbol, qty, apr * 100, expected_8h,
+            "[FundingArb]%s 진입 완료: %s %.4f개 | 연%.1f%% | 예상 8h수익 %.4f USDT",
+            mode_label, symbol, qty, apr * 100, expected_8h,
         )
 
-    async def _exit(self, symbol: str, reason: str, pnl: float) -> None:
-        """현물 매도 + 선물 숏 청산."""
+    async def _exit(self, symbol: str, reason: str, current_price: float) -> None:
+        """현물 매도 + 선물 숏 청산 (paper=True 시 가상 청산)."""
         pos = self._positions.get(symbol)
         if pos is None:
             return
 
+        pnl_u = pos.pnl_usdt(current_price)
+        pnl_r = pos.pnl_rate(current_price)
+        mode_label = "[가상]" if self._paper else ""
+
         logger.warning(
-            "[FundingArb] 청산 시도: %s (%s) PnL=%.2f%%",
-            symbol, reason, pnl * 100,
+            "[FundingArb]%s 청산 시도: %s (%s) PnL=%.2f%% (%.4f USDT)",
+            mode_label, symbol, reason, pnl_r * 100, pnl_u,
         )
 
-        # 선물 청산 먼저 (리스크 제거 우선)
-        fut_ok = await _bybit.futures_close_short(symbol, pos.fut_qty)
-        spot_ok = await _bybit.spot_market_sell(symbol, pos.spot_qty)
+        if not self._paper:
+            # 실제 모드: 바이비트 API 호출
+            fut_ok  = await _bybit.futures_close_short(symbol, pos.fut_qty)
+            spot_ok = await _bybit.spot_market_sell(symbol, pos.spot_qty)
+            if not (fut_ok and spot_ok):
+                logger.error("[FundingArb] %s 청산 실패 (fut=%s, spot=%s)", symbol, fut_ok, spot_ok)
+                return
 
-        if fut_ok and spot_ok:
-            total_earned = pos.collected_fr
-            del self._positions[symbol]
-            logger.warning(
-                "[FundingArb] 청산 완료: %s 누적펀딩수익 %.4f USDT (보유 %.1fh)",
-                symbol, total_earned, pos.age_hours,
-            )
-        else:
-            logger.error("[FundingArb] %s 청산 실패 (fut=%s, spot=%s)", symbol, fut_ok, spot_ok)
+        # 통계 업데이트
+        self.total_trades += 1
+        if pnl_u > 0:
+            self.win_trades += 1
+        self.realized_pnl += pnl_u
+
+        del self._positions[symbol]
+        logger.warning(
+            "[FundingArb]%s 청산 완료: %s PnL=%.4f USDT (누적실현 %.4f USDT, 보유 %.1fh)",
+            mode_label, symbol, pnl_u, self.realized_pnl, pos.age_hours,
+        )
 
 
 # ── 싱글톤 ────────────────────────────────────────────────────────

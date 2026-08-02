@@ -838,6 +838,96 @@ function ResetButton() {
   )
 }
 
+// ── 펀딩차익 섹션 ─────────────────────────────────────────────────
+function FundingArbSection({ agent }) {
+  if (!agent) return null
+
+  const isPaper  = agent.paper
+  const totalVal = agent.total_value ?? agent.initial_capital ?? 150
+  const pnlAmt   = totalVal - (agent.initial_capital ?? 150)
+  const posEnt   = Object.entries(agent.positions ?? {})
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-3 pb-2 border-b border-green-800/40">
+        <span className="text-lg font-bold text-green-300">펀딩 차익거래</span>
+        {isPaper
+          ? <span className="text-xs bg-green-900/60 text-green-300 px-2 py-0.5 rounded">가상 시뮬</span>
+          : <span className="text-xs bg-red-900/60 text-red-300 px-2 py-0.5 rounded">실제 매매</span>
+        }
+        <span className="text-xs text-gray-500">현물매수+선물숏 · 8시간마다 펀딩비 수취 · Bybit</span>
+        <span className="text-xs bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded font-mono ml-auto">
+          {agent.total_trades}회 청산
+        </span>
+      </div>
+
+      <div className="bg-green-950/20 border border-green-800/40 rounded-xl p-4 space-y-4">
+        {/* 요약 지표 */}
+        <div className="grid grid-cols-4 gap-3">
+          <div className="bg-green-900/20 rounded-lg p-3">
+            <p className="text-xs text-gray-400 mb-1">총평가액</p>
+            <p className={`font-mono font-bold text-sm ${pnlAmt >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {totalVal.toFixed(2)} USDT
+            </p>
+            <p className={`text-xs font-mono ${pnlAmt >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+              {pnlAmt >= 0 ? '+' : ''}{pnlAmt.toFixed(4)} USDT
+            </p>
+          </div>
+          <div className="bg-green-900/20 rounded-lg p-3">
+            <p className="text-xs text-gray-400 mb-1">수익률</p>
+            <ReturnBadge pct={agent.total_return_pct} size="lg" />
+          </div>
+          <div className="bg-green-900/20 rounded-lg p-3">
+            <p className="text-xs text-gray-400 mb-1">승률</p>
+            <WinBadge rate={agent.win_rate} wins={agent.win_trades} total={agent.total_trades} size="lg" />
+          </div>
+          <div className="bg-green-900/20 rounded-lg p-3">
+            <p className="text-xs text-gray-400 mb-1">보유 포지션</p>
+            <p className="font-bold text-white text-lg">{posEnt.length} / 3</p>
+            <p className="text-xs text-gray-500">최대 3개</p>
+          </div>
+        </div>
+
+        {/* 실현/미실현 손익 */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="text-xs flex justify-between px-3 py-2 bg-gray-700/40 rounded-lg">
+            <span className="text-gray-400">실현 손익</span>
+            <span className={`font-mono font-semibold ${(agent.realized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {(agent.realized_pnl ?? 0) >= 0 ? '+' : ''}{(agent.realized_pnl ?? 0).toFixed(4)} USDT
+            </span>
+          </div>
+          <div className="text-xs flex justify-between px-3 py-2 bg-gray-700/40 rounded-lg">
+            <span className="text-gray-400">미실현 (수취 중)</span>
+            <span className={`font-mono font-semibold ${(agent.unrealized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {(agent.unrealized_pnl ?? 0) >= 0 ? '+' : ''}{(agent.unrealized_pnl ?? 0).toFixed(4)} USDT
+            </span>
+          </div>
+        </div>
+
+        {/* 현재 포지션 목록 */}
+        {posEnt.length > 0 ? (
+          <div>
+            <p className="text-xs text-gray-500 mb-2 font-semibold">현재 보유 포지션</p>
+            <div className="space-y-1.5">
+              {posEnt.map(([sym, pos]) => (
+                <div key={sym} className="flex items-center gap-3 text-xs bg-gray-700/30 rounded-lg px-3 py-2">
+                  <span className="font-mono font-bold text-green-200 w-24 shrink-0">{sym.replace('USDT', '/USDT')}</span>
+                  <span className="text-gray-400">진입가 <span className="text-gray-200 font-mono">${pos.entry_price?.toLocaleString()}</span></span>
+                  <span className="text-gray-400">수량 <span className="text-gray-200 font-mono">{pos.spot_qty}</span></span>
+                  <span className="text-gray-400">보유 <span className="text-yellow-300 font-mono">{pos.age_hours}h</span></span>
+                  <span className="text-gray-400 ml-auto">수취 펀딩비 <span className="text-green-400 font-mono">{(pos.collected_fr ?? 0).toFixed(4)} USDT</span></span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-600 text-center py-2">진입 조건 대기 중 (연환산 20%+ 코인 스캔 중)</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── 메인 ──────────────────────────────────────────────────────────
 export default function AgentDashboard({ agents }) {
   const [selected,         setSelected]         = useState(null)
@@ -851,6 +941,7 @@ export default function AgentDashboard({ agents }) {
   const ensembleAgents = agents.filter(a => a.agent_id.startsWith('ENSEMBLE_'))
   const coinAgents    = agents.filter(a => a.market === 'coin' && !a.agent_id.startsWith('ENSEMBLE_'))
   const stockAgents   = agents.filter(a => a.market === 'stock' && !a.agent_id.startsWith('ENSEMBLE_'))
+  const arbAgent      = agents.find(a => a.market === 'arb')
   const selectedAgent = agents.find(a => a.agent_id === selected)
   const handleClick   = id => setSelected(selected === id ? null : id)
 
@@ -1013,6 +1104,12 @@ export default function AgentDashboard({ agents }) {
         </div>
         <MarketSection agents={stockAgents} market="stock" selected={selected} onSelect={handleClick} stockNames={stockNames} />
       </div>
+
+      {/* 구분선 */}
+      <div className="border-t border-gray-700" />
+
+      {/* 펀딩 차익거래 섹션 */}
+      <FundingArbSection agent={arbAgent} />
 
       {/* 분석 패널 */}
       <AnalysisPanel />

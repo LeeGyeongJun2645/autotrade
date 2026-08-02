@@ -3257,13 +3257,16 @@ class TradingScheduler:
         logger.info("[일일리셋] day_start_balance 저장 완료 / 블랙리스트 %d종목 차단", bl_total)
 
     def get_agents_snapshot(self) -> list[dict]:
-        """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 → 앙상블 순)."""
+        """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 → 앙상블 → 펀딩차익 순)."""
         from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
+        from backend.core.funding_arb import funding_arb
         agents = list(AGENTS.values())
         coins  = sorted([a for a in agents if a.market == "coin"],  key=lambda a: (not a.is_champion, -a.win_rate))
         stocks = sorted([a for a in agents if a.market == "stock"], key=lambda a: (not a.is_champion, -a.win_rate))
         ensembles = list(ENSEMBLE_AGENTS.values())
-        return [a.to_dict() for a in coins + stocks + ensembles]
+        result = [a.to_dict() for a in coins + stocks + ensembles]
+        result.append(funding_arb.to_dict())
+        return result
 
 
 # 싱글톤 인스턴스 — FastAPI main.py 에서 import 해서 사용
