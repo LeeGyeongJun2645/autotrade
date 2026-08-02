@@ -766,7 +766,9 @@ class SimAgent:
                 _n_val_buy = int(_val_pred.sum())
                 # n_buy=0: 검증셋에서 buy 예측 0개 → threshold 너무 높거나 완전 보수 모델
                 # 이런 모델은 실거래에서도 threshold 근처 확률이 불안정 → 차단
-                _wf_fail = val_acc < 0.50 or (_val_prec < 0.25 and _n_val_buy > 5) or (
+                # reversal: 횡보장 반등 신호는 레이블 희소 → precision 기준 완화
+                _min_prec = 0.10 if self.feature_set == "reversal" else 0.25
+                _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 5) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
                 if _wf_fail:
@@ -1033,7 +1035,8 @@ class SimAgent:
                 from sklearn.metrics import precision_score as _ps, recall_score as _rs
                 _val_prec    = _ps(y_val, _val_pred, zero_division=0)
                 _n_val_buy   = int(_val_pred.sum())
-                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < 0.25 and _n_val_buy > 5) or (
+                _min_prec_m  = 0.10 if self.feature_set == "reversal" else 0.25
+                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 5) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
                 if _tm_wf_fail:
