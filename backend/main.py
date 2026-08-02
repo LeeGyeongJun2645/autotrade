@@ -738,6 +738,13 @@ async def get_all_loss_summary():
 
 # ── SSE 실시간 스트리밍 ──────────────────────────────────────────
 
+@app.get("/funding-arb/status", tags=["FundingArb"])
+async def get_funding_arb_status():
+    """펀딩레이트 차익거래 현재 포지션 목록."""
+    from backend.core.funding_arb import funding_arb
+    return {"positions": funding_arb.status()}
+
+
 @app.get("/stream", tags=["Stream"])
 async def stream(request: Request):
     """SSE 스트림 — 5초마다 포지션 스냅샷 브로드캐스트.
@@ -774,6 +781,15 @@ async def stream(request: Request):
                     "event": "agents",
                     "data": json.dumps(scheduler.get_agents_snapshot(), ensure_ascii=False, default=_json_default),
                 }
+
+                try:
+                    from backend.core.funding_arb import funding_arb
+                    yield {
+                        "event": "funding_arb",
+                        "data": json.dumps(funding_arb.status(), ensure_ascii=False),
+                    }
+                except Exception:
+                    pass
             except Exception:
                 import logging as _log
                 _log.getLogger(__name__).exception("[SSE] 이벤트 직렬화 오류")

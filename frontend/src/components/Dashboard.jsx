@@ -279,8 +279,48 @@ function RetrainButton() {
   )
 }
 
+function FundingArbPanel({ positions }) {
+  if (!positions || positions.length === 0) {
+    return (
+      <BalanceCard title="펀딩레이트 차익거래">
+        <p className="text-gray-500 text-sm text-center py-2">활성 포지션 없음 — 30분마다 자동 스캔</p>
+      </BalanceCard>
+    )
+  }
+  return (
+    <BalanceCard title={`펀딩레이트 차익거래 (${positions.length}개 활성)`}>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-gray-500 text-xs border-b border-gray-700">
+              <th className="pb-2 text-left">심볼</th>
+              <th className="pb-2 text-right">수량</th>
+              <th className="pb-2 text-right">진입가</th>
+              <th className="pb-2 text-right">보유</th>
+              <th className="pb-2 text-right">수취 펀딩비</th>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((p) => (
+              <tr key={p.symbol} className="border-b border-gray-800">
+                <td className="py-2 font-mono text-yellow-300">{p.symbol}</td>
+                <td className="py-2 font-mono text-right text-gray-300">{p.spot_qty.toFixed(4)}</td>
+                <td className="py-2 font-mono text-right text-gray-300">${p.entry_price.toFixed(2)}</td>
+                <td className="py-2 font-mono text-right text-gray-400">{p.age_hours}h</td>
+                <td className={`py-2 font-mono text-right ${p.collected_fr >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {p.collected_fr >= 0 ? '+' : ''}{p.collected_fr.toFixed(4)} USDT
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </BalanceCard>
+  )
+}
+
 export default function Dashboard({ sse }) {
-  const { positions, mlSignals, connected, error } = sse
+  const { positions, mlSignals, fundingArb, connected, error } = sse
   const [kisBalance, setKisBalance] = useState(null)
   const [upbitBalance, setUpbitBalance] = useState(null)
   const [upbitError, setUpbitError] = useState(null)
@@ -441,6 +481,9 @@ export default function Dashboard({ sse }) {
           </div>
         )}
       </div>
+
+      {/* 펀딩레이트 차익거래 */}
+      <FundingArbPanel positions={fundingArb} />
     </div>
   )
 }

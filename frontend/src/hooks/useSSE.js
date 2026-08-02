@@ -6,6 +6,7 @@ export function useSSE() {
   const [simLogs, setSimLogs] = useState([])
   const [mlSignals, setMlSignals] = useState({})
   const [agents, setAgents] = useState([])
+  const [fundingArb, setFundingArb] = useState([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState(null)
 
@@ -33,6 +34,10 @@ export function useSSE() {
       try { setAgents(JSON.parse(e.data)) } catch (err) { console.warn('[SSE] agents 파싱 실패:', err) }
     })
 
+    es.addEventListener('funding_arb', (e) => {
+      try { setFundingArb(JSON.parse(e.data)) } catch (err) { console.warn('[SSE] funding_arb 파싱 실패:', err) }
+    })
+
     es.onerror = () => {
       setConnected(false)
       setError('서버 연결 끊김 — 자동 재연결 중...')
@@ -41,5 +46,5 @@ export function useSSE() {
     return () => es.close()
   }, [])
 
-  return { positions, simLogs, mlSignals, agents, connected, error }
+  return { positions, simLogs, mlSignals, agents, fundingArb, connected, error }
 }
