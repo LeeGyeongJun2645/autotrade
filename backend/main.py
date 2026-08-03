@@ -782,14 +782,7 @@ async def stream(request: Request):
                     "data": json.dumps(scheduler.get_agents_snapshot(), ensure_ascii=False, default=_json_default),
                 }
 
-                try:
-                    from backend.core.funding_arb import funding_arb
-                    yield {
-                        "event": "funding_arb",
-                        "data": json.dumps(funding_arb.status(), ensure_ascii=False),
-                    }
-                except Exception:
-                    pass
+                # funding_arb 데이터는 agents 이벤트에 market='arb'로 포함됨 → 별도 전송 불필요
             except Exception:
                 import logging as _log
                 _log.getLogger(__name__).exception("[SSE] 이벤트 직렬화 오류")

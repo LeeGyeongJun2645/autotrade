@@ -238,9 +238,10 @@ class FundingArbManager:
 
         candidates = []
         for item in all_rates:
-            sym   = item["symbol"]
-            fr    = item["fundingRate"]
-            price = item["lastPrice"]
+            sym    = item["symbol"]
+            fr     = item["fundingRate"]
+            price  = item["lastPrice"]
+            volume = float(item.get("turnover24h") or 0)  # 24시간 USDT 거래대금
             if price <= 0:
                 continue
             apr = fr * FUNDING_PER_YEAR
@@ -251,6 +252,8 @@ class FundingArbManager:
                 continue
             if spot_symbols and sym not in spot_symbols:
                 continue  # 현물 미상장 심볼 스킵
+            if volume < MIN_VOLUME_USDT:
+                continue  # 유동성 부족 심볼 스킵 (슬리피지/미체결 방지)
 
             # 과거 3회 펀딩비 평균 확인 (연속성)
             history = await _bybit.get_funding_rate_history(sym, limit=3)
@@ -321,11 +324,20 @@ class FundingArbManager:
         )
 
         if not self._paper:
-            # 실제 모드: 바이비트 API 호출
-            fut_ok  = await _bybit.futures_close_short(symbol, pos.fut_qty)
+            # 실제 모드: 선물 → 현물 순서로 청산
+            # 선물 먼저: 헤지 방향부터 닫아야 언헤지 리스크 최소화
+            fut_ok = await _bybit.futures_close_short(symbol, pos.fut_qty)
+            if not fut_ok:
+                logger.error("[FundingArb] %s 선물 청산 실패 — 헤지 유지, 청산 중단", symbol)
+                return
             spot_ok = await _bybit.spot_market_sell(symbol, pos.spot_qty)
-            if not (fut_ok and spot_ok):
-                logger.error("[FundingArb] %s 청산 실패 (fut=%s, spot=%s)", symbol, fut_ok, spot_ok)
+            if not spot_ok:
+                # 선물은 닫혔지만 현물이 남음 → 포지션 상태 유지, 재시도 대기
+                logger.error(
+                    "[FundingArb] %s 현물 매도 실패 (선물은 이미 청산됨) — 다음 체크 시 재시도",
+                    symbol,
+                )
+                pos.fut_qty = 0.0  # 선물 이미 닫힘을 기록
                 return
 
         # 통계 업데이트

@@ -419,7 +419,8 @@ async def get_balance() -> dict[str, Any]:
                 _locked = 0.0
         balance = float(item.get("balance") or 0) + _locked
         if currency == "KRW":
-            krw = balance
+            # KRW: locked는 미체결 매수 주문 잠금분 → 실제 가용 잔액에서 제외
+            krw = float(item.get("balance") or 0)
             continue
         if balance <= 0:
             continue

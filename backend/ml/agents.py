@@ -930,6 +930,7 @@ class SimAgent:
             self._scaler = scaler
             self._trained_feature_names = list(feat_df.columns)  # predict() 피처 일관성 보장
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+            self._consecutive_losses = 0  # 재학습 완료 → adaptive_buy_threshold 정상 복귀
             self.save_model()
             logger.warning("[%s] 모델 학습 완료 (%d샘플, X_train=%d, thr=%.2f)", self.agent_id, len(X), len(X_train), self.buy_threshold)
             return True
@@ -1810,6 +1811,7 @@ class SimAgent:
             oi_hist=self._cached_oi_hist or None,
             taker_hist=self._cached_taker_hist or None,
             ls_hist=self._cached_ls_hist or None,
+            ticker=ticker or "",  # OHLCV 캐시 저장 및 ticker 종속 신호 활성화
             obi_snaps=None,
         )
 
