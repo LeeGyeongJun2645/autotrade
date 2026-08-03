@@ -8,18 +8,36 @@ const FEAT_COLOR = {
   momentum: 'bg-green-900/60 text-green-300',
   trend:    'bg-blue-900/60 text-blue-300',
   volume:   'bg-orange-900/60 text-orange-300',
+  reversal: 'bg-red-900/60 text-red-300',
+  ha_trend: 'bg-cyan-900/60 text-cyan-300',
+  squeeze:  'bg-purple-900/60 text-purple-300',
+  donchian: 'bg-yellow-900/60 text-yellow-300',
+  vwap_vol: 'bg-teal-900/60 text-teal-300',
+  multi_tf: 'bg-pink-900/60 text-pink-300',
 }
 const FEAT_KR = {
   all:      '복합전략',
   momentum: '모멘텀',
   trend:    '추세전략',
   volume:   '거래량',
+  reversal: '역추세',
+  ha_trend: '헤이킨아시',
+  squeeze:  'BB스퀴즈',
+  donchian: '도치안돌파',
+  vwap_vol: 'VWAP흐름',
+  multi_tf: '멀티타임프레임',
 }
 const FEAT_DESC = {
   all:      '모멘텀+추세+거래량+캔들패턴 48개 지표 전체 사용. 가장 많은 정보로 판단.',
   momentum: 'RSI·MACD·스토캐스틱 등 가격이 얼마나 빠르게 움직이는지로 단기 방향을 예측. 과매수/과매도 구간 탐지.',
   trend:    '이동평균(MA5/20/60)·ADX·EMA9/21·VWAP 기반. 추세가 형성된 방향으로 따라가는 전략.',
   volume:   'OBV·CMF·MFI 등 거래량 흐름 분석. 큰손(기관)의 매집·분산 움직임을 탐지.',
+  reversal: 'RSI2·CCI·볼린저밴드 과매도 반발. ADX 낮은 횡보장에서 평균회귀 신호 탐지.',
+  ha_trend: '헤이킨아시 캔들로 노이즈 제거 후 ADX·VWAP으로 추세 강도 확인. 가짜 신호 최소화.',
+  squeeze:  '볼린저밴드가 켈트너채널 안으로 수축(스퀴즈) 후 폭발적 이탈 포착. TTM Squeeze 방식.',
+  donchian: '20봉 신고가 돌파 시 진입, 거래량+ADX로 유효성 확인. 고전 터틀 트레이딩 전략.',
+  vwap_vol: 'VWAP 편차·CVD·OFI로 기관 매매 방향 추종. 앵커 VWAP 기준 지지/저항 활용.',
+  multi_tf: '15분·1시간·4시간봉 동시 상승 정렬 시 진입. 여러 시간축 합의로 신뢰도 극대화.',
 }
 const INITIAL = 1_000_000
 

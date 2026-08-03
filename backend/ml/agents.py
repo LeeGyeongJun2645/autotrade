@@ -138,6 +138,107 @@ FEATURE_SETS: dict[str, list[str]] = {
         # 추세선 근접 (반발 구간)
         "tl_near_bounce", "tl_support_dist",
     ],
+
+    # ── 헤이킨아시 추세 (Heikin-Ashi + ADX + VWAP) ────────────────
+    # 노이즈 필터링된 캔들로 추세 방향 파악, ATR·ADX로 강도 확인
+    "ha_trend": [
+        "ha_color", "ha_bull_streak",        # 헤이킨아시 추세 핵심
+        "adx_14", "adx_pos", "adx_neg",      # 추세 강도 + 방향
+        "atr_pct",                            # 변동성 (Supertrend 대리)
+        "ema9_cross_ema21",                   # 단기 EMA 크로스
+        "ma5_ratio", "ma20_ratio",            # 이평 위치
+        "vwap_ratio", "vwap_cross",           # VWAP 기준선
+        "taker_buy_ratio", "ofi_5",           # 매수세 압력
+        "macd_diff", "macd_diff_lag_1",       # 모멘텀 방향
+        "roc_10",
+        "regime_state", "mtf_ema_bull", "mtf_align",
+        "hour_sin", "hour_cos", "is_opening_hour",
+        "lrc_slope", "lrc_deviation",         # 선형회귀 기울기
+        "gk_vol",                             # 변동성 강도
+        "double_bottom_signal",
+        "fib_382_support", "fib_50_support",
+        "kospi_ret_5", "kospi_rel_str",
+    ],
+
+    # ── BB-Keltner 스퀴즈 (TTM Squeeze 방식) ───────────────────────
+    # 변동성 수축 후 폭발적 방향 이탈 포착 (Larry Connors + John Carter)
+    "squeeze": [
+        "bb_squeeze", "bb_inside_kc",        # 스퀴즈 상태 핵심
+        "bb_pband", "bb_pband_lag_1",        # 밴드 내 위치
+        "kc_lower_breach", "kc_upper_breach", # 켈트너 이탈
+        "macd_diff", "macd_diff_lag_1",      # 폭발 방향 모멘텀
+        "roc_10", "mfi_14",                  # 추가 모멘텀
+        "vol_ratio", "taker_buy_ratio",      # 거래량 급증 확인
+        "adx_14",                            # 이탈 후 추세 강도
+        "ofi_5", "ofi_20", "cvd_ratio",      # 주문 흐름 (방향 확인)
+        "regime_state",
+        "hour_sin", "hour_cos", "is_opening_hour",
+        "ret_1d", "ret_3d",
+        "zscore_20",                         # 이탈 강도
+        "dc_upper_break", "dc_lower_break",  # 채널 동반 돌파
+        "btc_corr_20", "btc_ret_5",
+    ],
+
+    # ── 도치안 채널 돌파 (Donchian / Turtle Trading) ───────────────
+    # 20봉 신고가 돌파 시 진입, 거래량+ADX로 유효성 확인 (고전 터틀 트레이딩)
+    "donchian": [
+        "dc_position", "dc_upper_break",     # 도치안 핵심
+        "vol_ratio", "vol_ratio_lag_1",      # 거래량 확인 (유효 돌파)
+        "adx_14", "adx_pos",                 # 추세 강도 필터
+        "atr_pct",                           # ATR 기반 변동성
+        "ma20_ratio", "ma60_ratio",          # 이평 위치 (추세 방향)
+        "taker_buy_ratio", "ofi_5", "ofi_20", # 매수세
+        "roc_10", "macd_diff",               # 모멘텀 확인
+        "regime_state",
+        "hour_sin", "hour_cos",
+        "btc_corr_20", "btc_ret_5",
+        "lrc_slope",                         # 선형 회귀 추세 방향
+        "false_breakout_warn",               # 가짜 돌파 필터
+        "gap_up", "gap_pct",                 # 갭 돌파
+        "ichi_above_cloud",                  # 이치모쿠 추세 확인
+        "kospi_ret_5",
+    ],
+
+    # ── VWAP + 주문흐름 (Institutional Volume + Order Flow) ────────
+    # VWAP 편차 + CVD + OFI로 기관 매매 방향 추종
+    "vwap_vol": [
+        "vwap_ratio", "vwap_cross",          # VWAP 기준선
+        "anchored_vwap_ratio", "anchored_vwap_cross",  # 앵커 VWAP
+        "cvd_ratio", "ofi_5", "ofi_20",      # 누적 델타 + 주문 불균형
+        "vol_ratio", "vol_ratio_lag_1",
+        "taker_buy_ratio",
+        "mfi_14", "cmf_20",                  # 자금 흐름 (OBV 유사)
+        "ma5_ratio", "ma20_ratio",
+        "regime_state",
+        "hour_sin", "hour_cos", "is_opening_hour",
+        "session_phase", "ret_since_open",
+        "kospi_ret_5", "kospi_rel_str",
+        "oi_price_diverge", "oi_change_pct", # 미결제약정 이탈
+        "rsi_9", "macd_diff",
+        "dist_to_pp", "dist_to_s1",          # 피벗 지지선
+        "btc_ret_5",
+    ],
+
+    # ── 멀티 타임프레임 정렬 (Multi-Timeframe Alignment) ───────────
+    # 15분·1시간·4시간봉 동시 상승 정렬 시 진입 (시간축 합의)
+    "multi_tf": [
+        "mtf_ret_15m", "mtf_ret_1h", "mtf_ret_4h", "mtf_align",  # MTF 핵심
+        "mtf_ema_bull",
+        "ma5_ratio", "ma20_ratio", "ma60_ratio",
+        "ema9_cross_ema21",
+        "adx_14", "adx_pos",
+        "macd_diff", "macd_diff_lag_1",
+        "rsi_9", "roc_10",
+        "regime_state",
+        "hour_sin", "hour_cos",
+        "btc_corr_20", "btc_ret_5",
+        "taker_buy_ratio", "cvd_ratio",
+        "lrc_slope",                         # 선형 회귀 기울기
+        "vwap_ratio", "vwap_cross",
+        "vol_ratio",
+        "kospi_ret_5",
+        "ichi_above_cloud", "ichi_cloud_green",  # 이치모쿠 구름 위 = 강세
+    ],
 }
 
 # ── 20개 에이전트 설정 ────────────────────────────────────────────
@@ -181,12 +282,12 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI25", 15, 0.005, 0.63, "trend",    "stock", 8, "lgbm"),  # AI16 변형 — 낮은 label, 잦은 신호
     ("AI26", 15, 0.008, 0.65, "trend",    "stock", 5, "lgbm"),  # 중간 label 추세 (AI16/AI20 사이)
     ("AI27", 15, 0.005, 0.63, "volume",   "stock", 3, "lgbm"),  # 거래량 기반 단기 주식
-    ("AI28", 60, 0.010, 0.65, "trend",    "stock", 8, "lgbm"),  # 60분봉 추세 주식 (새 타임프레임)
-    # ── 역추세 에이전트 (AI29-AI32): ADX<20 횡보장 평균회귀 전용
-    ("AI29", 60, 0.008, 0.62, "reversal", "coin",  5, "lgbm"),  # 코인 60분봉 역추세 lgbm
-    ("AI30", 15, 0.006, 0.63, "reversal", "coin",  5, "xgb"),   # 코인 15분봉 역추세 xgb (빠른 반응)
-    ("AI31", 15, 0.006, 0.63, "reversal", "stock", 8, "lgbm"),  # 주식 15분봉 역추세 lgbm
-    ("AI32", 15, 0.007, 0.64, "reversal", "stock", 5, "xgb"),   # 주식 15분봉 역추세 xgb
+    ("AI28", 15, 0.006, 0.60, "ha_trend",  "stock", 5, "lgbm"),  # 헤이킨아시+ADX+VWAP 주식
+    # ── 신전략 에이전트 (AI29-AI32): reversal 폐기 → 검증된 퀀트 전략
+    ("AI29", 15, 0.007, 0.62, "squeeze",  "coin",  5, "xgb"),   # BB-Keltner 스퀴즈 코인 (TTM Squeeze)
+    ("AI30", 15, 0.007, 0.62, "donchian", "coin",  8, "lgbm"),  # 도치안 채널 돌파 코인 (터틀 트레이딩)
+    ("AI31", 15, 0.006, 0.60, "vwap_vol", "stock", 5, "lgbm"),  # VWAP+주문흐름 주식 (기관 추종)
+    ("AI32", 15, 0.007, 0.62, "multi_tf", "stock", 8, "xgb"),   # 멀티 타임프레임 정렬 주식
 ]
 
 
