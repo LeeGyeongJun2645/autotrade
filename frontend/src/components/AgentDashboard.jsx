@@ -115,7 +115,7 @@ function TradeRow({ t, stockNames = {} }) {
           : <span className="text-gray-700">—</span>}
       </td>
       <td className="px-2 py-1.5 text-gray-500 whitespace-nowrap">
-        {t.traded_at?.slice(11, 16)}
+        {t.traded_at?.replace('T', ' ').slice(5, 16)}
       </td>
     </tr>
   )
@@ -165,7 +165,7 @@ function PosCard({ ticker, pos, isCoin }) {
       </div>
       {/* 매수 시각 */}
       {pos.entered_at && (
-        <div className="text-gray-600 text-right">{pos.entered_at.slice(11, 16)} 매수</div>
+        <div className="text-gray-600 text-right">{pos.entered_at.replace('T', ' ').slice(5, 16)} 매수</div>
       )}
     </div>
   )
@@ -782,7 +782,7 @@ function PositionsOverview({ agents }) {
             <div className="flex flex-wrap gap-1.5">
               {Object.entries(agent.positions).map(([ticker, pos]) => {
                 const pnl = pos.unrealized_pnl_pct ?? 0
-                const entMin = pos.entered_at ? pos.entered_at.slice(11, 16) : ''
+                const entMin = pos.entered_at ? pos.entered_at.replace('T', ' ').slice(5, 16) : ''
                 return (
                   <div key={ticker}
                     className={`flex items-center gap-1 px-2 py-0.5 rounded-full border font-mono text-xs
