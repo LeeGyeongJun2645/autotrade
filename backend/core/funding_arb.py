@@ -233,6 +233,9 @@ class FundingArbManager:
         if not all_rates:
             return []
 
+        # 현물 마켓에 없는 심볼 제외 (선물만 있는 심볼은 현물 매수 불가)
+        spot_symbols = await _bybit.get_spot_symbols()
+
         candidates = []
         for item in all_rates:
             sym   = item["symbol"]
@@ -246,6 +249,8 @@ class FundingArbManager:
                 continue
             if sym in self._positions:
                 continue
+            if spot_symbols and sym not in spot_symbols:
+                continue  # 현물 미상장 심볼 스킵
 
             # 과거 3회 펀딩비 평균 확인 (연속성)
             history = await _bybit.get_funding_rate_history(sym, limit=3)

@@ -21,7 +21,10 @@ _RECV_WINDOW = "5000"
 
 # ── 공개 API 캐시 ──────────────────────────────────────────────────
 _FUNDING_LIST_CACHE: tuple[list[dict], float] | None = None
-_FUNDING_LIST_TTL = 240.0  # 4분 (펀딩비는 8시간 주기지만 예정 펀딩비는 수시 변경)
+_FUNDING_LIST_TTL = 240.0  # 4분
+
+_SPOT_SYMBOLS_CACHE: tuple[set[str], float] | None = None
+_SPOT_SYMBOLS_TTL = 3600.0  # 1시간
 
 
 def _sign(payload: str) -> str:
@@ -104,6 +107,35 @@ async def get_funding_rate_history(symbol: str, limit: int = 3) -> list[dict]:
     except Exception as e:
         logger.warning("[Bybit] 펀딩비 히스토리 조회 실패 %s: %s", symbol, e)
         return []
+
+
+async def get_spot_symbols() -> set[str]:
+    """바이비트 현물 거래 가능 심볼 집합 (캐시 1시간)."""
+    global _SPOT_SYMBOLS_CACHE
+    now = time.time()
+    if _SPOT_SYMBOLS_CACHE and now - _SPOT_SYMBOLS_CACHE[1] < _SPOT_SYMBOLS_TTL:
+        return _SPOT_SYMBOLS_CACHE[0]
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(
+                f"{_BASE}/v5/market/instruments-info",
+                params={"category": "spot", "limit": 1000},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("retCode") != 0:
+                raise ValueError(data.get("retMsg"))
+            symbols = {
+                item["symbol"]
+                for item in data["result"]["list"]
+                if item.get("status") == "Trading"
+            }
+            _SPOT_SYMBOLS_CACHE = (symbols, now)
+            logger.debug("[Bybit] 현물 심볼 %d개 캐시", len(symbols))
+            return symbols
+    except Exception as e:
+        logger.warning("[Bybit] 현물 심볼 목록 조회 실패: %s", e)
+        return _SPOT_SYMBOLS_CACHE[0] if _SPOT_SYMBOLS_CACHE else set()
 
 
 # ── 인증 API — 잔고 ───────────────────────────────────────────────
