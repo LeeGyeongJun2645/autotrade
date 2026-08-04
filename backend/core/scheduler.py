@@ -702,6 +702,17 @@ class TradingScheduler:
             self._daily_retrain,
             CronTrigger(hour=6, minute=7, timezone=KST),
             id="daily_retrain",
+            kwargs={"market_filter": "coin"},
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 주식 에이전트 재학습: 평일 16:10 KST (장 마감 후 _stock_train_cache 충분히 쌓인 시점)
+        self._scheduler.add_job(
+            self._daily_retrain,
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone=KST),
+            id="daily_retrain_stock",
+            kwargs={"market_filter": "stock"},
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -2643,8 +2654,10 @@ class TradingScheduler:
         except Exception:
             logger.exception("[FundingArb] 펀딩비 수취 업데이트 예외")
 
-    async def _daily_retrain(self) -> None:
-        """매일 06:07 KST — 전 에이전트 최신 데이터로 재학습.
+    async def _daily_retrain(self, market_filter: str = "all") -> None:
+        """전 에이전트 재학습.
+
+        market_filter: "all"(기본, 06:07), "coin"(코인 전용), "stock"(16:10 주식 전용)
 
         코인: BTC·ETH·XRP·SOL 4개 순차 시도, 60분봉 700봉 (약 29일치)
         주식: 삼성전자·SK하이닉스·NAVER 3개 순차 시도, 15분봉 500봉 (약 25거래일치)
@@ -2653,7 +2666,7 @@ class TradingScheduler:
         from backend.api import upbit as _upbit, kis as _kis
         from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
 
-        logger.info("[Retrain] 전 에이전트 일일 재학습 시작")
+        logger.info("[Retrain] 일일 재학습 시작 (market_filter=%s)", market_filter)
 
         # ── 학습 데이터 수집 ─────────────────────────────────────
         COIN_TICKERS  = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL"]
@@ -2666,19 +2679,20 @@ class TradingScheduler:
 
         coin_ohlcv: list[dict] = []
         coin_ohlcv_ticker: str = ""
-        for ticker in COIN_TICKERS:
-            try:
-                coin_ohlcv = await _upbit.get_ohlcv(ticker, interval="minutes/60", count=700)
-                if len(coin_ohlcv) >= 200:
-                    coin_ohlcv_ticker = ticker
-                    logger.info("[Retrain] 코인 학습 데이터: %s (%d봉, 60분봉)", ticker, len(coin_ohlcv))
-                    break
-            except Exception as e:
-                logger.warning("[Retrain] 코인 OHLCV 수집 실패 (%s): %s", ticker, e)
-                continue
+        if market_filter != "stock":
+            for ticker in COIN_TICKERS:
+                try:
+                    coin_ohlcv = await _upbit.get_ohlcv(ticker, interval="minutes/60", count=700)
+                    if len(coin_ohlcv) >= 200:
+                        coin_ohlcv_ticker = ticker
+                        logger.info("[Retrain] 코인 학습 데이터: %s (%d봉, 60분봉)", ticker, len(coin_ohlcv))
+                        break
+                except Exception as e:
+                    logger.warning("[Retrain] 코인 OHLCV 수집 실패 (%s): %s", ticker, e)
+                    continue
 
-        if not coin_ohlcv:
-            logger.error("[Retrain] 코인 학습 데이터 수집 전부 실패 — 코인 에이전트 재학습 건너뜀")
+            if not coin_ohlcv:
+                logger.error("[Retrain] 코인 학습 데이터 수집 전부 실패 — 코인 에이전트 재학습 건너뜀")
 
         # 15분봉 코인 에이전트 전용 학습 데이터 (AI01/04/08/10 등 interval_min=15)
         coin_ohlcv_15m: list[dict] = []
@@ -2686,7 +2700,7 @@ class TradingScheduler:
         _has_15m_coin_agent = any(
             a.interval_min == 15 and a.market == "coin" for a in AGENTS.values()
         )
-        if _has_15m_coin_agent:
+        if _has_15m_coin_agent and market_filter != "stock":
             for ticker in COIN_TICKERS:
                 try:
                     coin_ohlcv_15m = await _upbit.get_ohlcv(ticker, interval="minutes/15", count=2000)
@@ -2700,7 +2714,8 @@ class TradingScheduler:
         # 주식 학습 데이터 수집 (interval_min → {symbol → ohlcv} 인터벌별 분리)
         # AI28(60분봉) 같은 에이전트가 15분봉 데이터로 잘못 학습되는 것을 방지
         _stock_retrain_by_iv: dict[int, dict[str, list[dict]]] = {}  # {interval_min: {sym: ohlcv}}
-        for _k, _v in self._stock_train_cache.items():
+        _stock_cache_items = {} if market_filter == "coin" else self._stock_train_cache
+        for _k, _v in _stock_cache_items.items():
             _parts = _k.rsplit(":", 1)
             if len(_parts) == 2:
                 _sym_k, _iv_str = _parts
@@ -2715,7 +2730,7 @@ class TradingScheduler:
         if _stock_retrain_by_iv:
             logger.info("[Retrain] 주식 학습 데이터(틱캐시): %s종목",
                         {iv: len(m) for iv, m in _stock_retrain_by_iv.items()})
-        else:
+        elif market_filter != "coin":
             # 2순위: 캐시 없으면(재시작 직후) 대표 종목 API 직접 조회, 최대 3회 재시도
             # count=500, 3종목만: 정상 자동재학습은 캐시 사용이라 이 경로는 재시작 직후만 해당
             for symbol in STOCK_SYMBOLS[:3]:
@@ -2873,6 +2888,11 @@ class TradingScheduler:
         # ── 에이전트별 재학습 (AI01-AI28 + ENSEMBLE_COIN/ENSEMBLE_STOCK) ───
         success = 0
         for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
+            # market_filter: "coin" → 코인만, "stock" → 주식만, "all" → 전체
+            if market_filter == "coin" and agent.market != "coin":
+                continue
+            if market_filter == "stock" and agent.market != "stock":
+                continue
             fr = coin_funding if agent.market == "coin" else None
             # 15분봉 코인 에이전트는 15분봉 BTC 상관관계 데이터 사용 (봉 단위 일치)
             if agent.market == "coin":
@@ -2926,7 +2946,13 @@ class TradingScheduler:
             except Exception:
                 logger.exception("[Retrain][%s] 재학습 중 예외", agent.agent_id)
 
-        _total_agents = len(AGENTS) + len(ENSEMBLE_AGENTS)
+        _all = list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values())
+        _total_agents = sum(
+            1 for a in _all
+            if (market_filter == "all"
+                or (market_filter == "coin" and a.market == "coin")
+                or (market_filter == "stock" and a.market == "stock"))
+        )
         logger.info("[Retrain] 완료: %d/%d 에이전트 재학습", success, _total_agents)
 
         # ── MFE/MAE 기반 동적 TP 배수 갱신 (R비율 분석) ─────────────────────
@@ -2958,8 +2984,9 @@ class TradingScheduler:
                     logger.debug("[Retrain] %s Meta 학습 실패: %s", agent.agent_id, _me)
 
         try:
+            _mf_label = {"coin": "코인", "stock": "주식", "all": "전체"}.get(market_filter, market_filter)
             await telegram.notify_message(
-                f"🔄 <b>AI 일일 재학습 완료</b>\n"
+                f"🔄 <b>AI 재학습 완료 ({_mf_label})</b>\n"
                 f"성공: {success}/{_total_agents} 에이전트\n"
                 f"Meta-Labeling: {meta_success}개 학습\n"
                 f"코인 데이터: {len(coin_ohlcv)}봉 | 주식 데이터: {len(stock_ohlcv_pool)}종목\n"

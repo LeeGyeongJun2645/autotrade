@@ -688,6 +688,40 @@ class SimAgent:
                         break
                     if p <= sl:
                         break  # 손절 터치 → 0 유지
+
+            # 하락장 레이블 편향 폴백: 양성 < 3% → TP배수 완화하여 재레이블링
+            _min_pos = max(5, len(raw_labels) // 30)
+            if int(np.sum(raw_labels)) < _min_pos:
+                _tp_mult_r = max(1.5, self._dynamic_tp_mult * 0.55)
+                raw_labels2 = np.zeros(len(close), dtype=int)
+                for i in range(len(close) - LOOKAHEAD):
+                    entry = close.iloc[i]
+                    if (_atr_series is not None
+                            and pd.notna(_atr_series.iloc[i])
+                            and float(_atr_series.iloc[i]) > 0):
+                        _atr = float(_atr_series.iloc[i])
+                        tp_pct = max(min(_atr * _tp_mult_r, 0.05), self.label_threshold * 0.6)
+                        sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
+                    else:
+                        tp_pct = self.label_threshold * 0.6
+                        sl_pct = self.label_threshold * 0.5
+                    tp, sl = entry * (1 + tp_pct), entry * (1 - sl_pct)
+                    for j in range(1, LOOKAHEAD + 1):
+                        p = close.iloc[i + j]
+                        if p >= tp:
+                            raw_labels2[i] = 1
+                            break
+                        if p <= sl:
+                            break
+                _new_pos = int(np.sum(raw_labels2))
+                if _new_pos >= _min_pos:
+                    logger.info(
+                        "[%s] 하락장 완화 레이블: %d→%d 양성 (TP×%.2f→×%.2f)",
+                        self.agent_id, int(np.sum(raw_labels)), _new_pos,
+                        self._dynamic_tp_mult, _tp_mult_r,
+                    )
+                    raw_labels = raw_labels2
+
             label = pd.Series(raw_labels, index=range(len(close)))
 
             # ATR 기반 변동성 필터 (lookahead 없음: 미래 수익률 대신 현재 ATR 사용)
