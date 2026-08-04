@@ -596,11 +596,11 @@ def compute_features(
             _e9  = trend.EMAIndicator(_df15["close"], window=9).ema_indicator()
             _e21 = trend.EMAIndicator(_df15["close"], window=21).ema_indicator()
             _mtf = (_e9 > _e21).astype(float)
-            df["mtf_ema_bull"] = _mtf.reindex(df.index, method="ffill").fillna(0.5)
+            df["mtf_ema_bull"] = _mtf.reindex(df.index, method="ffill").fillna(0.0)
         else:
-            df["mtf_ema_bull"] = 0.5
+            df["mtf_ema_bull"] = 0.0
     except Exception:
-        df["mtf_ema_bull"] = 0.5
+        df["mtf_ema_bull"] = 0.0
 
     # ── MTF 1시간봉 상위 추세 (5분봉 리샘플 → EMA 크로스, 더 높은 타임프레임 필터) ──
     try:
@@ -774,9 +774,9 @@ def compute_features(
         df["ichi_cloud_green"]       = (_span_a > _span_b).astype(float)
         df["ichi_tenkan_kijun_bull"] = (_tenkan > _kijun).astype(float)
     except Exception:
-        df["ichi_above_cloud"]       = 0.5
-        df["ichi_cloud_green"]       = 0.5
-        df["ichi_tenkan_kijun_bull"] = 0.5
+        df["ichi_above_cloud"]       = 0.0
+        df["ichi_cloud_green"]       = 0.0
+        df["ichi_tenkan_kijun_bull"] = 0.0
 
     # ── Order Flow Imbalance Proxy (논문: Sharpe 1.4→3.6 개선) ────────
     # OHLCV에서 방향성 볼륨 추정: 양봉=매수압력, 음봉=매도압력
@@ -1110,7 +1110,7 @@ def compute_features(
         )
         df["crsi"] = (_rsi3 + _streak_rsi + _roc_pct) / 3
     except Exception:
-        df["crsi"] = df["rsi_9"]
+        df["crsi"] = 50.0
 
     # ── Donchian Channel (20봉) — 거북이 트레이딩 돌파 신호 ───────────────
     try:

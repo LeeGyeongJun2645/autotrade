@@ -679,6 +679,15 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # 백테스트 일일 리포트: 매일 08:00 KST (텔레그램 발송)
+        self._scheduler.add_job(
+            self._daily_report,
+            CronTrigger(hour=8, minute=0, timezone=KST),
+            id="daily_report",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         # 코인 일일 현황 레포트: 매일 06:00 KST
         self._scheduler.add_job(
             self._send_daily_coin_report,
@@ -783,9 +792,10 @@ class TradingScheduler:
             self._kis_symbols,
             self._upbit_tickers,
         )
-        # 시작 직후 즉시 모멘텀 종목 갱신 (첫 30분 cron 전에 적용)
+        # 시작 직후 즉시 갱신 (첫 cron 전에 초기값 0.0 방지)
         import asyncio as _asyncio
         _asyncio.create_task(self._refresh_momentum_tickers())
+        _asyncio.create_task(_refresh_market_context())  # Fear&Greed, BTC 도미넌스 즉시 초기화
 
     def stop(self) -> None:
         """스케줄러 중지. FastAPI lifespan shutdown 에서 호출."""
@@ -1383,6 +1393,12 @@ class TradingScheduler:
 
                 if amount_krw < 5_000:
                     logger.warning("[Upbit][%s] 매수 불가: 잔액 부족 (%.0f원)", ticker, krw)
+                    return
+
+                # 실매매도 validate_order로 유효성 검사 (KIS와 동일 기준)
+                ok, reason = RiskManager.validate_order(krw, current_price, amount_krw / max(current_price, 1))
+                if not ok:
+                    logger.warning("[Upbit][%s] 매수 불가: %s", ticker, reason)
                     return
 
                 await upbit.place_buy_order(ticker, amount_krw)
@@ -2356,9 +2372,11 @@ class TradingScheduler:
             # 3연속 손실 → 매수 차단 후 재학습 예약 (다음 주기에 자동 처리)
             if agent.needs_retrain:
                 sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 5연속손실 — 매수 보류", "INFO")
+                _PENDING_BUYS.discard((agent.agent_id, symbol))
                 return
             # 동적 블랙리스트: WR<35% + 20건 이상인 종목 진입 차단 (반복 손실 종목 자동 제외)
             if symbol in agent._ticker_blacklist:
+                _PENDING_BUYS.discard((agent.agent_id, symbol))
                 return
             # 일일 BUY 제한: WR 기반 자동 조정 (30건 미만 시 기본값 고정)
             # EV음수(WR<48%) 구간에서는 거래 수 억제, BEP 돌파 시 자동 확대
@@ -2390,6 +2408,7 @@ class TradingScheduler:
                 else:
                     _daily_limit = 12
             if agent._today_buy_count >= _daily_limit:
+                _PENDING_BUYS.discard((agent.agent_id, symbol))
                 return
             # 동일 코인 중복 매수 제한: 이미 다른 에이전트가 보유 중이거나 BUY 진행 중이면 신규 진입 차단
             # asyncio 동시 실행 시 _positions만으로는 동시 진입 막지 못함 → _PENDING_BUYS도 포함
@@ -2414,10 +2433,12 @@ class TradingScheduler:
             # 실전 데이터: ADX 15-18 추세 에이전트 WR=45.8% avg=-0.038%
             if agent.market == "coin" and agent.feature_set != "reversal" and 0 < agent._last_adx_14 < 18:
                 sim_log.push(agent.agent_id, f"[ADX차단] {symbol} ADX={agent._last_adx_14:.1f}<18 횡보장", "INFO")
+                _PENDING_BUYS.discard((agent.agent_id, symbol))
                 return
             # KOSPI MIM: 개장 30분 하락 방향 시 주식 당일 BUY 억제 (MDPI Finance 검증 전략)
             if agent.market == "stock" and self._morning_direction == -1:
                 sim_log.push(agent.agent_id, f"[MIM차단] {symbol} KOSPI 개장 하락 → 당일 BUY 보류", "INFO")
+                _PENDING_BUYS.discard((agent.agent_id, symbol))
                 return
             # 외국인 수급: 외국인 500주+ 순매도 종목 BUY 차단 (주식 전용, 5분 TTL 캐시)
             if agent.market == "stock":
@@ -2560,6 +2581,10 @@ class TradingScheduler:
             if agent._last_retrain_date != today:
                 agent._daily_retrain_count = 0
                 agent._last_retrain_date = today
+            if agent._daily_retrain_count >= 3:
+                logger.info("[비상재학습] %s 오늘 3회 초과 — 스킵", agent.agent_id)
+                agent.needs_retrain = False
+                return
             agent._daily_retrain_count += 1
             logger.info("[비상재학습] %s 시작 (오늘 %d회차)", agent.agent_id, agent._daily_retrain_count)
 
@@ -2568,25 +2593,31 @@ class TradingScheduler:
                     try:
                         _ohlcv = await _upbit.get_ohlcv(_t, interval=agent.interval_str, count=700)
                         if len(_ohlcv) >= 200:
-                            async with agent._train_lock:  # daily_retrain과 race condition 방지
+                            async with agent._train_lock:
                                 ok = await asyncio.to_thread(agent.train, _ohlcv)
                             if ok:
+                                agent.needs_retrain = False
                                 logger.info("[비상재학습] %s 코인 모델 갱신 완료 (%s)", agent.agent_id, _t)
                             return
                     except Exception:
                         continue
             else:
-                for _sym in ["005930", "000660"]:
+                # 주식 비상재학습: train_multi()로 복수 종목 기반 학습 (단일 종목 train()은 피처 불일치 위험)
+                _stock_syms = ["005930", "000660", "035420"]
+                _stock_data: dict[str, list[dict]] = {}
+                for _sym in _stock_syms:
                     try:
                         _ohlcv = await _kis.get_minute_ohlcv(_sym, agent.interval_min, count=500)
-                        if len(_ohlcv) >= 100:
-                            async with agent._train_lock:  # daily_retrain과 race condition 방지
-                                ok = await asyncio.to_thread(agent.train, _ohlcv)
-                            if ok:
-                                logger.info("[비상재학습] %s 주식 모델 갱신 완료 (%s)", agent.agent_id, _sym)
-                            return
+                        if len(_ohlcv) >= 50:
+                            _stock_data[_sym] = _ohlcv
                     except Exception:
                         continue
+                if _stock_data:
+                    async with agent._train_lock:
+                        ok = await asyncio.to_thread(agent.train_multi, _stock_data)
+                    if ok:
+                        agent.needs_retrain = False
+                        logger.info("[비상재학습] %s 주식 모델 갱신 완료 (%d종목)", agent.agent_id, len(_stock_data))
         except Exception as e:
             logger.warning("[비상재학습] %s 실패: %s", agent.agent_id, e)
 
@@ -2629,10 +2660,12 @@ class TradingScheduler:
         STOCK_SYMBOLS = list(self._kis_symbols) if self._kis_symbols else _RETRAIN_STOCK_FALLBACK
 
         coin_ohlcv: list[dict] = []
+        coin_ohlcv_ticker: str = ""
         for ticker in COIN_TICKERS:
             try:
                 coin_ohlcv = await _upbit.get_ohlcv(ticker, interval="minutes/60", count=700)
                 if len(coin_ohlcv) >= 200:
+                    coin_ohlcv_ticker = ticker
                     logger.info("[Retrain] 코인 학습 데이터: %s (%d봉, 60분봉)", ticker, len(coin_ohlcv))
                     break
             except Exception as e:
@@ -2644,6 +2677,7 @@ class TradingScheduler:
 
         # 15분봉 코인 에이전트 전용 학습 데이터 (AI01/04/08/10 등 interval_min=15)
         coin_ohlcv_15m: list[dict] = []
+        coin_ohlcv_15m_ticker: str = ""
         _has_15m_coin_agent = any(
             a.interval_min == 15 and a.market == "coin" for a in AGENTS.values()
         )
@@ -2652,6 +2686,7 @@ class TradingScheduler:
                 try:
                     coin_ohlcv_15m = await _upbit.get_ohlcv(ticker, interval="minutes/15", count=2000)
                     if len(coin_ohlcv_15m) >= 200:
+                        coin_ohlcv_15m_ticker = ticker
                         logger.info("[Retrain] 코인 학습 데이터(15분봉): %s (%d봉)", ticker, len(coin_ohlcv_15m))
                         break
                 except Exception as e:
@@ -2868,12 +2903,15 @@ class TradingScheduler:
                         # 15분봉 코인 에이전트는 15분봉 데이터로 학습 (봉 단위 일치)
                         data = (coin_ohlcv_15m if agent.interval_min == 15 and coin_ohlcv_15m
                                 else coin_ohlcv)
+                        _train_ticker = (coin_ohlcv_15m_ticker if agent.interval_min == 15 and coin_ohlcv_15m
+                                         else coin_ohlcv_ticker)
                         if not data:
                             logger.warning("[Retrain][%s] 코인 학습 데이터 없음, 스킵", agent.agent_id)
                             continue
                         _ls_ref = btc_ls_train if btc_ls_train else None
                         trained = await asyncio.to_thread(
-                            agent.train, data, fr, _btc_ref, None, _oi_ref, _taker_ref, _trade_res, _ls_ref
+                            agent.train, data, fr, _btc_ref, None, _oi_ref, _taker_ref, _trade_res, _ls_ref,
+                            ticker=_train_ticker,
                         )
                 if trained:
                     success += 1

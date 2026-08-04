@@ -604,6 +604,7 @@ class SimAgent:
         taker_hist: list[dict] | None = None,
         trade_results: list[dict] | None = None,
         ls_hist: list[dict] | None = None,
+        ticker: str = "",
     ) -> bool:
         """분봉 OHLCV로 전용 모델 학습."""
         try:
@@ -616,6 +617,7 @@ class SimAgent:
                 oi_hist=oi_hist,
                 taker_hist=taker_hist,
                 ls_hist=_ls,
+                ticker=ticker,  # news_score 피처가 학습 데이터에 실제값으로 포함되도록
                 interval_min=self.interval_min,
             )
             # ATR을 피처 필터링 전에 미리 추출 — 레이블 생성 시 실제 손익 기준과 정합하기 위해
@@ -670,7 +672,7 @@ class SimAgent:
                 # TP 2.0→2.5: 실행 TP 변경에 맞춰 학습 레이블 상향 (수익률 우선 전략)
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr = float(_atr_series.iloc[i])
-                    tp_pct = max(min(_atr * 3.0, 0.08), self.label_threshold)  # 상한 0.08 (train_multi와 통일)
+                    tp_pct = max(min(_atr * self._dynamic_tp_mult, 0.08), self.label_threshold)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
@@ -981,8 +983,7 @@ class SimAgent:
                 entry = close.iloc[i]
                 if _atr_series is not None and pd.notna(_atr_series.iloc[i]) and float(_atr_series.iloc[i]) > 0:
                     _atr   = float(_atr_series.iloc[i])
-                    # ATR×3.0: TP 목표를 실행 시 ATR×3.0과 일치 (학습-실행 불일치 수정)
-                    tp_pct = max(min(_atr * 3.0, 0.08), self.label_threshold)
+                    tp_pct = max(min(_atr * self._dynamic_tp_mult, 0.08), self.label_threshold)
                     sl_pct = max(min(_atr * 1.5, 0.05), self.label_threshold * 0.5)
                 else:
                     tp_pct = self.label_threshold
