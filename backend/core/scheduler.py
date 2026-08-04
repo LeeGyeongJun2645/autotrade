@@ -2072,6 +2072,10 @@ class TradingScheduler:
 
     async def _agent_execute(self, db, agent, symbol: str, signal: str, prob: float, price: float) -> None:
         """에이전트 단일 종목 가상 매수/매도 실행 + DB 기록."""
+        # ── 사후추적 갱신: 청산 후 최대 1시간 동안 해당 종목 가격 추적 ──
+        if price > 0 and symbol in agent._post_sell_tracker:
+            agent.update_post_sell_tracking(symbol, price)
+
         # ── ATR 기반 동적 손익 ────────────────────────────────────────
         # ATR이 유효하면(>0.1%) 시장 변동성에 자동 적응, 없으면 고정값 폴백
         atr_pct = agent._last_atr_pct
@@ -2159,12 +2163,13 @@ class TradingScheduler:
                         sim_log.push(agent.agent_id, f"[알파소멸손절] {symbol} {unreal*100:.1f}% 240분 손실 추가방치 차단 @ {price:,.0f}원", "SELL")
                     take_profit = max(tp_base * 0.75, sl_abs * 1.3)
 
-                # ── 부분 청산 Scale-out: ATR×2.0 도달 시 30% 선익절 (1.5→2.0, 40%→30%: 더 많은 상승 포착)
+                # ── 부분 청산 Scale-out: ATR×2.0 도달 시 50% 선익절
+                # 30% → 50%: 작은 수익에서 더 많이 확정 (avgWin < avgLoss 개선)
                 _partial_target = agent._partial_tp_price.get(symbol, 0)
                 if (_partial_target > 0
                         and price >= _partial_target
                         and symbol not in agent._partial_tp_done):
-                    _ptrade = agent.virtual_partial_sell(symbol, price, 0.30)
+                    _ptrade = agent.virtual_partial_sell(symbol, price, 0.50)
                     if _ptrade:
                         await db.execute(
                             "INSERT INTO agent_trades (agent_id, ticker, action, price, qty,"
@@ -2185,7 +2190,7 @@ class TradingScheduler:
                                  _rem_pos.qty, _rem_pos.entered_at),
                             )
                         sim_log.push(agent.agent_id,
-                            f"[부분청산30%] {symbol} @ {price:,.0f}원 +{(_ptrade.profit_rate or 0)*100:.1f}%",
+                            f"[부분청산50%] {symbol} @ {price:,.0f}원 +{(_ptrade.profit_rate or 0)*100:.1f}%",
                             "BUY")
 
                 # 트레일링 스탑: TP의 65% 도달 시 최고점 추적 전환 (수익 충분히 확보 후 전환)

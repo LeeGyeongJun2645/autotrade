@@ -389,6 +389,9 @@ class SimAgent:
         self._buy_prob_cache: dict[str, tuple] = {}   # BUY 시점 (prob, adx, vol_ratio) → SELL 기록 저장용
         self._loss_patterns: dict[tuple, int] = {}    # (wrong_signal_조합) → 손실 횟수
         self._loss_analysis_log: list[dict] = []      # 최근 30건 손실 분석 결과
+        # ── 사후추적: 청산 후 최대 1시간 동안 해당 종목 가격 추적 ─────────
+        # 목적: "더 올랐을까?" 분석 → _dynamic_tp_mult 자동 보정
+        self._post_sell_tracker: dict[str, dict] = {}  # {ticker: {sell_price, sell_time_ts, peak_after, direction}}
 
     # ── 프로퍼티 ────────────────────────────────────────────────
 
@@ -1952,6 +1955,15 @@ class SimAgent:
         self._partial_tp_price.pop(ticker, None)
         self._partial_tp_done.discard(ticker)
         self._buy_context.pop(ticker, None)  # 수익/손실 불문 매도 시 컨텍스트 정리 (메모리 누수 방지)
+        # 사후추적 등록: 청산 후 최대 1시간 동안 가격 추적 → _dynamic_tp_mult 자동 보정
+        import time as _time
+        self._post_sell_tracker[ticker] = {
+            "sell_price": price,
+            "sell_time_ts": _time.time(),
+            "peak_after": price,
+            "trough_after": price,
+            "profit_rate": profit_rate,
+        }
         now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         trade = AgentTrade(self.agent_id, ticker, "SELL", price, pos.qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
         self._push_recent(trade)
@@ -1960,6 +1972,41 @@ class SimAgent:
     def record_buy_context(self, symbol: str) -> None:
         """매수 시 신호 스냅샷 저장 (이후 손실 발생 시 소급 분석용)."""
         self._buy_context[symbol] = dict(self._last_signal_snapshot)
+
+    def update_post_sell_tracking(self, ticker: str, current_price: float) -> None:
+        """사후추적: 청산 후 최대 1시간 동안 가격 추적하여 _dynamic_tp_mult 자동 보정.
+
+        청산 후 현재가가 더 오르면 TP를 더 넓게 잡아야 한다는 신호.
+        1시간 경과 후 분석 완료 → tracker에서 제거.
+        """
+        import time as _time
+        info = self._post_sell_tracker.get(ticker)
+        if not info:
+            return
+        info["peak_after"] = max(info["peak_after"], current_price)
+        info["trough_after"] = min(info["trough_after"], current_price)
+
+        elapsed = _time.time() - info["sell_time_ts"]
+        if elapsed < 3600:  # 1시간 미경과 → 계속 추적
+            return
+
+        # 1시간 경과 → 사후분석 수행
+        sell_price = info["sell_price"]
+        if sell_price <= 0:
+            self._post_sell_tracker.pop(ticker, None)
+            return
+
+        missed_gain = (info["peak_after"] - sell_price) / sell_price
+        profit_rate = info.get("profit_rate", 0.0)
+
+        if missed_gain > 0.005 and profit_rate >= 0:
+            # 팔고 나서 0.5% 이상 더 올랐음 → TP 배수 상향
+            self._dynamic_tp_mult = min(3.5, self._dynamic_tp_mult + 0.1)
+        elif missed_gain < 0.002 and profit_rate < 0:
+            # 팔고 나서 거의 안 올랐고 손절이었음 → TP 배수 하향 (더 빨리 팔아야)
+            self._dynamic_tp_mult = max(2.5, self._dynamic_tp_mult - 0.05)
+
+        self._post_sell_tracker.pop(ticker, None)
 
     def analyze_loss(self, symbol: str, profit_rate: float, held_min: float) -> dict:
         """손실 거래 소급 분석: 매수 당시 어떤 신호/전략이 실패했는지 판단.

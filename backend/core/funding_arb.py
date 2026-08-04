@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
 # ── 전략 파라미터 ────────────────────────────────────────────────
-ARB_MIN_APR       = 0.20   # 진입: 연환산 펀딩비 최소 20%
-ARB_EXIT_APR      = 0.05   # 청산: 연환산 펀딩비 5% 미만
+ARB_MIN_APR       = 0.10   # 진입: 연환산 펀딩비 최소 10% (완화: AVAX/ARB 등 메이저코인 포함)
+ARB_EXIT_APR      = 0.03   # 청산: 연환산 펀딩비 3% 미만
 ARB_STOP_LOSS     = 0.03   # 강제청산: 포지션 손실 -3%
 ARB_MAX_HOLD_HRS  = 168    # 최대 보유시간 (7일)
 MAX_POSITIONS     = 3      # 동시 최대 포지션 수
@@ -41,7 +41,7 @@ FUNDING_PER_YEAR  = 3 * 365  # 8시간 주기 × 연365일 = 1095회
 INITIAL_CAPITAL_USDT = MAX_POSITIONS * POSITION_USDT  # 150 USDT
 
 # 거래 가능한 최소 유동성 (일 거래대금 기준, USDT)
-MIN_VOLUME_USDT = 5_000_000
+MIN_VOLUME_USDT = 1_000_000  # 완화: 5M → 1M (현물 상장 알트코인 대부분 포함)
 
 
 @dataclass
