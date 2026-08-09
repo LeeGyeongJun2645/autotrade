@@ -785,11 +785,12 @@ class TradingScheduler:
         # 펀딩비 지급 시점(UTC 0/8/16시)에 수취 업데이트
         self._scheduler.add_job(
             self._funding_arb_collect,
-            CronTrigger(hour="0,8,16", minute=1, timezone="UTC"),
+            CronTrigger(hour="0,4,8,12,16,20", minute=1, timezone="UTC"),
             id="funding_arb_collect",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
+            misfire_grace_time=3600,  # 서버 재시작 후 최대 1시간 내 실행
         )
         # 기본 코인 임시 등록 (첫 모멘텀 갱신 전까지 실매매 가능하도록)
         _default_coins = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE",

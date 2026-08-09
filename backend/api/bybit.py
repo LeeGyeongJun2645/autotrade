@@ -76,11 +76,12 @@ async def get_all_funding_rates() -> list[dict]:
                 raise ValueError(data.get("retMsg", "unknown"))
             result = [
                 {
-                    "symbol":          item["symbol"],
-                    "fundingRate":     float(item.get("fundingRate") or 0),
-                    "nextFundingTime": int(item.get("nextFundingTime") or 0),
-                    "lastPrice":       float(item.get("lastPrice") or 0),
-                    "turnover24h":     float(item.get("turnover24h") or 0),  # 24h USDT 거래대금
+                    "symbol":              item["symbol"],
+                    "fundingRate":         float(item.get("fundingRate") or 0),
+                    "nextFundingTime":     int(item.get("nextFundingTime") or 0),
+                    "lastPrice":           float(item.get("lastPrice") or 0),
+                    "turnover24h":         float(item.get("turnover24h") or 0),
+                    "fundingIntervalHour": int(item.get("fundingIntervalHour") or 8),
                 }
                 for item in data["result"]["list"]
                 if item.get("symbol", "").endswith("USDT")

@@ -35,7 +35,7 @@ ARB_STOP_LOSS     = 0.03   # 강제청산: 포지션 손실 -3%
 ARB_MAX_HOLD_HRS  = 168    # 최대 보유시간 (7일)
 MAX_POSITIONS     = 3      # 동시 최대 포지션 수
 POSITION_USDT     = 50.0   # 포지션당 투자금액 (USDT)
-FUNDING_PER_YEAR  = 3 * 365  # 8시간 주기 × 연365일 = 1095회
+FUNDING_PER_YEAR  = 3 * 365  # 기본 8시간 주기 × 연365일 = 1095회 (4h코인은 동적 계산)
 
 # 가상 포트폴리오 초기 자본 (USDT)
 INITIAL_CAPITAL_USDT = MAX_POSITIONS * POSITION_USDT  # 150 USDT
@@ -130,7 +130,9 @@ class FundingArbManager:
             for sym, pos in self._positions.items():
                 info    = rate_map.get(sym, {})
                 fr      = float(info.get("fundingRate") or 0)
-                apr     = fr * FUNDING_PER_YEAR
+                _ivh    = int(info.get("fundingIntervalHour") or 8)
+                _fpy    = int(24 / _ivh * 365)   # 연간 펀딩 횟수 (4h→2190, 8h→1095)
+                apr     = fr * _fpy
                 price   = float(info.get("lastPrice") or pos.entry_price)
                 pnl     = pos.pnl_rate(price)
                 reason  = None
@@ -156,14 +158,16 @@ class FundingArbManager:
         rate_map  = {r["symbol"]: r for r in all_rates}
         async with self._lock:
             for sym, pos in self._positions.items():
-                fr    = float(rate_map.get(sym, {}).get("fundingRate") or 0)
+                info   = rate_map.get(sym, {})
+                fr     = float(info.get("fundingRate") or 0)
+                _ivh   = int(info.get("fundingIntervalHour") or 8)
+                _fpy   = int(24 / _ivh * 365)
                 earned = fr * pos.fut_qty * pos.entry_price  # 숏 포지션 수취
                 pos.collected_fr += earned
-                if abs(earned) > 0.001:
-                    logger.info(
-                        "[FundingArb] %s 펀딩비 수취 %.4f USDT (누적 %.4f USDT, 연%.1f%%)",
-                        sym, earned, pos.collected_fr, fr * FUNDING_PER_YEAR * 100,
-                    )
+                logger.info(
+                    "[FundingArb] %s 펀딩비 수취 %.6f USDT (누적 %.4f USDT, 연%.2f%%, %dh주기)",
+                    sym, earned, pos.collected_fr, fr * _fpy * 100, _ivh,
+                )
 
     def status(self) -> list[dict]:
         """현재 포지션 상태 딕셔너리 리스트."""
@@ -244,7 +248,9 @@ class FundingArbManager:
             volume = float(item.get("turnover24h") or 0)  # 24시간 USDT 거래대금
             if price <= 0:
                 continue
-            apr = fr * FUNDING_PER_YEAR
+            _ivh  = int(item.get("fundingIntervalHour") or 8)
+            _fpy  = int(24 / _ivh * 365)   # 4h→2190, 8h→1095
+            apr = fr * _fpy
 
             if apr < ARB_MIN_APR:
                 continue
@@ -260,7 +266,7 @@ class FundingArbManager:
             if len(history) < 2:
                 continue
             avg_fr = sum(float(h.get("fundingRate") or 0) for h in history) / len(history)
-            if avg_fr * FUNDING_PER_YEAR < ARB_MIN_APR * 0.7:  # 과거 평균이 임계값 70% 미만이면 제외
+            if avg_fr * _fpy < ARB_MIN_APR * 0.7:  # 과거 평균이 임계값 70% 미만이면 제외
                 continue
 
             candidates.append((sym, apr, price))
