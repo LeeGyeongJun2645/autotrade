@@ -99,7 +99,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     _missing = [a.agent_id for a in AGENTS.values() if not a.load_model()]
     if _missing:
         logger.warning("[Startup] 모델 없는 에이전트 %d개: %s → 즉시 재학습 시작", len(_missing), _missing)
-        asyncio.create_task(scheduler._daily_retrain())
+        _retrain_task = asyncio.create_task(scheduler._daily_retrain(market_filter="coin"))
+        _retrain_task.add_done_callback(
+            lambda t: logger.error("[Startup] 재학습 태스크 예외: %s", t.exception()) if t.exception() else None
+        )
     yield
     scheduler.stop()
     await telegram.notify_server_stop()
@@ -525,7 +528,8 @@ async def trigger_agent_retrain():
     백그라운드 비동기 실행 — 즉시 응답 후 서버 로그에서 진행상황 확인 가능.
     """
     import asyncio
-    asyncio.create_task(scheduler._daily_retrain())
+    _t = asyncio.create_task(scheduler._daily_retrain())
+    _t.add_done_callback(lambda t: logger.error("[Retrain] 예외: %s", t.exception()) if t.exception() else None)
     return {"status": "started", "message": "에이전트 재학습 시작됨 (백그라운드 실행, 수 분 소요)"}
 
 
@@ -669,7 +673,8 @@ async def reset_agents(retrain: bool = Query(default=False)):
             await db.commit()
 
         if retrain:
-            asyncio.create_task(scheduler._daily_retrain())
+            _rt = asyncio.create_task(scheduler._daily_retrain())
+            _rt.add_done_callback(lambda t: logger.error("[Reset] 재학습 예외: %s", t.exception()) if t.exception() else None)
             msg = "에이전트 리셋 완료 + 재학습 시작됨"
         else:
             msg = "에이전트 리셋 완료 (재학습은 /agents/retrain 별도 호출)"

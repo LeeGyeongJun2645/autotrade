@@ -611,11 +611,11 @@ def compute_features(
             _e9h  = trend.EMAIndicator(_df1h["close"], window=9).ema_indicator()
             _e21h = trend.EMAIndicator(_df1h["close"], window=21).ema_indicator()
             _mtf1h = (_e9h > _e21h).astype(float)
-            df["mtf_1h_ema_bull"] = _mtf1h.reindex(df.index, method="ffill").fillna(0.5)
+            df["mtf_1h_ema_bull"] = _mtf1h.reindex(df.index, method="ffill").fillna(0.0)
         else:
-            df["mtf_1h_ema_bull"] = 0.5
+            df["mtf_1h_ema_bull"] = 0.0
     except Exception:
-        df["mtf_1h_ema_bull"] = 0.5
+        df["mtf_1h_ema_bull"] = 0.0
 
     # ── 펀딩비 (코인: 8시간 주기 forward-fill, 주식: 항상 0) ─────────
     if funding_rates:
@@ -874,8 +874,8 @@ def compute_features(
 
             df["orb_position"] = ((close - _orb_l) / _orb_range).clip(0, 2).fillna(0.5)
             df["orb_breakout"] = 0.0
-            df.loc[close > _orb_h.fillna(0), "orb_breakout"] = 1.0
-            df.loc[(close < _orb_l.fillna(float("inf"))) & _orb_l.notna(), "orb_breakout"] = -1.0
+            df.loc[_orb_h.notna() & (close > _orb_h), "orb_breakout"] = 1.0
+            df.loc[_orb_l.notna() & (close < _orb_l), "orb_breakout"] = -1.0
             df["orb_high_pct"] = (close / _orb_h.replace(0, np.nan) - 1).fillna(0.0)
             # ORB 거래량 확인: 상단 돌파 + 거래량 1.5배 이상 (연구 기준 150%+, 기존 200%는 과도)
             df["orb_vol_confirm"] = (

@@ -81,7 +81,7 @@ async def get_all_funding_rates() -> list[dict]:
                     "nextFundingTime":     int(item.get("nextFundingTime") or 0),
                     "lastPrice":           float(item.get("lastPrice") or 0),
                     "turnover24h":         float(item.get("turnover24h") or 0),
-                    "fundingIntervalHour": int(item.get("fundingIntervalHour") or 8),
+                    "fundingIntervalHour": int(item.get("fundingIntervalHours") or item.get("fundingIntervalHour") or 8),
                 }
                 for item in data["result"]["list"]
                 if item.get("symbol", "").endswith("USDT")
@@ -203,7 +203,7 @@ async def spot_market_buy(symbol: str, qty: float) -> dict | None:
         return None
     body = (
         f'{{"category":"spot","symbol":"{symbol}",'
-        f'"side":"Buy","orderType":"Market","qty":"{qty:.6f}"}}'
+        f'"side":"Buy","orderType":"Market","qty":"{qty:.6f}","marketUnit":"baseCoin"}}'
     )
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:

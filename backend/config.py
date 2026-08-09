@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # ── 바이비트 API (미설정 시 펀딩 차익 비활성화) ─────────────────
     bybit_api_key: Optional[str] = None
     bybit_api_secret: Optional[str] = None
-    fundarb_paper: bool = False  # True = 실제 주문 없이 가상 시뮬레이션
+    fundarb_paper: bool = True  # True = 실제 주문 없이 가상 시뮬레이션 (opt-in 실거래)
 
     # ── 텔레그램 (미설정 시 알림 비활성화) ───────────────────────────
     telegram_bot_token: Optional[str] = None

@@ -1226,6 +1226,7 @@ class SimAgent:
             self._scaler  = scaler
             self._trained_feature_names = _actual_cols  # 실제 학습에 사용된 컬럼
             self._trained_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+            self._consecutive_losses = 0  # 재학습 성공 시 손실 카운터 리셋
             self.save_model()
             logger.warning("[%s] train_multi 완료 (%d종목 풀링, %d샘플, thr=%.2f)",
                            self.agent_id, len(all_X), len(X), self.buy_threshold)
@@ -1934,7 +1935,7 @@ class SimAgent:
 
         if prob >= self.adaptive_buy_threshold:
             return "buy", round(prob, 4)
-        if prob <= (1.0 - self.adaptive_buy_threshold):
+        if prob <= (1.0 - self.buy_threshold):
             return "sell", round(prob, 4)
         return "hold", round(prob, 4)
 
@@ -2144,8 +2145,11 @@ class SimAgent:
         proceeds    = sell_qty * actual_sell
         profit_rate = (actual_sell - pos.entry_price) / pos.entry_price
         self._balance += proceeds
-        pos.qty -= sell_qty             # 잔량 갱신 (포지션 유지)
-        self._partial_tp_done.add(ticker)
+        pos.qty -= sell_qty
+        if pos.qty <= 0:
+            del self._positions[ticker]  # ratio=1.0 완전 청산 시 포지션 제거
+        else:
+            self._partial_tp_done.add(ticker)
         # 부분 청산도 win/lose 통계에 반영
         self.total_trades += 1
         if profit_rate > 0:

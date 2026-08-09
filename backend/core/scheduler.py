@@ -806,8 +806,10 @@ class TradingScheduler:
         )
         # 시작 직후 즉시 갱신 (첫 cron 전에 초기값 0.0 방지)
         import asyncio as _asyncio
-        _asyncio.create_task(self._refresh_momentum_tickers())
-        _asyncio.create_task(_refresh_market_context())  # Fear&Greed, BTC 도미넌스 즉시 초기화
+        _t1 = _asyncio.create_task(self._refresh_momentum_tickers())
+        _t1.add_done_callback(lambda t: logger.warning("[Scheduler] 모멘텀 갱신 예외: %s", t.exception()) if t.exception() else None)
+        _t2 = _asyncio.create_task(_refresh_market_context())  # Fear&Greed, BTC 도미넌스 즉시 초기화
+        _t2.add_done_callback(lambda t: logger.warning("[Scheduler] 시장컨텍스트 갱신 예외: %s", t.exception()) if t.exception() else None)
 
     def stop(self) -> None:
         """스케줄러 중지. FastAPI lifespan shutdown 에서 호출."""
@@ -1263,7 +1265,7 @@ class TradingScheduler:
                                     "BUY" if (trade.profit_rate or 0) > 0 else "SELL",
                                 )
                     except Exception:
-                        logger.debug("[실시간체크] %s %s 예외", agent.agent_id, ticker)
+                        logger.warning("[실시간체크] %s %s 예외", agent.agent_id, ticker, exc_info=True)
             await db.commit()
 
     async def _process_upbit_ticker(self, ticker: str) -> None:
@@ -1300,7 +1302,7 @@ class TradingScheduler:
                             await self._execute_upbit_sell(ticker, position, "OI_EXTREME_LONG_FLUSH", current_price)
                             return
                 except Exception:
-                    pass
+                    logger.debug("[OI극단청산] %s 체크 중 예외", ticker, exc_info=True)
 
             # MA/RSI 전략 기반 청산 (5분봉) — DCA보다 먼저 체크 (청산 시 DCA 스킵)
             _upbit_pos_ohlcv: list[dict] | None = None
@@ -2494,31 +2496,33 @@ class TradingScheduler:
             _gap = prob - agent.buy_threshold
             _signal_portion = 1.0 if _gap >= 0.08 else (0.7 if _gap >= 0.04 else 0.5)
             _portion = min(_signal_portion, _rvol_portion)  # 두 필터 중 더 보수적인 값 적용
-            trade = agent.virtual_buy(symbol, price, portion=_portion)
-            if trade:
-                await db.execute(
-                    """INSERT INTO agent_trades
-                       (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance,
-                        buy_prob, buy_adx, buy_vol_ratio, traded_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty,
-                     trade.entry_price, trade.profit_rate, trade.balance,
-                     round(prob, 4), round(agent._last_adx_14, 2), round(agent._last_vol_ratio, 3),
-                     trade.traded_at),
-                )
-                await db.execute(
-                    "INSERT OR REPLACE INTO agent_positions (agent_id, ticker, entry_price, qty, entered_at) VALUES (?,?,?,?,?)",
-                    (trade.agent_id, trade.ticker, trade.price, trade.qty, trade.traded_at),
-                )
-                agent._today_buy_count += 1
-                agent.record_buy_context(symbol)  # 매수 시점 신호 스냅샷 저장 (손실 분석용)
-                # SELL 기록에 buy_prob 저장을 위해 BUY prob 보관
-                agent._buy_prob_cache[symbol] = (round(prob, 4), round(agent._last_adx_14, 2), round(agent._last_vol_ratio, 3))
-                sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%} / 진입{_portion*100:.0f}% / 일{agent._today_buy_count}건)", "BUY")
-                # 부분 청산 1차 목표가 설정 (ATR×2.0), ATR 없으면 미설정
-                if atr_pct > 0.001:
-                    agent._partial_tp_price[symbol] = price * (1 + atr_pct * 2.0)
-            _PENDING_BUYS.discard((agent.agent_id, symbol))
+            try:
+                trade = agent.virtual_buy(symbol, price, portion=_portion)
+                if trade:
+                    await db.execute(
+                        """INSERT INTO agent_trades
+                           (agent_id, ticker, action, price, qty, entry_price, profit_rate, balance,
+                            buy_prob, buy_adx, buy_vol_ratio, traded_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (trade.agent_id, trade.ticker, trade.action, trade.price, trade.qty,
+                         trade.entry_price, trade.profit_rate, trade.balance,
+                         round(prob, 4), round(agent._last_adx_14, 2), round(agent._last_vol_ratio, 3),
+                         trade.traded_at),
+                    )
+                    await db.execute(
+                        "INSERT OR REPLACE INTO agent_positions (agent_id, ticker, entry_price, qty, entered_at) VALUES (?,?,?,?,?)",
+                        (trade.agent_id, trade.ticker, trade.price, trade.qty, trade.traded_at),
+                    )
+                    agent._today_buy_count += 1
+                    agent.record_buy_context(symbol)  # 매수 시점 신호 스냅샷 저장 (손실 분석용)
+                    # SELL 기록에 buy_prob 저장을 위해 BUY prob 보관
+                    agent._buy_prob_cache[symbol] = (round(prob, 4), round(agent._last_adx_14, 2), round(agent._last_vol_ratio, 3))
+                    sim_log.push(trade.agent_id, f"[가상매수] {symbol} @ {price:,.0f}원 (확률 {prob:.1%} / 진입{_portion*100:.0f}% / 일{agent._today_buy_count}건)", "BUY")
+                    # 부분 청산 1차 목표가 설정 (ATR×2.0), ATR 없으면 미설정
+                    if atr_pct > 0.001:
+                        agent._partial_tp_price[symbol] = price * (1 + atr_pct * 2.0)
+            finally:
+                _PENDING_BUYS.discard((agent.agent_id, symbol))
 
         elif signal == "sell" and symbol in agent._positions:
             # 손실 분석: 매도 전 보유 시간 계산 (virtual_sell 후 포지션 소멸)
@@ -2585,7 +2589,8 @@ class TradingScheduler:
                         except Exception as _e:
                             logger.warning("[비상재학습] %s 태스크 예외: %s", a.agent_id, _e)
 
-                    _asyncio.create_task(_safe_retrain())
+                    _task = _asyncio.create_task(_safe_retrain())
+                    _task.add_done_callback(lambda t: None)  # GC 수거 방지용 레퍼런스 유지
 
     async def _emergency_retrain(self, agent) -> None:
         """5연속 손실 감지 시 해당 에이전트 즉시 재학습 (하루 3회 제한)."""
@@ -2615,7 +2620,7 @@ class TradingScheduler:
                             if ok:
                                 agent.needs_retrain = False
                                 logger.info("[비상재학습] %s 코인 모델 갱신 완료 (%s)", agent.agent_id, _t)
-                            return
+                                return  # 성공 시에만 탈출, 실패 시 다음 ticker 시도
                     except Exception:
                         continue
             else:
@@ -2863,6 +2868,8 @@ class TradingScheduler:
         from backend.ml.agents import ENSEMBLE_AGENTS
         from backend.ml.rl_agent import RLAgent as _RLAgent
         for _mkt, _eid in [("coin", "ENSEMBLE_COIN"), ("stock", "ENSEMBLE_STOCK")]:
+            if market_filter not in ("all", _mkt):  # 해당 마켓만 전략 채택 (불일치 시 모델/피처 불일치 방지)
+                continue
             _good = sorted(
                 [a for a in AGENTS.values()
                  if a.market == _mkt and a.total_trades >= 5 and a.win_rate >= 0.50
