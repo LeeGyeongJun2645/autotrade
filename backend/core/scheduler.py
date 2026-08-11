@@ -89,6 +89,13 @@ _STOCK_QUALITY_BLACKLIST: frozenset[str] = frozenset({
     "008290", "066590", "034940", "012690", "413630", "252670",
 })
 
+# 코인 전패·저승률 종목 블랙리스트 (실거래 데이터 기반 — 전 에이전트 공통 차단)
+# KRW-O: 8trades WR=0% cum=-16.39% / KRW-MORPHO: 7trades WR=0% cum=-4.52%
+# KRW-LPT: 6trades WR=0% cum=-1.75% / KRW-META2: 10trades WR=20% cum=-6.87%
+_COIN_QUALITY_BLACKLIST: frozenset[str] = frozenset({
+    "KRW-O", "KRW-MORPHO", "KRW-LPT", "KRW-META2",
+})
+
 # ── 글로벌 크로스-에이전트 상태 (모든 에이전트 공유) ──────────────────────
 # 에이전트별 독립 cooldown의 한계: AI01 손절 → AI02~AI22는 즉시 재진입 가능
 # 해결: 모듈 레벨 공유 상태로 전체 에이전트 동시 차단
@@ -150,6 +157,8 @@ def _is_blacklisted(symbol: str, agent) -> bool:
     if symbol in _TICKER_BLACKLIST:
         return True
     if symbol in _STOCK_QUALITY_BLACKLIST:
+        return True
+    if symbol in _COIN_QUALITY_BLACKLIST:
         return True
     # 글로벌 집계 기준 동적 차단 (인메모리 30개 한도 문제 해소)
     s = _TICKER_STATS.get(symbol)

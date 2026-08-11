@@ -2295,8 +2295,8 @@ AGENTS: dict[str, SimAgent] = build_agents()
 # ── 앙상블 그림자 에이전트 — 실매매 앙상블 신호를 가상 포트폴리오로 추적 ──────
 # predict_ensemble() 호출 결과를 동일 TP/SL 로직으로 가상 매매해 앙상블 기대수익 검증
 ENSEMBLE_AGENTS: dict[str, SimAgent] = {
-    "ENSEMBLE_COIN":  SimAgent("ENSEMBLE_COIN",  60, 0.010, 0.62, "all", "coin",  5, "lgbm"),
-    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 15, 0.007, 0.65, "all", "stock", 5, "lgbm"),
+    "ENSEMBLE_COIN":  SimAgent("ENSEMBLE_COIN",  60, 0.010, 0.62, "momentum", "coin",  5, "lgbm"),
+    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 15, 0.007, 0.65, "momentum", "stock", 5, "lgbm"),
 }
 
 
