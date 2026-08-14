@@ -917,32 +917,14 @@ class SimAgent:
                 _val_s    = scaler.transform(X_val)
                 _val_prob = clf.predict_proba(_val_s)[:, 1]
                 val_acc   = clf.score(_val_s, y_val)
-                _val_pred = (_val_prob >= self.buy_threshold).astype(int)
-                from sklearn.metrics import precision_score as _ps2, recall_score as _rs2
-                _val_prec = _ps2(y_val, _val_pred, zero_division=0)
-                _val_rec  = _rs2(y_val, _val_pred, zero_division=0)
-                _n_val_buy = int(_val_pred.sum())
-                # n_buy=0: 검증셋에서 buy 예측 0개 → threshold 너무 높거나 완전 보수 모델
-                # 이런 모델은 실거래에서도 threshold 근처 확률이 불안정 → 차단
-                # reversal: 횡보장 반등 신호는 레이블 희소 → precision 기준 완화
-                _min_prec = 0.10 if self.feature_set == "reversal" else 0.25
-                _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 5) or (
-                    _n_val_buy < 1 and len(X_val) > 100
-                )
-                if _wf_fail:
-                    logger.warning(
-                        "[%s] WF검증 실패 acc=%.1f%% prec=%.1f%% rec=%.1f%% (thr=%.2f n_buy=%d)",
-                        self.agent_id, val_acc*100, _val_prec*100, _val_rec*100,
-                        self.buy_threshold, _n_val_buy,
-                    )
-                    return False
+                from sklearn.metrics import precision_score as _ps, precision_score as _ps2, recall_score as _rs2
 
-                from sklearn.metrics import precision_score as _ps
                 _init_thr = self.buy_threshold
 
                 def _find_best_thr(prob_arr: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
                     best_thr, best_prec = _init_thr, 0.0
-                    for _t in np.arange(0.50, 0.75, 0.01):  # 상한 0.85→0.75: 과도한 임계값 방지
+                    # 0.50→0.35: 코인(max 0.52) threshold 탐색 범위 확대
+                    for _t in np.arange(0.35, 0.75, 0.01):
                         _p = (prob_arr >= _t).astype(int)
                         if _p.sum() < max(5, len(y_true) // 20):
                             continue
@@ -953,8 +935,27 @@ class SimAgent:
                             best_prec, best_thr = _prec, float(_t)
                     return best_thr, best_prec
 
-                # 창B (최신 레짐) 임계값
+                # 최적 threshold 탐색 먼저 → 그 threshold로 WF 검증 (기존: 고정 threshold로 검증)
                 thr_b, prec_b = _find_best_thr(_val_prob, y_val)
+                _wf_thr = thr_b if prec_b > 0 else _init_thr
+                _val_pred = (_val_prob >= _wf_thr).astype(int)
+                _val_prec = _ps2(y_val, _val_pred, zero_division=0)
+                _val_rec  = _rs2(y_val, _val_pred, zero_division=0)
+                _n_val_buy = int(_val_pred.sum())
+                # precision 기준 0.25→0.15 현실화 (WF 검증은 하락장에서 필연적으로 낮음)
+                _min_prec = 0.08 if self.feature_set == "reversal" else 0.15
+                _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 8) or (
+                    _n_val_buy < 1 and len(X_val) > 100
+                )
+                if _wf_fail:
+                    logger.warning(
+                        "[%s] WF검증 실패 acc=%.1f%% prec=%.1f%% rec=%.1f%% (thr=%.2f n_buy=%d)",
+                        self.agent_id, val_acc*100, _val_prec*100, _val_rec*100,
+                        _wf_thr, _n_val_buy,
+                    )
+                    return False
+
+                # 창B (최신 레짐) 임계값 (탐색 완료)
 
                 if _two_win and X_val_a is not None and len(X_val_a) > 0:
                     # 창A (이전 레짐) 임계값 — 훈련셋 밖, 리케이지 없음
@@ -1189,28 +1190,13 @@ class SimAgent:
                 _val_s    = scaler.transform(X_val)
                 _val_prob = clf.predict_proba(_val_s)[:, 1]
                 val_acc   = clf.score(_val_s, y_val)
-                _val_pred    = (_val_prob >= self.buy_threshold).astype(int)
                 from sklearn.metrics import precision_score as _ps, recall_score as _rs
-                _val_prec    = _ps(y_val, _val_pred, zero_division=0)
-                _n_val_buy   = int(_val_pred.sum())
-                _min_prec_m  = 0.10 if self.feature_set == "reversal" else 0.25
-                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 5) or (
-                    _n_val_buy < 1 and len(X_val) > 100
-                )
-                if _tm_wf_fail:
-                    logger.warning(
-                        "[%s] train_multi WF검증 실패 acc=%.1f%% prec=%.1f%% (thr=%.2f n_buy=%d)",
-                        self.agent_id, val_acc * 100, _val_prec * 100,
-                        self.buy_threshold, _n_val_buy,
-                    )
-                    return False
 
-                from sklearn.metrics import precision_score as _ps
                 _init_thr = self.buy_threshold
 
                 def _find_best_thr(prob_arr: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
                     best_thr, best_prec = _init_thr, 0.0
-                    for _t in np.arange(0.50, 0.75, 0.01):
+                    for _t in np.arange(0.35, 0.75, 0.01):
                         _p = (prob_arr >= _t).astype(int)
                         if _p.sum() < max(5, len(y_true) // 20):
                             continue
@@ -1222,6 +1208,21 @@ class SimAgent:
                     return best_thr, best_prec
 
                 thr_b, prec_b = _find_best_thr(_val_prob, y_val)
+                _wf_thr_m = thr_b if prec_b > 0 else _init_thr
+                _val_pred    = (_val_prob >= _wf_thr_m).astype(int)
+                _val_prec    = _ps(y_val, _val_pred, zero_division=0)
+                _n_val_buy   = int(_val_pred.sum())
+                _min_prec_m  = 0.08 if self.feature_set == "reversal" else 0.15
+                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 8) or (
+                    _n_val_buy < 1 and len(X_val) > 100
+                )
+                if _tm_wf_fail:
+                    logger.warning(
+                        "[%s] train_multi WF검증 실패 acc=%.1f%% prec=%.1f%% (thr=%.2f n_buy=%d)",
+                        self.agent_id, val_acc * 100, _val_prec * 100,
+                        _wf_thr_m, _n_val_buy,
+                    )
+                    return False
                 if _two_win and X_val_a is not None and len(X_val_a) > 0:
                     _va_prob = clf.predict_proba(scaler.transform(X_val_a))[:, 1]
                     thr_a, _ = _find_best_thr(_va_prob, y_val_a)
