@@ -108,8 +108,8 @@ _RECENT_LOSSES: list[tuple] = []             # (ticker, time.time()) — 클러�
 _PENDING_BUYS: set[str] = set()             # 현재 BUY 진행 중인 (agent_id, ticker) — 군집매수 동시진입 방지
 
 
-def _set_global_cooldown(symbol: str, minutes: int = 60) -> None:
-    """손절 시 전체 에이전트에 쿨다운 적용 (기본 60분)."""
+def _set_global_cooldown(symbol: str, minutes: int = 20) -> None:
+    """손절 시 전체 에이전트에 쿨다운 적용 (기본 20분 — 60분은 거래 빈도 과다 억제)."""
     from datetime import datetime as _dt, timedelta as _td
     until = (_dt.now(KST) + _td(minutes=minutes)).isoformat()
     _GLOBAL_COOLDOWN[symbol] = until
@@ -222,19 +222,12 @@ def _is_daily_loss_exceeded(agent) -> bool:
 
 
 def _is_coin_night_risk() -> bool:
-    """코인 저승률 시간대 차단 (가상매매 234건 실데이터 기반).
+    """코인 심야 극저유동성 시간대 차단 (KST 03~05시만 — 234건 샘플 불충분으로 범위 최소화).
 
-    차단 시간대 (KST):
-      01시: WR=25.0% (야간 저유동성)
-      02~06시: WR<30% (야간 저유동성)
-      07시: WR=33.3%
-      08시: WR=20.0% (장 개장 전 최악)
-      12시: WR=16.7% (점심 횡보, 실데이터 최악)
-      14시: WR=26.7%
-      16시: WR=15.4% (유럽장 개장 직전 최악)
+    기존 11시간 차단 → 3시간으로 축소: 거래 빈도 회복 우선.
     """
     h = datetime.now(KST).hour
-    return h in {1, 2, 3, 4, 5, 6, 7, 8, 12, 14, 16}
+    return h in {3, 4, 5}
 
 
 def _is_stock_open_noise() -> bool:
@@ -488,7 +481,7 @@ class TradingScheduler:
             # 연속손실로 adaptive_buy_threshold가 낮아지면 저품질 신호로 BUY하는 문제 방지
             _ensemble_defaults = {
                 "ENSEMBLE_COIN":  {"thr": 0.62, "tp": 3.0},
-                "ENSEMBLE_STOCK": {"thr": 0.65, "tp": 3.5},
+                "ENSEMBLE_STOCK": {"thr": 0.72, "tp": 3.5},
             }
             for _ea in ENSEMBLE_AGENTS.values():
                 _ed = _ensemble_defaults.get(_ea.agent_id, {})
@@ -2345,12 +2338,12 @@ class TradingScheduler:
             if agent.market == "coin" and _is_coin_night_risk():
                 sim_log.push(agent.agent_id, f"[시간차단] {symbol} 저승률 시간대(01~08/12/14/16시)", "INFO")
                 return
-            # 주식: 14:30 이후 신규 매수 차단 (오버나이트 방지)
-            # 15:04에 매수 → 다음날 -10.16% 사례: 장 마감 근처 BUY는 EOD 청산 전에 손실 확정
+            # 주식: 14:50 이후 신규 매수 차단 (오버나이트 방지)
+            # 14:30→14:50: 거래 가능 시간 20분 연장 (마감 직전 10분 유동성 충분)
             if agent.market == "stock":
                 _now_k = datetime.now(KST)
-                if _now_k.hour > 14 or (_now_k.hour == 14 and _now_k.minute >= 30):
-                    sim_log.push(agent.agent_id, f"[마감차단] {symbol} 14:30 이후 신규매수 금지 (오버나이트 방지)", "INFO")
+                if _now_k.hour > 14 or (_now_k.hour == 14 and _now_k.minute >= 50):
+                    sim_log.push(agent.agent_id, f"[마감차단] {symbol} 14:50 이후 신규매수 금지 (오버나이트 방지)", "INFO")
                     return
             # 주식: 개장 첫 25분 노이즈 구간 신규 매수 차단
             if agent.market == "stock" and _is_stock_open_noise():
@@ -2360,7 +2353,7 @@ class TradingScheduler:
             if _is_blacklisted(symbol, agent):
                 sim_log.push(agent.agent_id, f"[블랙리스트] {symbol} 저승률 종목 차단", "INFO")
                 return
-            # 전체 에이전트 공유 쿨다운 (손절 60분, 크로스-에이전트 재진입 방지)
+            # 전체 에이전트 공유 쿨다운 (손절 20분, 크로스-에이전트 재진입 방지)
             if _is_global_cooldown(symbol):
                 sim_log.push(agent.agent_id, f"[글로벌쿨다운] {symbol} 전체에이전트 차단 중", "INFO")
                 return
@@ -2394,15 +2387,14 @@ class TradingScheduler:
             if agent.agent_id not in _EA:
                 _holders = sum(1 for a in _ALL_AGENTS.values() if a.market == agent.market and symbol in a._positions)
                 _pending = sum(1 for _aid, _sym in _PENDING_BUYS if _sym == symbol)
-                if _holders + _pending >= 3:
+                if _holders + _pending >= 5:  # 3→5: 군집매수 기준 완화 (거래 빈도 회복)
                     sim_log.push(agent.agent_id, f"[군집매수차단] {symbol} 보유{_holders}+진행중{_pending}개", "INFO")
                     return
             _PENDING_BUYS.add((agent.agent_id, symbol))
-            # 3연속 손실 → 매수 차단 후 재학습 예약 (다음 주기에 자동 처리)
+            # needs_retrain: 재학습은 백그라운드로 진행하되 매수 차단 제거
+            # (이전: 5연속손실 → 재학습 완료 전까지 완전 차단 → 회복 기회 박탈)
             if agent.needs_retrain:
-                sim_log.push(agent.agent_id, f"[재학습대기] {symbol} 5연속손실 — 매수 보류", "INFO")
-                _PENDING_BUYS.discard((agent.agent_id, symbol))
-                return
+                sim_log.push(agent.agent_id, f"[재학습진행중] {symbol} 백그라운드 재학습 중 — 매수 계속", "INFO")
             # 동적 블랙리스트: WR<35% + 20건 이상인 종목 진입 차단 (반복 손실 종목 자동 제외)
             if symbol in agent._ticker_blacklist:
                 _PENDING_BUYS.discard((agent.agent_id, symbol))
@@ -2416,26 +2408,26 @@ class TradingScheduler:
             _wr = agent.win_rate
             _min_trades_for_dynamic = 30  # 통계 신뢰 최소 건수
             if agent.total_trades < _min_trades_for_dynamic:
-                # 학습 초기: 기본값으로 고정
-                _daily_limit = 8 if agent.market == "coin" else 5
+                # 학습 초기: 충분히 탐색
+                _daily_limit = 12 if agent.market == "coin" else 8
             elif agent.market == "coin":
-                if _wr < 0.45:
-                    _daily_limit = 6    # EV 음수, 최소화
+                if _wr < 0.40:
+                    _daily_limit = 8    # 저승률도 최소 8건 (데이터 수집 필요)
                 elif _wr < 0.48:
-                    _daily_limit = 8    # BEP 직전, 보수적 유지
-                elif _wr < 0.55:
-                    _daily_limit = 12   # BEP 돌파, 확대
-                else:
-                    _daily_limit = 20   # 고승률, 적극 활용
-            else:  # stock
-                if _wr < 0.45:
-                    _daily_limit = 4
-                elif _wr < 0.48:
-                    _daily_limit = 5
-                elif _wr < 0.55:
-                    _daily_limit = 8
-                else:
                     _daily_limit = 12
+                elif _wr < 0.55:
+                    _daily_limit = 16
+                else:
+                    _daily_limit = 24   # 고승률, 24/7 최대 활용
+            else:  # stock
+                if _wr < 0.40:
+                    _daily_limit = 6    # 저승률도 최소 6건
+                elif _wr < 0.48:
+                    _daily_limit = 8
+                elif _wr < 0.55:
+                    _daily_limit = 12
+                else:
+                    _daily_limit = 16
             if agent._today_buy_count >= _daily_limit:
                 _PENDING_BUYS.discard((agent.agent_id, symbol))
                 return

@@ -407,15 +407,15 @@ class SimAgent:
     def adaptive_buy_threshold(self) -> float:
         """연속 손실 횟수에 따라 buy_threshold 동적 상향.
 
-        연속 손실이 쌓일수록 진입 기준이 올라가 과매매를 자동 억제.
-        재학습 완료 후 _consecutive_losses=0 리셋 → 임계값도 정상 복귀.
+        완화: 기존 5연속→+0.05, 10연속→+0.10 → 10연속→+0.05만 적용.
+        과도한 상향은 신호 자체를 차단해 거래 빈도 급감 초래.
         """
         base = self.buy_threshold
         n = self._consecutive_losses
         if n >= 10:
-            return min(base + 0.10, 0.88)
-        elif n >= 5:
             return min(base + 0.05, 0.82)
+        elif n >= 5:
+            return min(base + 0.02, 0.80)
         elif n >= 3:
             return min(base + 0.03, 0.80)
         return base
