@@ -58,6 +58,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "gap_pct", "gap_up", "gap_down",
         "dc_upper_break", "dc_lower_break",
         "zscore_20", "vb_signal",
+        # Volume X-Ray: 매수세 압력 확인 (모멘텀 방향 신뢰도 강화)
+        "vol_pressure_bull", "taker_delta", "vol_xray_diverge",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -103,6 +105,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "exhaustion_bounce", "false_breakout_warn", "vol_reversal_signal",
         # 신규: 갭 + Z-Score (거래량 폭발 맥락)
         "gap_pct", "gap_up", "gap_down", "zscore_20",
+        # Volume X-Ray: 매수/매도 압력 분석 (캔들 내부 매수세 측정)
+        "vol_pressure_bull", "taker_delta", "vol_xray_diverge",
     ],
     # ── 역추세 전용 feature_set (ADX<20 횡보장 평균회귀 신호 집중) ──────
     "reversal": [
@@ -158,6 +162,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "double_bottom_signal",
         "fib_382_support", "fib_50_support",
         "kospi_ret_5", "kospi_rel_str",
+        # Volume X-Ray: 헤이킨아시 캔들 방향 + 볼륨 압력 정합성 확인
+        "vol_pressure_bull", "taker_delta",
     ],
 
     # ── BB-Keltner 스퀴즈 (TTM Squeeze 방식) ───────────────────────
@@ -217,6 +223,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "rsi_9", "macd_diff",
         "dist_to_pp", "dist_to_s1",          # 피벗 지지선
         "btc_ret_5",
+        # Volume X-Ray: 실거래 매수/매도 압력 (VWAP 방향 신뢰도 강화)
+        "vol_pressure_bull", "taker_delta", "vol_xray_diverge",
     ],
 
     # ── 멀티 타임프레임 정렬 (Multi-Timeframe Alignment) ───────────
@@ -2296,7 +2304,8 @@ AGENTS: dict[str, SimAgent] = build_agents()
 # predict_ensemble() 호출 결과를 동일 TP/SL 로직으로 가상 매매해 앙상블 기대수익 검증
 ENSEMBLE_AGENTS: dict[str, SimAgent] = {
     "ENSEMBLE_COIN":  SimAgent("ENSEMBLE_COIN",  60, 0.010, 0.62, "momentum", "coin",  5, "lgbm"),
-    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 15, 0.007, 0.65, "momentum", "stock", 5, "lgbm"),
+    "ENSEMBLE_STOCK": SimAgent("ENSEMBLE_STOCK", 15, 0.007, 0.72, "momentum", "stock", 5, "lgbm"),
+    # ENSEMBLE_STOCK: 0.65→0.72 (WR 33.3% -52% 누적손실 → 신호 기준 강화)
 }
 
 

@@ -87,6 +87,7 @@ _STOCK_PRICE_BLACKLIST: frozenset[str] = frozenset({
 # 가상매매 전패 종목 블랙리스트 (승률 0%, 전 에이전트 손실 기록)
 _STOCK_QUALITY_BLACKLIST: frozenset[str] = frozenset({
     "008290", "066590", "034940", "012690", "413630", "252670",
+    "215790",  # AI12 오늘 -23.38% 단타 손실, 전패
 })
 
 # 코인 전패·저승률 종목 블랙리스트 (실거래 데이터 기반 — 전 에이전트 공통 차단)

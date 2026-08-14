@@ -231,6 +231,10 @@ FEATURE_NAMES = [
     "tl_support_dist",   # 상승 추세선(저점 연결) 대비 현재가 거리 % (음수=이탈)
     "tl_resist_dist",    # 하락 추세선(고점 연결) 대비 현재가 거리 % (음수=저항 아래)
     "tl_near_bounce",    # 추세선 ±1.5% 이내 접근 → 1 (반발 매매 구간)
+    # ── Volume X-Ray (캔들별 매수/매도 압력 분석) ───────────────────────
+    "vol_pressure_bull",  # 최근 5봉 양봉 볼륨 비율 (0~1, >0.6=매수 지배)
+    "taker_delta",        # (taker_buy_ratio - 0.5) × 2: -1~+1 정규화 매수/매도 불균형
+    "vol_xray_diverge",   # 가격 방향 vs 볼륨 압력 불일치 (1=다이버전스 경고)
 ]
 
 
@@ -725,6 +729,21 @@ def compute_features(
         df["taker_buy_ratio"] = 0.5
     # 20봉 MA로 평활화 (원시 Taker 비율 노이즈 제거)
     df["taker_ma20"] = df["taker_buy_ratio"].rolling(20, min_periods=5).mean().fillna(0.5)
+
+    # ── Volume X-Ray: 캔들별 매수/매도 압력 가시화 (TradingView Volume X-Ray 개념) ──
+    # vol_pressure_bull: 최근 5봉 중 양봉(close>open) 캔들의 볼륨 비율
+    _is_bull5 = (close > open_).astype(float)
+    _bull_vol5 = (vol * _is_bull5).rolling(5, min_periods=1).sum()
+    _total_vol5 = vol.rolling(5, min_periods=1).sum().replace(0, np.nan)
+    df["vol_pressure_bull"] = (_bull_vol5 / _total_vol5).fillna(0.5)
+    # taker_delta: taker_buy_ratio를 -1~+1로 정규화 (0=균형, +1=완전 매수지배)
+    df["taker_delta"] = (df["taker_buy_ratio"] - 0.5) * 2.0
+    # vol_xray_diverge: 가격 방향 vs 볼륨 압력 방향 불일치 탐지
+    _price_dir5 = np.sign(close.pct_change(5))
+    _vol_dir5   = np.sign(df["vol_pressure_bull"] - 0.5)
+    df["vol_xray_diverge"] = (
+        (_price_dir5 != _vol_dir5) & (_price_dir5 != 0) & (_vol_dir5 != 0)
+    ).astype(float).fillna(0.0)
 
     # ── 롱/숏 비율 (코인 전용: BTC 선물 기준, else 0.5) ──────────────
     if ls_hist:

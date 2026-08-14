@@ -399,3 +399,5 @@ RL_AGENTS: dict[str, RLAgent] = {
     "RL01": RLAgent("RL01", interval_min=15, market="coin",  feature_set="all", lookahead=5),
     "RL02": RLAgent("RL02", interval_min=15, market="stock", feature_set="all", lookahead=5),
 }
+# RL01: WR=0% 5거래 전패, 8/4 이후 거래 없음 → 비활성화
+RL_AGENTS["RL01"].is_active = False
