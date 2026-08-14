@@ -1943,7 +1943,13 @@ class TradingScheduler:
                             _oi_ref    = (_coin_flow.get("oi")    or btc_oi_hist)    or None
                             _taker_ref = (_coin_flow.get("taker") or btc_taker_hist) or None
                             _ls_ref    = (_coin_flow.get("ls")    or btc_ls_hist)    or None
-                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref, ls_hist=_ls_ref, ticker=ticker, obi_snaps=self._obi_snaps)
+                            # 코인 ticker extra (acc_ask/bid ratio, 52주 고저가)
+                            try:
+                                from backend.api import upbit as _upbit_api
+                                _coin_extra = await _upbit_api.get_ticker_extra(ticker)
+                            except Exception:
+                                _coin_extra = None
+                            signal, prob = agent.predict(ohlcv, btc_ohlcv=_btc_ref, oi_hist=_oi_ref, taker_hist=_taker_ref, ls_hist=_ls_ref, ticker=ticker, obi_snaps=self._obi_snaps, extra=_coin_extra)
                             await self._agent_execute(db, agent, ticker, signal, prob, price)
 
                     else:
@@ -1993,7 +1999,13 @@ class TradingScheduler:
                             price = stock_prices.get(symbol, 0.0)
                             if price <= 0:
                                 continue
-                            signal, prob = agent.predict(ohlcv, kospi_ohlcv=kospi_ohlcv or None, ticker=symbol)
+                            # 주식 fundamental extra (체결강도/프로그램/공매도/PER/PBR)
+                            try:
+                                from backend.api import kis as _kis_api
+                                _stock_extra = await _kis_api.get_stock_fundamental(symbol)
+                            except Exception:
+                                _stock_extra = None
+                            signal, prob = agent.predict(ohlcv, kospi_ohlcv=kospi_ohlcv or None, ticker=symbol, extra=_stock_extra)
                             await self._agent_execute(db, agent, symbol, signal, prob, price)
 
                     # agent_stats upsert (today_buy_count/dynamic_tp_mult 포함 → 재시작 후 복원 가능)

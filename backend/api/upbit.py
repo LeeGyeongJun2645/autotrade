@@ -67,6 +67,55 @@ def _raise_for_upbit_error(data: Any) -> None:
         raise RuntimeError(f"업비트 API 오류: {err.get('message')} (name={err.get('name')})")
 
 
+# ── ticker extra 데이터 (acc_ask/bid ratio, 52주 고저가) ─────────────
+
+_TICKER_EXTRA_CACHE: dict[str, tuple[dict, float]] = {}
+_TICKER_EXTRA_TTL = 600.0  # 10분 캐시
+
+
+async def get_ticker_extra(symbol: str) -> dict:
+    """업비트 ticker에서 acc_ask/bid 비율, 52주 고저가 조회.
+
+    Returns:
+        {
+            "ask_bid_ratio":     float,  # acc_bid/(acc_ask+acc_bid) — >0.5=매수우세
+            "week52_high_ratio": float,  # current/highest_52w - 1 (음수=고점 아래)
+            "week52_low_ratio":  float,  # current/lowest_52w  - 1 (양수=저점 위)
+        }
+    """
+    import time as _t
+    now = _t.time()
+    if symbol in _TICKER_EXTRA_CACHE:
+        cached, ts = _TICKER_EXTRA_CACHE[symbol]
+        if now - ts < _TICKER_EXTRA_TTL:
+            return cached
+    _DEFAULT = {"ask_bid_ratio": 0.5, "week52_high_ratio": -0.05, "week52_low_ratio": 0.5}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.get(f"{_BASE}/ticker", params={"markets": symbol})
+            r.raise_for_status()
+            d = r.json()
+        if not d:
+            return _DEFAULT
+        t = d[0]
+        ask = float(t.get("acc_ask_volume") or 0)
+        bid = float(t.get("acc_bid_volume") or 0)
+        ratio = bid / (ask + bid) if (ask + bid) > 0 else 0.5
+        price = float(t.get("trade_price") or 0)
+        h52 = float(t.get("highest_52_week_price") or 0)
+        l52 = float(t.get("lowest_52_week_price") or 0)
+        result = {
+            "ask_bid_ratio":     ratio,
+            "week52_high_ratio": (price / h52 - 1) if h52 > 0 else -0.05,
+            "week52_low_ratio":  (price / l52 - 1) if l52 > 0 else 0.5,
+        }
+        _TICKER_EXTRA_CACHE[symbol] = (result, now)
+        return result
+    except Exception as e:
+        logger.debug("[Upbit] %s ticker_extra 실패: %s", symbol, e)
+        return _DEFAULT
+
+
 # ── 거래대금 상위 티커 조회 (공개) ──────────────────────────────────
 
 _TOP_TICKERS_CACHE: tuple[list[str], float] | None = None

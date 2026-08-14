@@ -62,6 +62,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "vol_pressure_bull", "taker_delta", "vol_xray_diverge",
         # OBV: 누적 매수세 축적 추세 확인
         "obv_trend",
+        # 수급 extra: 코인=ticker비율/52주, 주식=체결강도/PER
+        "ask_bid_ratio", "week52_high_ratio", "cntg_strength", "per_norm",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -89,6 +91,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "tl_support_dist", "tl_resist_dist", "tl_near_bounce",
         "lrc_deviation", "lrc_slope",
         "dc_position", "dc_upper_break",
+        # 수급 extra: 주식=PER/PBR/공매도, 코인=52주고저가
+        "per_norm", "pbr_norm", "short_ratio", "week52_high_ratio",
     ],
     "volume": [
         "vol_ratio", "cmf_20",
@@ -111,6 +115,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "vol_pressure_bull", "taker_delta", "vol_xray_diverge",
         # OBV: 누적 매수세 방향
         "obv_trend",
+        # 수급 extra: 코인=acc비율/52주, 주식=체결강도/프로그램/공매도
+        "ask_bid_ratio", "week52_low_ratio", "cntg_strength", "program_ntby", "short_ratio",
     ],
     # ── 역추세 전용 feature_set (ADX<20 횡보장 평균회귀 신호 집중) ──────
     "reversal": [
@@ -1437,6 +1443,7 @@ class SimAgent:
         ls_hist: list[dict] | None = None,
         ticker: str = "",
         obi_snaps: list[float] | None = None,
+        extra: dict | None = None,
     ) -> tuple[str, float]:
         """(signal, buy_prob) 반환. 모델 없으면 ('hold', 0.5)."""
         if self._model is None and not self.load_model():
@@ -1459,6 +1466,7 @@ class SimAgent:
                 ls_hist=ls_hist or (self._cached_ls_hist or None),
                 obi_snaps=obi_snaps,
                 interval_min=self.interval_min,
+                extra=extra,
             )
             if full_df.empty:
                 return "hold", 0.5
@@ -1738,6 +1746,40 @@ class SimAgent:
                     prob = max(0.01, prob * 0.88)
                 elif _obv_t == 1.0 and (_near_support or _fib_support or _pullback_ok):
                     prob = min(0.95, prob * 1.06)  # OBV상승 + 지지선 = 고신뢰 조합
+            except Exception:
+                pass
+
+            # ── MTF 완전 상승 boost (15m·1h·4h 전부 상승 = 최고 신뢰 진입 구간) ──
+            try:
+                _mtf_a = _fv("mtf_align", 1.5)
+                if _mtf_a >= 3.0:
+                    prob = min(0.95, prob * 1.10)  # 전 TF 상승 정렬 → 10% boost
+                elif _mtf_a <= 0.0:
+                    prob = max(0.01, prob * 0.85)  # 전 TF 하락 → 차단 강화
+            except Exception:
+                pass
+
+            # ── 수급 extra 피처 확인 (ask_bid / cntg_strength / short_ratio) ──
+            try:
+                _abr = _fv("ask_bid_ratio", 0.5)
+                if _abr < 0.38:                    # 누적 매도 우위 70:30
+                    prob = max(0.01, prob * 0.85)
+                elif _abr > 0.62:                  # 누적 매수 우위 강세
+                    prob = min(0.95, prob * 1.05)
+            except Exception:
+                pass
+            try:
+                _cs = _fv("cntg_strength", 0.5)   # KIS 체결강도
+                if _cs < 0.40:                     # 매도 체결 우위 → 신중
+                    prob = max(0.01, prob * 0.88)
+                elif _cs > 0.60:
+                    prob = min(0.95, prob * 1.04)
+            except Exception:
+                pass
+            try:
+                _sr = _fv("short_ratio", 0.0)      # 공매도 잔고 % (급증=위험)
+                if _sr > 10.0:                     # 공매도 잔고 10% 초과 = 위험 경보
+                    prob = max(0.01, prob * 0.82)
             except Exception:
                 pass
 

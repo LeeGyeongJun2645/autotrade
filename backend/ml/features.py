@@ -237,6 +237,16 @@ FEATURE_NAMES = [
     "vol_xray_diverge",   # 가격 방향 vs 볼륨 압력 불일치 (1=다이버전스 경고)
     # ── OBV (On Balance Volume) ──────────────────────────────────────────
     "obv_trend",          # OBV > 20봉 MA → 1 (누적 매수세 축적 추세)
+    # ── 업비트 Ticker 수급 (코인 전용, 주식=0.5/중립) ─────────────────────
+    "ask_bid_ratio",      # acc_bid/(acc_ask+acc_bid): >0.5=누적 매수우세, <0.5=매도우세
+    "week52_high_ratio",  # current/52주최고가 - 1: 0=고점, 음수=고점 아래 (신고가 돌파 측정)
+    "week52_low_ratio",   # current/52주최저가 - 1: 양수=저점 위 (저점 대비 상승폭)
+    # ── KIS 주식 수급/재무 (주식 전용, 코인=기본값) ──────────────────────
+    "cntg_strength",      # 체결강도: 매수체결/(매수+매도) — >0.5=매수우세 (KIS)
+    "program_ntby",       # 프로그램 순매수 정규화 -1~+1 (양수=프로그램 매수 우위)
+    "short_ratio",        # 공매도 잔고 비율 % (높을수록 숏 포지션 누적, 숏커버 가능성)
+    "per_norm",           # PER 정규화 0~1 (0=저평가<10, 1=고평가>50)
+    "pbr_norm",           # PBR 정규화 0~1 (0=저평가<1, 1=고평가>5)
 ]
 
 
@@ -251,6 +261,7 @@ def compute_features(
     ls_hist: list[dict] | None = None,         # 바이낸스 글로벌 L/S 비율 히스토리
     obi_snaps: list[float] | None = None,      # 60분봉 내 오더북 OBI 스냅샷 리스트 (코인전용)
     interval_min: int = 5,                     # 봉 단위 (5분봉=5, 60분봉=60) — MTF 봉수 계산용
+    extra: dict | None = None,                 # ticker extra / 재무 수급 상수 피처 (외부 주입)
 ) -> pd.DataFrame:
     """OHLCV 리스트 → Feature DataFrame 변환.
 
@@ -1316,6 +1327,25 @@ def compute_features(
         df["tl_support_dist"] = 0.0
         df["tl_resist_dist"]  = 0.0
         df["tl_near_bounce"]  = 0.0
+
+    # ── extra 상수 피처 (ticker 수급 / KIS 재무) ──────────────────────────
+    # extra는 단일 종목의 현재 상태값 → 전체 DataFrame에 상수로 채워 넣음
+    _extra_defaults = {
+        "ask_bid_ratio":     0.5,
+        "week52_high_ratio": -0.05,
+        "week52_low_ratio":  0.5,
+        "cntg_strength":     0.5,
+        "program_ntby":      0.0,
+        "short_ratio":       0.0,
+        "per_norm":          0.5,
+        "pbr_norm":          0.5,
+    }
+    _ex = extra if isinstance(extra, dict) else {}
+    for _ek, _ev in _extra_defaults.items():
+        try:
+            df[_ek] = float(_ex.get(_ek, _ev))
+        except Exception:
+            df[_ek] = _ev
 
     _pre_drop = df[FEATURE_NAMES].copy()
     # 전체가 NaN인 컬럼(가격 변동 없는 종목의 bb_pband 등) → 0으로 대체 후 dropna

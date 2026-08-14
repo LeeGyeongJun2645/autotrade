@@ -463,6 +463,122 @@ async def get_investor_trend(symbol: str) -> dict:
         return _DEFAULT
 
 
+# ── 주식 재무/수급 종합 extra 데이터 조회 ────────────────────────────
+
+_STOCK_FUNDAMENTAL_CACHE: dict[str, tuple[dict, float]] = {}
+_STOCK_FUNDAMENTAL_TTL = 300.0  # 5분 캐시
+
+_FUNDAMENTAL_DEFAULT = {
+    "cntg_strength":  0.5,   # 체결강도 (0~1, >0.5=매수우세)
+    "program_ntby":   0.0,   # 프로그램 순매수 정규화 (-1~+1)
+    "short_ratio":    0.0,   # 공매도 잔고 비율 % (0~100)
+    "per_norm":       0.5,   # PER 정규화 (0=저평가, 1=고평가)
+    "pbr_norm":       0.5,   # PBR 정규화
+}
+
+
+async def get_stock_fundamental(symbol: str) -> dict:
+    """주식 재무/수급 extra 데이터 조회 (5분 캐시).
+
+    PER/PBR (현재가 TR), 체결강도 (체결조회 TR),
+    프로그램 매매 (FHPPG04650100), 공매도 잔고 (FHKST03010100) 통합.
+
+    Returns: _FUNDAMENTAL_DEFAULT 키 구조
+    """
+    import time as _t
+    now = _t.time()
+    if symbol in _STOCK_FUNDAMENTAL_CACHE:
+        cached, ts = _STOCK_FUNDAMENTAL_CACHE[symbol]
+        if now - ts < _STOCK_FUNDAMENTAL_TTL:
+            return cached
+
+    result = dict(_FUNDAMENTAL_DEFAULT)
+
+    # ── PER / PBR (현재가 조회 TR FHKST01010100) ──────────────────
+    try:
+        data = await _kis_request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            tr_id="FHKST01010100",
+            params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": symbol},
+            force_live=True,
+        )
+        out = data.get("output") or {}
+        _per = float(out.get("per") or 0)
+        _pbr = float(out.get("pbr") or 0)
+        if _per > 0:
+            result["per_norm"] = min(1.0, _per / 50.0)   # 50배 기준 정규화
+        if _pbr > 0:
+            result["pbr_norm"] = min(1.0, _pbr / 5.0)    # 5배 기준 정규화
+    except Exception as e:
+        logger.debug("[KIS] %s PER/PBR 조회 실패: %s", symbol, e)
+
+    # ── 체결 강도 (FHKST01010300 체결량 조회) ─────────────────────
+    try:
+        data = await _kis_request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-ccnl",
+            tr_id="FHKST01010300",
+            params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": symbol},
+            force_live=True,
+        )
+        out = data.get("output1") or {}
+        _buy = float(out.get("shnu_cntg_smtn") or 0)
+        _sell = float(out.get("seln_cntg_smtn") or 0)
+        if (_buy + _sell) > 0:
+            result["cntg_strength"] = _buy / (_buy + _sell)
+    except Exception as e:
+        logger.debug("[KIS] %s 체결강도 조회 실패: %s", symbol, e)
+
+    # ── 프로그램 매매 (FHPPG04650100) ────────────────────────────
+    try:
+        data = await _kis_request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/program-trade-by-stock",
+            tr_id="FHPPG04650100",
+            params={
+                "fid_cond_mrkt_div_code": "J",
+                "fid_input_iscd": symbol,
+                "fid_input_date_1": "",
+            },
+            force_live=True,
+        )
+        rows = data.get("output") or []
+        if rows:
+            _pg = int(rows[0].get("pgtr_ntby_qty") or 0)
+            result["program_ntby"] = max(-1.0, min(1.0, _pg / 100_000.0))
+    except Exception as e:
+        logger.debug("[KIS] %s 프로그램매매 조회 실패: %s", symbol, e)
+
+    # ── 공매도 잔고 (FHKST03010100) ──────────────────────────────
+    try:
+        data = await _kis_request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+            tr_id="FHKST03010100",
+            params={
+                "fid_cond_mrkt_div_code": "J",
+                "fid_input_iscd": symbol,
+                "fid_input_date_1": "",
+                "fid_input_date_2": "",
+                "fid_period_div_code": "D",
+                "fid_org_adj_prc": "0",
+            },
+            force_live=True,
+        )
+        rows = data.get("output2") or []
+        if rows:
+            _sr = float(rows[0].get("ssts_rsqn_rate") or 0)
+            result["short_ratio"] = _sr
+    except Exception as e:
+        logger.debug("[KIS] %s 공매도잔고 조회 실패: %s", symbol, e)
+
+    _STOCK_FUNDAMENTAL_CACHE[symbol] = (result, now)
+    logger.debug("[KIS] %s fundamental: 체결강도=%.2f PER_norm=%.2f 공매도=%.1f%%",
+                 symbol, result["cntg_strength"], result["per_norm"], result["short_ratio"])
+    return result
+
+
 # ── 분봉 OHLCV 조회 ─────────────────────────────────────────────
 
 async def get_minute_ohlcv(symbol: str, interval_min: int = 5, count: int = 200) -> list[dict]:
