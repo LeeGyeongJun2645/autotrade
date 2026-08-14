@@ -235,6 +235,8 @@ FEATURE_NAMES = [
     "vol_pressure_bull",  # 최근 5봉 양봉 볼륨 비율 (0~1, >0.6=매수 지배)
     "taker_delta",        # (taker_buy_ratio - 0.5) × 2: -1~+1 정규화 매수/매도 불균형
     "vol_xray_diverge",   # 가격 방향 vs 볼륨 압력 불일치 (1=다이버전스 경고)
+    # ── OBV (On Balance Volume) ──────────────────────────────────────────
+    "obv_trend",          # OBV > 20봉 MA → 1 (누적 매수세 축적 추세)
 ]
 
 
@@ -744,6 +746,15 @@ def compute_features(
     df["vol_xray_diverge"] = (
         (_price_dir5 != _vol_dir5) & (_price_dir5 != 0) & (_vol_dir5 != 0)
     ).astype(float).fillna(0.0)
+
+    # ── OBV (On Balance Volume): 누적 매수/매도 볼륨으로 추세 강도 측정 ──
+    # 상승봉 거래량 합산 - 하락봉 거래량 합산 → 누적치가 MA20 위면 매수세 주도
+    try:
+        _obv = (np.sign(close.diff()) * vol).fillna(0).cumsum()
+        _obv_ma20 = _obv.rolling(20, min_periods=5).mean()
+        df["obv_trend"] = (_obv > _obv_ma20).astype(float)
+    except Exception:
+        df["obv_trend"] = 0.5
 
     # ── 롱/숏 비율 (코인 전용: BTC 선물 기준, else 0.5) ──────────────
     if ls_hist:

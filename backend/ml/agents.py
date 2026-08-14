@@ -60,6 +60,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "zscore_20", "vb_signal",
         # Volume X-Ray: 매수세 압력 확인 (모멘텀 방향 신뢰도 강화)
         "vol_pressure_bull", "taker_delta", "vol_xray_diverge",
+        # OBV: 누적 매수세 축적 추세 확인
+        "obv_trend",
     ],
     "trend": [
         "ma5_ratio", "ma20_ratio", "ma60_ratio",
@@ -107,6 +109,8 @@ FEATURE_SETS: dict[str, list[str]] = {
         "gap_pct", "gap_up", "gap_down", "zscore_20",
         # Volume X-Ray: 매수/매도 압력 분석 (캔들 내부 매수세 측정)
         "vol_pressure_bull", "taker_delta", "vol_xray_diverge",
+        # OBV: 누적 매수세 방향
+        "obv_trend",
     ],
     # ── 역추세 전용 feature_set (ADX<20 횡보장 평균회귀 신호 집중) ──────
     "reversal": [
@@ -1695,6 +1699,47 @@ class SimAgent:
             _exhaustion_buy = _cf("exhaustion_bounce")
             # ── ⑭ 지지선 기울기 양수 (상승 지지선 구조 확인) ────────────
             _sup_slope_up = _fv("support_slope") > 0.0
+
+            # ── ★ 매수 차트 모니터링: RSI / MACD / Vol X-Ray / OBV 실시간 확인 ──
+            # RSI 과매수권(>72) 억제: 이미 많이 오른 자리에서 추가 진입은 위험
+            try:
+                _rsi_e = _fv("rsi_9", 50.0)
+                if _rsi_e > 72:
+                    prob = max(0.01, prob * 0.60)
+                    self._last_hold_reason = f"rsi_overbought:{_rsi_e:.1f}"
+            except Exception:
+                pass
+
+            # MACD 히스토그램 꺾임(음수이면서 하락 중) 억제: 모멘텀 소진 신호
+            try:
+                _macd_e  = _fv("macd_diff", 0.0)
+                _macd_e1 = _fv("macd_diff_lag_1", 0.0)
+                if _macd_e < _macd_e1 and _macd_e < 0:
+                    prob = max(0.01, prob * 0.70)
+                    self._last_hold_reason = "macd_falling_neg"
+            except Exception:
+                pass
+
+            # Vol X-Ray 확인: 매도 볼륨 지배 or 가격/거래량 다이버전스
+            try:
+                _vp_e = _fv("vol_pressure_bull", 0.5)
+                _vxd  = _fv("vol_xray_diverge",  0.0)
+                if _vp_e < 0.38:
+                    prob = max(0.01, prob * 0.80)
+                if _vxd == 1.0:
+                    prob = max(0.01, prob * 0.82)
+            except Exception:
+                pass
+
+            # OBV 하락 추세: 누적 매수세 꺾임 상태에서 지지선도 아니면 약화
+            try:
+                _obv_t = _fv("obv_trend", 1.0)
+                if _obv_t == 0.0 and not (_near_support or _fib_support or _pullback_ok):
+                    prob = max(0.01, prob * 0.88)
+                elif _obv_t == 1.0 and (_near_support or _fib_support or _pullback_ok):
+                    prob = min(0.95, prob * 1.06)  # OBV상승 + 지지선 = 고신뢰 조합
+            except Exception:
+                pass
 
             # ── 약세 캔들 → 신규 진입 직접 차단 (저항선 근처 약세는 더 강하게)
             _bearish_candle = _cf("is_shooting_star") or _cf("is_bearish_engulf")

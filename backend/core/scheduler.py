@@ -97,6 +97,11 @@ _COIN_QUALITY_BLACKLIST: frozenset[str] = frozenset({
     "KRW-O", "KRW-MORPHO", "KRW-LPT", "KRW-META2",
 })
 
+# 업비트 유의종목 경보 동적 블랙리스트 (market_event.warning=true 종목)
+# 1시간마다 갱신, 경보 해제 시 자동 제거
+_UPBIT_WARNING_TICKERS: set[str] = set()
+_UPBIT_WARNING_LAST_UPDATE: float = 0.0
+
 # ── 글로벌 크로스-에이전트 상태 (모든 에이전트 공유) ──────────────────────
 # 에이전트별 독립 cooldown의 한계: AI01 손절 → AI02~AI22는 즉시 재진입 가능
 # 해결: 모듈 레벨 공유 상태로 전체 에이전트 동시 차단
@@ -153,13 +158,39 @@ def _is_cluster_stop() -> bool:
     return len(recent) >= 5
 
 
+async def _refresh_upbit_warning_tickers() -> None:
+    """업비트 유의종목 경보(market_event.warning=true) 목록을 1시간마다 갱신."""
+    global _UPBIT_WARNING_TICKERS, _UPBIT_WARNING_LAST_UPDATE
+    import time as _t
+    if _t.time() - _UPBIT_WARNING_LAST_UPDATE < 3600:
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=8.0) as _c:
+            _r = await _c.get("https://api.upbit.com/v1/market/all?isDetails=true")
+            _r.raise_for_status()
+            _markets = _r.json()
+        _warn = {
+            m["market"] for m in _markets
+            if m.get("market_event", {}).get("warning", False)
+        }
+        _UPBIT_WARNING_TICKERS = _warn
+        _UPBIT_WARNING_LAST_UPDATE = _t.time()
+        if _warn:
+            logger.info("[유의종목] 업비트 경보 %d개 갱신: %s", len(_warn), sorted(_warn)[:10])
+    except Exception as e:
+        logger.debug("[유의종목] 경보 갱신 실패: %s", e)
+
+
 def _is_blacklisted(symbol: str, agent) -> bool:
-    """정적 블랙리스트 + 글로벌 동적 저승률 차단."""
+    """정적 블랙리스트 + 글로벌 동적 저승률 + 업비트 유의종목 경보 차단."""
     if symbol in _TICKER_BLACKLIST:
         return True
     if symbol in _STOCK_QUALITY_BLACKLIST:
         return True
     if symbol in _COIN_QUALITY_BLACKLIST:
+        return True
+    if symbol in _UPBIT_WARNING_TICKERS:
         return True
     # 글로벌 집계 기준 동적 차단 (인메모리 30개 한도 문제 해소)
     s = _TICKER_STATS.get(symbol)
@@ -2325,6 +2356,13 @@ class TradingScheduler:
                         pass
 
         if signal == "buy":
+            # 업비트 유의종목 경보 주기 갱신 (코인 BUY 분기 진입 시 비동기 트리거)
+            if agent.market == "coin":
+                try:
+                    import asyncio as _aio
+                    _aio.ensure_future(_refresh_upbit_warning_tickers())
+                except Exception:
+                    pass
             # 일일 손실 한도 서킷 브레이커 (에이전트별 독립, 3% 초과 시 당일 차단)
             if _is_daily_loss_exceeded(agent):
                 sim_log.push(agent.agent_id, f"[서킷브레이커] {symbol} 오늘 손실 3% 초과 → 신규매수 차단", "WARN")
@@ -2477,6 +2515,10 @@ class TradingScheduler:
                         _inv = {"foreign_net_buy": 0}
                 if _inv.get("foreign_net_buy", 0) < -500:
                     sim_log.push(agent.agent_id, f"[외국인차단] {symbol} 외국인 {_inv['foreign_net_buy']:,}주 순매도", "INFO")
+                    _PENDING_BUYS.discard((agent.agent_id, symbol))
+                    return
+                if _inv.get("institution_net_buy", 0) < -300:
+                    sim_log.push(agent.agent_id, f"[기관차단] {symbol} 기관 {_inv['institution_net_buy']:,}주 순매도", "INFO")
                     _PENDING_BUYS.discard((agent.agent_id, symbol))
                     return
             # 뉴스 감성 필터: -0.5 이하 강한 부정 뉴스 → BUY 차단 (캐시 없으면 통과)
