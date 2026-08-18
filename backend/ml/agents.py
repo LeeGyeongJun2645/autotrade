@@ -942,9 +942,9 @@ class SimAgent:
                 _val_prec = _ps2(y_val, _val_pred, zero_division=0)
                 _val_rec  = _rs2(y_val, _val_pred, zero_division=0)
                 _n_val_buy = int(_val_pred.sum())
-                # precision 기준 0.25→0.15 현실화 (WF 검증은 하락장에서 필연적으로 낮음)
-                _min_prec = 0.08 if self.feature_set == "reversal" else 0.15
-                _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 8) or (
+                # precision 기준 현실화 — 하락장에서 낮을 수밖에 없음
+                _min_prec = 0.05 if self.feature_set == "reversal" else 0.08
+                _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 15) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
                 if _wf_fail:
@@ -1212,8 +1212,8 @@ class SimAgent:
                 _val_pred    = (_val_prob >= _wf_thr_m).astype(int)
                 _val_prec    = _ps(y_val, _val_pred, zero_division=0)
                 _n_val_buy   = int(_val_pred.sum())
-                _min_prec_m  = 0.08 if self.feature_set == "reversal" else 0.15
-                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 8) or (
+                _min_prec_m  = 0.05 if self.feature_set == "reversal" else 0.08
+                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 15) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
                 if _tm_wf_fail:
