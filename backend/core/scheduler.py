@@ -489,8 +489,8 @@ class TradingScheduler:
                     # day_start_balance 복원: DB에 저장된 값 사용, 0이면 현재 잔액으로 초기화
                     _dsb = float(stats.get("day_start_balance") or 0.0)
                     agent.day_start_balance = _dsb if _dsb > 0 else (agent._balance + agent.position_value)
-                    # _dynamic_tp_mult 복원 (재시작 후 3.0 초기화 방지)
-                    agent._dynamic_tp_mult = float(stats.get("dynamic_tp_mult") or 3.0)
+                    # _dynamic_tp_mult 복원 — 최대 2.5로 클램핑 (하락장 양성샘플 확보)
+                    agent._dynamic_tp_mult = min(float(stats.get("dynamic_tp_mult") or 2.0), 2.5)
                     # _partial_tp_done 복원: 당일 부분청산 완료 종목 마킹 (중복청산 방지)
                     agent._partial_tp_done = partial_done_rows.get(agent.agent_id, set())
                     # _peak_price 초기화: 재시작 시 보유 포지션의 entry_price로 보수적 초기화
@@ -1054,6 +1054,10 @@ class TradingScheduler:
                 cash = float(balance["cash"])
                 total_qty = int(RiskManager.calculate_qty(cash, current_price))
                 qty = max(1, int(total_qty * 0.40))  # DCA 1차: 총 수량의 40%
+
+                if current_price * qty < 10_000:
+                    logger.warning("[KIS][%s] 매수 금액 부족 (%.0f원 < 최소 10,000원)", symbol, current_price * qty)
+                    return
 
                 ok, reason = RiskManager.validate_order(cash, current_price, float(qty))
                 if not ok:
@@ -1893,7 +1897,23 @@ class TradingScheduler:
                         agent.update_position_values(coin_prices)
                         # BTC OHLCV (비BTC 코인의 상관관계 피처용 — 60분봉)
                         btc_ohlcv_cache = ohlcv_cache.get(f"KRW-BTC:{agent.interval_str}", [])
-                        for ticker in fetch_coin_tickers:
+                        # ticker_group으로 종목 풀 분리 — 에이전트별 독립 시장 뷰
+                        _nc = len(fetch_coin_tickers)
+                        _tg = getattr(agent, "ticker_group", "all")
+                        if _tg == "top":
+                            _agent_coin_tickers = fetch_coin_tickers[:_nc // 3]
+                        elif _tg == "mid":
+                            _agent_coin_tickers = fetch_coin_tickers[_nc // 3: 2 * _nc // 3]
+                        elif _tg == "small":
+                            _agent_coin_tickers = fetch_coin_tickers[2 * _nc // 3:]
+                        else:
+                            _agent_coin_tickers = fetch_coin_tickers
+                        # 보유 포지션 종목은 그룹 외라도 항상 포함 (청산 필요)
+                        _pos_set = set(agent._positions.keys())
+                        _extra_pos = [t for t in fetch_coin_tickers if t in _pos_set and t not in _agent_coin_tickers]
+                        if _extra_pos:
+                            _agent_coin_tickers = list(_agent_coin_tickers) + _extra_pos
+                        for ticker in _agent_coin_tickers:
                             ohlcv = ohlcv_cache.get(f"{ticker}:{agent.interval_str}", [])
                             if not ohlcv:
                                 continue
@@ -1990,7 +2010,23 @@ class TradingScheduler:
                                     await asyncio.to_thread(
                                         agent.train_multi, _ohlcv_by_sym, _kospi_tr
                                     )
-                        for symbol in stock_symbols:
+                        # ticker_group으로 주식 종목 풀 분리 — 에이전트별 독립 시장 뷰
+                        _ns = len(stock_symbols)
+                        _tg_s = getattr(agent, "ticker_group", "all")
+                        if _tg_s == "top":
+                            _agent_stock_syms = stock_symbols[:_ns // 3]
+                        elif _tg_s == "mid":
+                            _agent_stock_syms = stock_symbols[_ns // 3: 2 * _ns // 3]
+                        elif _tg_s == "small":
+                            _agent_stock_syms = stock_symbols[2 * _ns // 3:]
+                        else:
+                            _agent_stock_syms = stock_symbols
+                        # 보유 포지션 종목은 그룹 외라도 항상 포함 (청산 필요)
+                        _pos_set_s = set(agent._positions.keys())
+                        _extra_pos_s = [s for s in stock_symbols if s in _pos_set_s and s not in _agent_stock_syms]
+                        if _extra_pos_s:
+                            _agent_stock_syms = list(_agent_stock_syms) + _extra_pos_s
+                        for symbol in _agent_stock_syms:
                             ohlcv = stock_ohlcv_cache.get(f"{symbol}:{agent.interval_min}", [])
                             if not ohlcv:
                                 continue
@@ -2181,16 +2217,31 @@ class TradingScheduler:
 
             unreal = (price - pos.entry_price) / pos.entry_price
 
-            # 강제청산: 코인 60분봉 lookahead 8봉=480분(8h), 주식 360분(6h)
-            # 코인을 6h로 단축하면 lookahead 유효 구간 마지막 2h를 사용 못 함 → 480분으로 복원
+            # 강제청산: 코인 480분(8h), 주식 360분(6h)
             _force_close_min = 480 if agent.market == "coin" else 360
             if held_min >= _force_close_min:
                 signal = "sell"
                 sim_log.push(agent.agent_id, f"[{_force_close_min//60}h강제청산] {symbol} {held_min:.0f}분 보유 {unreal*100:.1f}% @ {price:,.0f}원", "SELL")
 
+            # 주식 에이전트: 15:20 KST 이후 당일 미청산 포지션 강제 청산 (장 마감 전)
+            if agent.market == "stock" and signal != "sell":
+                _now_kst = datetime.now(KST)
+                if _now_kst.weekday() < 5 and (
+                    _now_kst.hour > 15 or (_now_kst.hour == 15 and _now_kst.minute >= 20)
+                ):
+                    signal = "sell"
+                    sim_log.push(agent.agent_id, f"[EOD강제청산] {symbol} 15:20 장마감 {unreal*100:+.1f}% @ {price:,.0f}원", "SELL")
+
             # 최소 보유 10분: 진입 직후 신호 기반 조기 청산 완전 차단
             # 분석: 0~10분 청산 WR=38.2%(최악) → 노이즈 신호에 의한 손절이 주원인
-            if held_min < 10:
+            # EOD 강제청산은 held_min 조건 무관하게 항상 우선 — 장 마감 후 포지션 방치 방지
+            _is_eod_force_sell = signal == "sell" and agent.market == "stock" and (
+                datetime.now(KST).weekday() < 5 and (
+                    datetime.now(KST).hour > 15 or
+                    (datetime.now(KST).hour == 15 and datetime.now(KST).minute >= 20)
+                )
+            )
+            if held_min < 10 and not _is_eod_force_sell:
                 extreme_sl = STOP_LOSS * 1.5  # ATR×1.8 (급락 시에만 즉시 손절)
                 if unreal >= tp_base:
                     signal = "sell"

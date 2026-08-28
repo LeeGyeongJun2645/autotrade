@@ -995,7 +995,15 @@ class SimAgent:
                         _cal = CalibratedClassifierCV(clf, cv="prefit", method="isotonic")
                         _cal.fit(_val_s, y_val)
                         clf = _cal
-                        logger.debug("[%s] Isotonic calibration 적용 (val=%d)", self.agent_id, len(y_val))
+                        # calibration 후 확률 분포가 바뀌므로 threshold 재탐색 (uncalibrated 기준값 무효)
+                        _cal_prob = clf.predict_proba(_val_s)[:, 1]
+                        _thr_min_c = 0.30 if self.market == "stock" else 0.10
+                        _thr_max_c = 0.70 if self.market == "stock" else 0.52
+                        thr_cal, prec_cal = _find_best_thr(_cal_prob, y_val)
+                        if prec_cal > 0:
+                            self.buy_threshold = round(min(max(thr_cal, _thr_min_c), _thr_max_c), 2)
+                        logger.debug("[%s] Isotonic calibration 적용 (val=%d) → calibrated thr=%.2f",
+                                     self.agent_id, len(y_val), self.buy_threshold)
                 except Exception as _ce:
                     logger.debug("[%s] Calibration 실패: %s", self.agent_id, _ce)
 
@@ -1265,7 +1273,15 @@ class SimAgent:
                         _cal = CalibratedClassifierCV(clf, cv="prefit", method="isotonic")
                         _cal.fit(_val_s_m, y_val)
                         clf = _cal
-                        logger.debug("[%s] train_multi Isotonic calibration 적용", self.agent_id)
+                        # calibration 후 확률 분포 바뀌므로 threshold 재탐색
+                        _cal_prob_m = clf.predict_proba(_val_s_m)[:, 1]
+                        _thr_min_m = 0.30 if self.market == "stock" else 0.10
+                        _thr_max_m = 0.70 if self.market == "stock" else 0.52
+                        thr_cal_m, prec_cal_m = _find_best_thr(_cal_prob_m, y_val)
+                        if prec_cal_m > 0:
+                            self.buy_threshold = round(min(max(thr_cal_m, _thr_min_m), _thr_max_m), 2)
+                        logger.debug("[%s] train_multi Isotonic calibration 적용 → calibrated thr=%.2f",
+                                     self.agent_id, self.buy_threshold)
                 except Exception as _ce:
                     logger.debug("[%s] train_multi Calibration 실패: %s", self.agent_id, _ce)
 
@@ -2656,19 +2672,20 @@ async def predict_ensemble(
         )
         logger.warning("[앙상블-%s][원인] ticker=%s 에이전트별 hold이유: %s", market, ticker or "-", _reason_summary)
 
-    # ── 매수 판단
-    if buy_votes >= 3 and buy_avg_prob >= 0.50:      # 강한 합의: 3명 이상 + 50%
+    # ── 매수 판단 (우선순위: 많은 합의 → 적은 에이전트 고확신 → avg_thr fallback)
+    if buy_votes >= 4 and buy_avg_prob >= 0.45:      # 압도적 다수: 4명 이상 + 45%
+        return "buy", round(buy_avg_prob, 4)
+    if buy_votes >= 3 and buy_avg_prob >= 0.48:      # 강한 합의: 3명 이상 + 48%
         return "buy", round(buy_avg_prob, 4)
     if buy_votes >= 2 and buy_avg_prob >= 0.50:      # 소수 합의: 2명 + 50%
         return "buy", round(buy_avg_prob, 4)
     if buy_votes >= 1 and buy_avg_prob >= 0.55:      # 단독 강신호: 1명 + 55%
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 4 and buy_avg_prob >= 0.45:      # 압도적 다수: 4명 이상 + 45%
-        return "buy", round(buy_avg_prob, 4)
     # WF 검증된 avg_thr 활용: 에이전트가 1명 이상 동의하고 앙상블 확률이 threshold 이상
     if buy_votes >= 1 and final_prob >= avg_thr:
         return "buy", round(final_prob, 4)
-    if final_prob <= (1.0 - avg_thr):
+    # sell 판단: avg_thr 미달 → sell (avg_thr=0.20이면 final_prob<0.20만 sell)
+    if final_prob < avg_thr:
         return "sell", round(final_prob, 4)
     return "hold", round(final_prob, 4)
 
