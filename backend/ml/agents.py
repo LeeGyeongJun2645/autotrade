@@ -29,7 +29,7 @@ MODEL_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 INITIAL_CAPITAL    = 1_000_000.0   # 에이전트당 초기 가상 자금 (100만원)
-POSITION_RATIO     = 0.15           # 잔액의 15%씩 사용 (0.5→0.15: 리스크 70% 축소)
+POSITION_RATIO     = 0.20           # 잔액의 20%씩 사용
 MAX_OPEN_POSITIONS = 2              # 에이전트당 동시 최대 포지션 수 (3→2)
 
 # ── 피처 세트 정의 ────────────────────────────────────────────────
@@ -265,47 +265,47 @@ FEATURE_SETS: dict[str, list[str]] = {
 # lookahead: 코인 3=3시간/5=5시간/8=8시간, 주식 3=45분/5=75분/8=2시간
 
 AGENT_CONFIGS: list[tuple] = [
-    # (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market, lookahead, model_type)
+    # (agent_id, interval_min, label_threshold, buy_threshold, feature_set, market, lookahead, model_type, ticker_group)
+    # ticker_group: 에이전트별 종목 풀 분리 — "top"(상위1/3) "mid"(중간1/3) "small"(하위1/3) "all"(전체)
     # label_threshold: 60분봉 기준 3~8시간 내 수익 기준 (5분봉 0.006~0.012 → 1h 0.008~0.015)
     # 코인 홀수 → LightGBM / 짝수 → XGBoost (앙상블 다양성 극대화)
-    # archive 2주치 실적: AI01(-43%) AI04(-52%) AI08(-96%) AI10(-79%) 모두 60분봉 최악
-    # → AI16(+25%)/AI12(+7%) 15분봉 trend 패턴으로 교체 (archive 기반 데이터 결정)
-    ("AI01", 15, 0.006, 0.60, "trend",    "coin",  8, "lgbm"),  # AI16 패턴 코인 버전 (1위)
-    ("AI02", 60, 0.009, 0.63, "momentum", "coin",  5, "xgb"),
-    ("AI03", 60, 0.010, 0.62, "trend",    "coin",  8, "lgbm"),  # 장기 추세형
-    ("AI04", 15, 0.006, 0.62, "trend",    "coin",  5, "xgb"),   # AI12 패턴 코인 버전 (2위)
-    ("AI05", 60, 0.012, 0.60, "all",      "coin",  5, "lgbm"),
-    ("AI06", 60, 0.010, 0.65, "momentum", "coin",  8, "xgb"),
-    ("AI07", 60, 0.012, 0.62, "trend",    "coin",  3, "lgbm"),
-    ("AI08", 15, 0.005, 0.60, "momentum", "coin",  5, "xgb"),   # 15분봉 모멘텀
-    ("AI09", 60, 0.015, 0.65, "all",      "coin",  8, "lgbm"),
-    ("AI10", 15, 0.006, 0.65, "volume",   "coin",  6, "xgb"),   # 15분봉 거래량
-    # 주식: 15분봉 — 장중 충분한 데이터 확보 + 노이즈 감소
-    ("AI11", 15, 0.007, 0.58, "all",      "stock", 3, "lgbm"),
-    ("AI12", 15, 0.006, 0.60, "trend",    "stock", 5, "lgbm"),
-    ("AI13", 15, 0.009, 0.58, "momentum", "stock", 8, "lgbm"),
-    ("AI14", 15, 0.006, 0.60, "volume",   "stock", 3, "lgbm"),
-    ("AI15", 15, 0.011, 0.60, "all",      "stock", 5, "lgbm"),
-    ("AI16", 15, 0.006, 0.60, "trend",    "stock", 8, "lgbm"),
-    ("AI17", 15, 0.011, 0.62, "momentum", "stock", 3, "lgbm"),
-    ("AI18", 15, 0.007, 0.60, "volume",   "stock", 5, "lgbm"),
-    ("AI19", 15, 0.010, 0.65, "all",      "stock", 8, "lgbm"),
-    ("AI20", 15, 0.008, 0.60, "trend",    "stock", 6, "lgbm"),
-    # ── 신규 코인 에이전트 (AI21-AI24): 상위 전략(AI01 WR=71%, AI03 WR=80%) 변형 확장
-    ("AI21", 60, 0.012, 0.67, "trend",    "coin",  8, "lgbm"),  # AI03 변형 — 60분봉 추세, 임계값↑
-    ("AI22", 15, 0.005, 0.70, "trend",    "coin",  5, "lgbm"),  # AI01 변형 — 15분봉 추세, 높은 임계값
-    ("AI23", 60, 0.010, 0.66, "momentum", "coin",  5, "lgbm"),  # 60분봉 모멘텀 lgbm (AI02=xgb 대칭)
-    ("AI24", 15, 0.007, 0.68, "all",      "coin",  8, "lgbm"),  # 15분봉 전체 피처 코인 lgbm
-    # ── 신규 주식 에이전트 (AI25-AI28): AI16(WR=100%) 패턴 기반 확장
-    ("AI25", 15, 0.005, 0.63, "trend",    "stock", 8, "lgbm"),  # AI16 변형 — 낮은 label, 잦은 신호
-    ("AI26", 15, 0.008, 0.65, "trend",    "stock", 5, "lgbm"),  # 중간 label 추세 (AI16/AI20 사이)
-    ("AI27", 15, 0.005, 0.63, "volume",   "stock", 3, "lgbm"),  # 거래량 기반 단기 주식
-    ("AI28", 15, 0.006, 0.60, "ha_trend",  "stock", 5, "lgbm"),  # 헤이킨아시+ADX+VWAP 주식
-    # ── 신전략 에이전트 (AI29-AI32): reversal 폐기 → 검증된 퀀트 전략
-    ("AI29", 15, 0.007, 0.62, "squeeze",  "coin",  5, "xgb"),   # BB-Keltner 스퀴즈 코인 (TTM Squeeze)
-    ("AI30", 15, 0.007, 0.62, "donchian", "coin",  8, "lgbm"),  # 도치안 채널 돌파 코인 (터틀 트레이딩)
-    ("AI31", 15, 0.006, 0.60, "vwap_vol", "stock", 5, "lgbm"),  # VWAP+주문흐름 주식 (기관 추종)
-    ("AI32", 15, 0.007, 0.62, "multi_tf", "stock", 8, "xgb"),   # 멀티 타임프레임 정렬 주식
+    # ── 코인 에이전트 (AI01~AI10) ──
+    ("AI01", 15, 0.006, 0.60, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 추세
+    ("AI02", 15, 0.009, 0.63, "momentum", "coin",  5, "xgb",  "top"),    # 메이저 코인 15분 모멘텀
+    ("AI03", 15, 0.010, 0.62, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 장기 추세
+    ("AI04", 15, 0.006, 0.62, "trend",    "coin",  5, "xgb",  "mid"),    # 중형 코인 15분 추세
+    ("AI05", 15, 0.012, 0.60, "all",      "coin",  5, "lgbm", "all"),    # 전체 코인 베이스라인
+    ("AI06", 15, 0.010, 0.65, "momentum", "coin",  8, "xgb",  "mid"),    # 중형 코인 15분 모멘텀
+    ("AI07", 15, 0.012, 0.62, "trend",    "coin",  3, "lgbm", "mid"),    # 중형 코인 15분 단기 추세
+    ("AI08", 15, 0.005, 0.60, "momentum", "coin",  5, "xgb",  "small"),  # 소형 코인 급등 포착
+    ("AI09", 15, 0.015, 0.65, "all",      "coin",  8, "lgbm", "small"),  # 소형 코인 15분 전체
+    ("AI10", 15, 0.006, 0.65, "volume",   "coin",  6, "xgb",  "all"),    # 전체 거래량 분석
+    # ── 주식 에이전트 (AI11~AI20) ──
+    ("AI11", 15, 0.007, 0.58, "all",      "stock", 3, "lgbm", "top"),    # 거래량 상위 전체
+    ("AI12", 15, 0.006, 0.60, "trend",    "stock", 5, "lgbm", "top"),    # 거래량 상위 추세
+    ("AI13", 15, 0.009, 0.58, "momentum", "stock", 8, "lgbm", "mid"),    # 중위 모멘텀
+    ("AI14", 15, 0.006, 0.60, "volume",   "stock", 3, "lgbm", "top"),    # 상위 거래량 분석
+    ("AI15", 15, 0.007, 0.60, "ha_trend", "stock", 5, "lgbm", "mid"),    # 중위 헤이킨아시
+    ("AI16", 15, 0.006, 0.60, "trend",    "stock", 8, "lgbm", "all"),    # 전체 추세 (챔피언 기준선)
+    ("AI17", 15, 0.011, 0.62, "momentum", "stock", 3, "lgbm", "top"),    # 상위 단기 모멘텀
+    ("AI18", 15, 0.007, 0.60, "volume",   "stock", 5, "lgbm", "small"),  # 하위 거래량
+    ("AI19", 15, 0.010, 0.65, "all",      "stock", 8, "lgbm", "mid"),    # 중위 전체
+    ("AI20", 15, 0.008, 0.60, "trend",    "stock", 6, "lgbm", "small"),  # 하위 추세
+    # ── 코인 확장 (AI21~AI24): 상위 전략 변형 ──
+    ("AI21", 15, 0.012, 0.67, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 15분 추세, 임계값↑
+    ("AI22", 15, 0.005, 0.70, "trend",    "coin",  5, "lgbm", "top"),    # 메이저 15분 추세, 높은 임계값
+    ("AI23", 15, 0.010, 0.66, "momentum", "coin",  5, "lgbm", "mid"),    # 중형 15분 모멘텀 lgbm
+    ("AI24", 15, 0.007, 0.68, "all",      "coin",  8, "lgbm", "small"),  # 소형 전체 15분
+    # ── 주식 확장 (AI25~AI28): AI16 패턴 기반 ──
+    ("AI25", 15, 0.007, 0.58, "volume",   "stock", 8, "lgbm", "mid"),    # 중위 거래량
+    ("AI26", 15, 0.008, 0.65, "trend",    "stock", 5, "lgbm", "all"),    # 전체 추세 비교용
+    ("AI27", 15, 0.005, 0.63, "volume",   "stock", 3, "lgbm", "small"),  # 하위 거래량 단기
+    ("AI28", 15, 0.006, 0.60, "ha_trend", "stock", 5, "lgbm", "mid"),    # 중위 헤이킨아시
+    # ── 신전략 에이전트 (AI29~AI32): 검증된 퀀트 전략 ──
+    ("AI29", 15, 0.007, 0.60, "ha_trend", "coin",  5, "lgbm", "mid"),    # 중형 코인 헤이킨아시
+    ("AI30", 15, 0.007, 0.62, "donchian", "coin",  8, "lgbm", "small"),  # 소형 코인 도치안 돌파
+    ("AI31", 15, 0.006, 0.58, "donchian", "stock", 5, "lgbm", "small"),  # 하위 주식 도치안 돌파
+    ("AI32", 15, 0.008, 0.60, "momentum", "stock", 5, "xgb",  "top"),    # 상위 주식 모멘텀 xgb
 ]
 
 
@@ -344,6 +344,7 @@ class SimAgent:
         market: str = "coin",   # "coin" | "stock"
         lookahead: int = 5,     # 레이블링 시 몇 봉 앞 수익 기준 (3=15분/5=25분/8=40분)
         model_type: str = "xgb",  # "xgb" | "lgbm"
+        ticker_group: str = "all",  # "top"(상위1/3) "mid"(중간1/3) "small"(하위1/3) "all"(전체)
     ) -> None:
         self.agent_id = agent_id
         self.interval_min = interval_min
@@ -353,6 +354,7 @@ class SimAgent:
         self.market = market
         self.lookahead = lookahead
         self.model_type = model_type
+        self.ticker_group = ticker_group
         self.feature_names = FEATURE_SETS[feature_set]
 
         self._balance = INITIAL_CAPITAL
@@ -385,7 +387,7 @@ class SimAgent:
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
         self._trailing_mode: set[str] = set()
         # ── MFE/MAE 기반 동적 TP 배수 ─────────────────────────────────
-        self._dynamic_tp_mult: float = 3.0       # R비율 분석 후 재학습 시 자동 갱신 (2.5~3.5)
+        self._dynamic_tp_mult: float = 2.0       # R비율 분석 후 재학습 시 자동 갱신 (하락장 양성샘플 확보)
         # ── 부분 청산 Scale-out (ATR×1.5 도달 시 40% 매도) ────────────
         self._partial_tp_price: dict[str, float] = {}  # 종목별 1차 TP 목표가
         self._partial_tp_done: set[str] = set()         # 1차 청산 완료 종목 추적
@@ -468,7 +470,7 @@ class SimAgent:
         p = max(0.3, min(0.8, self.win_rate))
         b = 1.5   # 평균 이익 / 평균 손실 추정 (보수적)
         kelly = (p * b - (1 - p)) / b
-        return max(0.05, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 5~15% 범위
+        return max(0.05, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 5~20% 범위
 
     def _sharpe_weight(self) -> float:
         """최근 거래 수익률 기반 Sortino 비율 가중치.
@@ -529,6 +531,10 @@ class SimAgent:
             self._trained_at = data.get("trained_at")
             self._trained_feature_names = data.get("trained_feature_names", [])
             self._low_importance_feats = set(data.get("low_importance_feats", []))
+            if "buy_threshold" in data:
+                _min_thr = 0.30 if self.market == "stock" else 0.10
+                _max_thr = 0.70 if self.market == "stock" else 0.52
+                self.buy_threshold = min(max(float(data["buy_threshold"]), _min_thr), _max_thr)
             self.load_meta_model()  # meta 모델도 함께 복원
             return True
         except Exception:
@@ -545,6 +551,7 @@ class SimAgent:
                     "feature_names": self.feature_names,
                     "trained_feature_names": self._trained_feature_names,
                     "low_importance_feats": list(self._low_importance_feats),
+                    "buy_threshold": self.buy_threshold,
                 },
                 f,
             )
@@ -710,7 +717,7 @@ class SimAgent:
             # 하락장 레이블 편향 폴백: 양성 < 3% → TP배수 완화하여 재레이블링
             _min_pos = max(5, len(raw_labels) // 30)
             if int(np.sum(raw_labels)) < _min_pos:
-                _tp_mult_r = max(1.5, self._dynamic_tp_mult * 0.55)
+                _tp_mult_r = max(1.8, self._dynamic_tp_mult * 0.75)
                 raw_labels2 = np.zeros(len(close), dtype=int)
                 for i in range(len(close) - LOOKAHEAD):
                     entry = close.iloc[i]
@@ -923,8 +930,8 @@ class SimAgent:
 
                 def _find_best_thr(prob_arr: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
                     best_thr, best_prec = _init_thr, 0.0
-                    # 0.50→0.35: 코인(max 0.52) threshold 탐색 범위 확대
-                    for _t in np.arange(0.35, 0.75, 0.01):
+                    # 0.05부터 탐색: 모델 확률이 낮을 때도 최적 threshold 탐색 가능
+                    for _t in np.arange(0.05, 0.75, 0.01):
                         _p = (prob_arr >= _t).astype(int)
                         if _p.sum() < max(5, len(y_true) // 20):
                             continue
@@ -943,8 +950,8 @@ class SimAgent:
                 _val_rec  = _rs2(y_val, _val_pred, zero_division=0)
                 _n_val_buy = int(_val_pred.sum())
                 # precision 기준 현실화 — 하락장에서 낮을 수밖에 없음
-                _min_prec = 0.05 if self.feature_set == "reversal" else 0.08
-                _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 15) or (
+                _min_prec = 0.10 if self.feature_set == "reversal" else 0.12
+                _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 10) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
                 if _wf_fail:
@@ -964,14 +971,14 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.55 if self.market == "stock" else 0.45
+                        _thr_min = 0.30 if self.market == "stock" else 0.10
                         _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.55 if self.market == "stock" else 0.45
+                        _thr_min = 0.30 if self.market == "stock" else 0.10
                         _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
                     logger.info(
@@ -980,8 +987,20 @@ class SimAgent:
                         self.buy_threshold, len(X_train), len(X_val),
                     )
 
-            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.45~0.52
-            _min_thr = 0.55 if self.market == "stock" else 0.45
+                # ── Isotonic Calibration: WF 통과 후 val 데이터로 확률 보정 ──
+                # XGBoost/LightGBM은 기본적으로 확률이 0에 치우침 → calibration으로 실제 확률에 근접
+                try:
+                    from sklearn.calibration import CalibratedClassifierCV
+                    if _val_s is not None and len(np.unique(y_val)) == 2 and len(y_val) >= 20:
+                        _cal = CalibratedClassifierCV(clf, cv="prefit", method="isotonic")
+                        _cal.fit(_val_s, y_val)
+                        clf = _cal
+                        logger.debug("[%s] Isotonic calibration 적용 (val=%d)", self.agent_id, len(y_val))
+                except Exception as _ce:
+                    logger.debug("[%s] Calibration 실패: %s", self.agent_id, _ce)
+
+            # 최소/최대 임계값 — 주식 0.30~0.70, 코인 0.10~0.52
+            _min_thr = 0.30 if self.market == "stock" else 0.10
             _max_thr = 0.70 if self.market == "stock" else 0.52
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), _max_thr)
             self._model = clf
@@ -1196,7 +1215,8 @@ class SimAgent:
 
                 def _find_best_thr(prob_arr: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
                     best_thr, best_prec = _init_thr, 0.0
-                    for _t in np.arange(0.35, 0.75, 0.01):
+                    # 0.05부터 탐색: 모델 확률이 낮을 때도 최적 threshold 탐색 가능
+                    for _t in np.arange(0.05, 0.75, 0.01):
                         _p = (prob_arr >= _t).astype(int)
                         if _p.sum() < max(5, len(y_true) // 20):
                             continue
@@ -1212,8 +1232,8 @@ class SimAgent:
                 _val_pred    = (_val_prob >= _wf_thr_m).astype(int)
                 _val_prec    = _ps(y_val, _val_pred, zero_division=0)
                 _n_val_buy   = int(_val_pred.sum())
-                _min_prec_m  = 0.05 if self.feature_set == "reversal" else 0.08
-                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 15) or (
+                _min_prec_m  = 0.10 if self.feature_set == "reversal" else 0.12
+                _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 10) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
                 if _tm_wf_fail:
@@ -1228,17 +1248,29 @@ class SimAgent:
                     thr_a, _ = _find_best_thr(_va_prob, y_val_a)
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.55 if self.market == "stock" else 0.45
+                        _thr_min = 0.30 if self.market == "stock" else 0.10
                         _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.55 if self.market == "stock" else 0.45
+                        _thr_min = 0.30 if self.market == "stock" else 0.10
                         _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
 
-            # 최소/최대 임계값 — 주식 0.55~0.70, 코인 0.45~0.52
-            _min_thr = 0.55 if self.market == "stock" else 0.45
+                # ── Isotonic Calibration: WF 통과 후 val 데이터로 확률 보정 ──
+                try:
+                    from sklearn.calibration import CalibratedClassifierCV
+                    _val_s_m = scaler.transform(X_val)
+                    if len(np.unique(y_val)) == 2 and len(y_val) >= 20:
+                        _cal = CalibratedClassifierCV(clf, cv="prefit", method="isotonic")
+                        _cal.fit(_val_s_m, y_val)
+                        clf = _cal
+                        logger.debug("[%s] train_multi Isotonic calibration 적용", self.agent_id)
+                except Exception as _ce:
+                    logger.debug("[%s] train_multi Calibration 실패: %s", self.agent_id, _ce)
+
+            # 최소/최대 임계값 — 주식 0.30~0.70, 코인 0.10~0.52
+            _min_thr = 0.30 if self.market == "stock" else 0.10
             _max_thr = 0.70 if self.market == "stock" else 0.52
             self.buy_threshold = min(max(self.buy_threshold, _min_thr), _max_thr)
             self._model   = clf
@@ -1471,6 +1503,30 @@ class SimAgent:
             )
             if full_df.empty:
                 return "hold", 0.5
+
+            # ── 1차 기술적 필터: RSI + EMA + VWAP (Freqtrade NFI 방식) ──────
+            # 나쁜 시장 조건(과매수·하락추세)에서 ML 예측 스킵 → 신호 품질 향상
+            _f_rsi      = float(full_df["rsi_9"].iloc[-1])             if "rsi_9"           in full_df.columns else 50.0
+            _f_ema_bull = float(full_df["ema9_cross_ema21"].iloc[-1])  if "ema9_cross_ema21" in full_df.columns else 1.0
+            _f_vwap_up  = float(full_df["vwap_cross"].iloc[-1])        if "vwap_cross"      in full_df.columns else 1.0
+            _f_vol      = float(full_df["vol_ratio"].iloc[-1])         if "vol_ratio"       in full_df.columns else 1.0
+            if self.market == "coin":
+                # RSI < 45 이하면 EMA/VWAP 조건 면제 — 거래 빈도 확보
+                _strong_oversold = _f_rsi < 45
+                _tech_ok = _f_rsi < 55 and (_strong_oversold or _f_ema_bull > 0 or _f_vwap_up > 0)
+            else:
+                # 주식: RSI < 50 이하면 EMA 조건 면제
+                _strong_oversold_s = _f_rsi < 50
+                _tech_ok = _f_rsi < 60 and (_strong_oversold_s or _f_ema_bull > 0)
+            if not _tech_ok:
+                self._last_hold_reason = (
+                    f"1차필터RSI={_f_rsi:.1f}"
+                    f" EMA={'상' if _f_ema_bull > 0 else '하'}"
+                    f" VWAP={'위' if _f_vwap_up > 0 else '아래'}"
+                )
+                return "hold", 0.0
+            # ──────────────────────────────────────────────────────────────────
+
             # ATR / RVOL / ADX 캐싱 — _agent_execute에서 동적 손익 및 BUY 필터에 사용
             if "atr_pct" in full_df.columns:
                 self._last_atr_pct = float(full_df["atr_pct"].iloc[-1])
@@ -1713,8 +1769,8 @@ class SimAgent:
             # RSI 과매수권(>72) 억제: 이미 많이 오른 자리에서 추가 진입은 위험
             try:
                 _rsi_e = _fv("rsi_9", 50.0)
-                if _rsi_e > 72:
-                    prob = max(0.01, prob * 0.60)
+                if _rsi_e > 90:
+                    prob = max(0.01, prob * 0.82)
                     self._last_hold_reason = f"rsi_overbought:{_rsi_e:.1f}"
             except Exception:
                 pass
@@ -1724,7 +1780,7 @@ class SimAgent:
                 _macd_e  = _fv("macd_diff", 0.0)
                 _macd_e1 = _fv("macd_diff_lag_1", 0.0)
                 if _macd_e < _macd_e1 and _macd_e < 0:
-                    prob = max(0.01, prob * 0.70)
+                    prob = max(0.01, prob * 0.88)
                     self._last_hold_reason = "macd_falling_neg"
             except Exception:
                 pass
@@ -1789,24 +1845,24 @@ class SimAgent:
             _near_resistance = _cf("near_resistance_2pct")
             _ma_align_bear  = _cf("ma_bear_align")
             if _bearish_candle:
-                _penalty = 0.30 if _near_resistance else 0.40
+                _penalty = 0.82 if _near_resistance else 0.88
                 self._last_hold_reason = "bearish_candle" + ("+near_res" if _near_resistance else "")
-                return "hold", round(prob * _penalty, 4)
+                prob = max(0.01, prob * _penalty)
 
-            # ── 완전 역배열 + 가짜돌파 경고 → 강한 매수 차단 ──────────
+            # ── 완전 역배열 + 가짜돌파 경고 → 확률 약화
             if _ma_align_bear and _cf("false_breakout_warn"):
                 self._last_hold_reason = "ma_bear+false_brk"
-                return "hold", round(prob * 0.25, 4)
+                prob = max(0.01, prob * 0.88)
 
-            # ── 저항선 2% 이내 + 음봉 추세 → 매수 차단 (벽 앞에서 들어가면 안됨)
+            # ── 저항선 2% 이내 + 음봉 추세 → 확률 약화
             if _near_resistance and _fv("bearish_count_3") >= 2:
                 self._last_hold_reason = "near_res+bear3"
-                return "hold", round(prob * 0.45, 4)
+                prob = max(0.01, prob * 0.90)
 
             # ── 가짜 돌파 경고 단독 → 확률 약화 (hold 강제 없음)
             if _cf("false_breakout_warn") and not (_near_support or _fib_support):
                 self._last_hold_reason = "false_brk"
-                prob = round(prob * 0.70, 4)
+                prob = round(prob * 0.88, 4)
 
             # ── 상승 근거가 하나도 없으면 확률 약화 (hold 강제 없음)
             _has_signal = (
@@ -1817,7 +1873,7 @@ class SimAgent:
             )
             if not _has_signal:
                 self._last_hold_reason = "no_signal"
-                prob = round(prob * 0.75, 4)
+                prob = round(prob * 0.88, 4)
 
             # ── 이중바닥 + 매도소진 → 확률 강화 (고승률 조합) ──────────
             if _double_bottom and _exhaustion_buy:
@@ -1927,6 +1983,7 @@ class SimAgent:
                         return "hold", round(prob, 4)  # 메타 모델이 거부
                 except Exception:
                     pass
+            self._last_hold_reason = ""
             return "buy", round(prob, 4)
         if prob <= (1.0 - self.buy_threshold):
             return "sell", round(prob, 4)
@@ -2030,6 +2087,7 @@ class SimAgent:
                 pass
 
         if prob >= self.adaptive_buy_threshold:
+            self._last_hold_reason = ""
             return "buy", round(prob, 4)
         if prob <= (1.0 - self.buy_threshold):
             return "sell", round(prob, 4)
@@ -2132,10 +2190,10 @@ class SimAgent:
 
         if missed_gain > 0.005 and profit_rate >= 0:
             # 팔고 나서 0.5% 이상 더 올랐음 → TP 배수 상향
-            self._dynamic_tp_mult = min(3.5, self._dynamic_tp_mult + 0.1)
+            self._dynamic_tp_mult = min(2.5, self._dynamic_tp_mult + 0.1)
         elif missed_gain < 0.002 and profit_rate < 0:
             # 팔고 나서 거의 안 올랐고 손절이었음 → TP 배수 하향 (더 빨리 팔아야)
-            self._dynamic_tp_mult = max(2.5, self._dynamic_tp_mult - 0.05)
+            self._dynamic_tp_mult = max(1.5, self._dynamic_tp_mult - 0.05)
 
         self._post_sell_tracker.pop(ticker, None)
 
@@ -2478,19 +2536,13 @@ async def predict_ensemble(
     buy_total_weight  = 0.0  # buy 투표 에이전트의 가중치 합
     _agent_results: list[tuple[str, str, float, str]] = []  # (aid, sig, prob, hold_reason)
     for agent in candidates:
-        ret    = max(agent.total_return, -0.5)
-        sharpe = agent._sharpe_weight()
-        weight = max(sharpe * max(1.0 + ret, 0.1), 0.1)
-        # 고승률 에이전트 발언권 강화 (5거래 이상이면 적용 — 기존 30거래는 너무 늦음)
+        # 최근 승률 × 누적 수익률 기반 가중치 (실험 데이터가 쌓일수록 잘하는 에이전트 발언권↑)
         if agent.total_trades >= 5:
-            if agent.win_rate >= 0.70:
-                weight *= 3.0   # AI21(83%), AI16(75%), AI19(100%) 발언권 대폭 강화
-            elif agent.win_rate >= 0.60:
-                weight *= 2.0
-            elif agent.win_rate >= 0.55:
-                weight *= 1.5
-            elif agent.win_rate >= 0.50:
-                weight *= 1.2
+            wr_score  = max(agent.win_rate, 0.10)          # 승률 0.10~1.0
+            ret_score = max(1.0 + agent.total_return, 0.3) # 수익률 보정 (손실이어도 최소 0.3)
+            weight = wr_score * ret_score
+        else:
+            weight = 0.20  # 거래 5건 미만: 낮은 발언권 (데이터 부족)
 
         # 주식에서 volume 피처셋 가중치 하향 (데이터상 주식에서 일관 실패)
         if market == "stock" and agent.feature_set == "volume":
@@ -2589,7 +2641,7 @@ async def predict_ensemble(
     # agent.buy_threshold (고정) 사용, adaptive_buy_threshold 사용 안 함 (연속손실 오염 방지)
     _fixed_thr_sum = sum(a.label_threshold * 10 + a.buy_threshold for a in candidates)  # 더미 계산용
     avg_thr_raw = (weighted_thr / total_weight) if total_weight > 0 else 0.60
-    avg_thr = max(avg_thr_raw, 0.58)  # 최솟값 0.58 — adaptive 하락으로 avg_thr이 0.1대로 내려가는 것 차단
+    avg_thr = max(avg_thr_raw, 0.10)  # WF 검증된 threshold 반영 — 0.50 floor 제거
     vote_ratio = buy_votes / len(candidates) if candidates else 0.0
 
     # 투표 로그 (앙상블 진단용)
@@ -2604,15 +2656,18 @@ async def predict_ensemble(
         )
         logger.warning("[앙상블-%s][원인] ticker=%s 에이전트별 hold이유: %s", market, ticker or "-", _reason_summary)
 
-    # ── 매수 판단: buy_avg_prob(buy 에이전트만의 평균) 기준 사용 ──────────────
-    # final_prob >= avg_thr 조건 제거: avg_thr이 adaptive 하락으로 낮아지면 0.14 확률로도 BUY하는 문제
-    # buy_votes 기반 투표만 사용 — 실제로 buy 신호를 낸 에이전트들의 합의만 허용
-    if buy_votes >= 3 and buy_avg_prob >= 0.60:      # 강한 합의: 3명 이상 + 확신도 60%
+    # ── 매수 판단
+    if buy_votes >= 3 and buy_avg_prob >= 0.50:      # 강한 합의: 3명 이상 + 50%
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 2 and buy_avg_prob >= 0.66:      # 소수 합의: 2명 + 확신도 강화(기존 0.63→0.66)
+    if buy_votes >= 2 and buy_avg_prob >= 0.50:      # 소수 합의: 2명 + 50%
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 4 and buy_avg_prob >= 0.55:      # 압도적 다수 합의 (완화)
+    if buy_votes >= 1 and buy_avg_prob >= 0.55:      # 단독 강신호: 1명 + 55%
         return "buy", round(buy_avg_prob, 4)
+    if buy_votes >= 4 and buy_avg_prob >= 0.45:      # 압도적 다수: 4명 이상 + 45%
+        return "buy", round(buy_avg_prob, 4)
+    # WF 검증된 avg_thr 활용: 에이전트가 1명 이상 동의하고 앙상블 확률이 threshold 이상
+    if buy_votes >= 1 and final_prob >= avg_thr:
+        return "buy", round(final_prob, 4)
     if final_prob <= (1.0 - avg_thr):
         return "sell", round(final_prob, 4)
     return "hold", round(final_prob, 4)
