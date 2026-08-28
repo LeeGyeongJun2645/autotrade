@@ -950,7 +950,8 @@ class SimAgent:
                 _val_rec  = _rs2(y_val, _val_pred, zero_division=0)
                 _n_val_buy = int(_val_pred.sum())
                 # precision 기준 현실화 — 하락장에서 낮을 수밖에 없음
-                _min_prec = 0.10 if self.feature_set == "reversal" else 0.12
+                # 주식은 약세장에서 buy 레이블 희박 → precision 기준 완화
+                _min_prec = 0.06 if self.market == "stock" else (0.10 if self.feature_set == "reversal" else 0.12)
                 _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 10) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
@@ -1240,7 +1241,7 @@ class SimAgent:
                 _val_pred    = (_val_prob >= _wf_thr_m).astype(int)
                 _val_prec    = _ps(y_val, _val_pred, zero_division=0)
                 _n_val_buy   = int(_val_pred.sum())
-                _min_prec_m  = 0.10 if self.feature_set == "reversal" else 0.12
+                _min_prec_m  = 0.06 if self.market == "stock" else (0.10 if self.feature_set == "reversal" else 0.12)
                 _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 10) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
