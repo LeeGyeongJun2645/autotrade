@@ -695,6 +695,15 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # 종가매매 스캐너: 14:50, 14:55 KST (평일)
+        self._scheduler.add_job(
+            self._jongga_scanner_tick,
+            CronTrigger(day_of_week="mon-fri", hour=14, minute="50,55", timezone=KST),
+            id="jongga_scanner",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         # Upbit: 24/7 5분마다
         self._scheduler.add_job(
             self._upbit_tick,
@@ -874,9 +883,26 @@ class TradingScheduler:
 
         # ── 포지션 보유 중 ──
         if position is not None:
+            # 종가매매 포지션: 다음날 오전 09:05~09:30 자동 청산
+            if position.strategy == "jongga_scanner":
+                _now = datetime.now(KST)
+                if _now.hour == 9 and 5 <= _now.minute <= 30:
+                    _entry_date = position.opened_at[:10]
+                    _today = _now.strftime("%Y-%m-%d")
+                    if _entry_date < _today:  # 전날 매수한 포지션만
+                        _unreal = (current_price - position.entry_price) / position.entry_price
+                        _exit_reason = "JONGGA_AM_EXIT" if _unreal >= -0.02 else "JONGGA_AM_STOPLOSS"
+                        logger.info("[종가스캐너][%s] 오전 자동청산 수익률 %.2f%% → %s", symbol, _unreal * 100, _exit_reason)
+                        await self._execute_kis_sell(symbol, position, _exit_reason, current_price)
+                        # 임시 등록된 감시 종목 해제
+                        self.remove_kis_symbol(symbol)
+                        return
+
             exit_signal = RiskManager.tick(position, current_price)
             if exit_signal.should_exit:
                 await self._execute_kis_sell(symbol, position, exit_signal.reason, current_price)
+                if position.strategy == "jongga_scanner":
+                    self.remove_kis_symbol(symbol)
                 return
 
             # MA/RSI 전략 청산 신호 확인 (5분봉)
@@ -1216,6 +1242,149 @@ class TradingScheduler:
                 )
             except Exception:
                 logger.exception("[KIS][%s] EOD 매도 중 예외", symbol)
+
+    # ── 종가매매 스캐너 ───────────────────────────────────────────
+
+    async def _jongga_scanner_tick(self) -> None:
+        """14:50, 14:55 KST — 종가매매 종목 스캔 후 매수."""
+        now = datetime.now(KST)
+        if now.weekday() >= 5:
+            return
+        if not (now.hour == 14 and now.minute >= 48):
+            return  # 14:48 이전 오발동 방어
+
+        logger.info("[종가스캐너] 스캔 시작 (%02d:%02d KST)", now.hour, now.minute)
+        try:
+            candidates = await self._scan_jongga_candidates()
+        except Exception:
+            logger.exception("[종가스캐너] 후보 종목 스캔 실패")
+            return
+
+        if not candidates:
+            logger.info("[종가스캐너] 조건 충족 종목 없음")
+            return
+
+        bought = 0
+        for symbol, price_data in candidates:
+            if bought >= 2:  # 최대 2종목
+                break
+            async with self._lock:
+                if symbol in self._positions or symbol in self._pending_buys:
+                    continue
+
+            try:
+                ohlcv_ml = await kis.get_minute_ohlcv(symbol, interval_min=15, count=200)
+            except Exception:
+                continue
+
+            ml_ok = await self._check_ml_gate(symbol, ohlcv_ml, market="stock",
+                                              ohlcv_by_interval={15: ohlcv_ml})
+            current_price = float(price_data["current_price"])
+            change_rate = float(price_data.get("change_rate", 0))
+
+            if ml_ok:
+                from backend.strategies import StrategyResult
+                fake_result = StrategyResult(signal="BUY", reason=f"종가스캐너 등락 {change_rate:+.2f}%")
+                # 감시 종목 등록: _process_kis_symbol 호출 대상이 되어야 오전 청산 로직 발동
+                self.add_kis_symbol(symbol)
+                sim_log.push(symbol, f"[종가스캐너] ML통과 → 매수 @ {current_price:,.0f}원 ({change_rate:+.2f}%)", "BUY")
+                await self._execute_kis_buy_jongga(symbol, current_price, fake_result)
+                bought += 1
+            else:
+                sim_log.push(symbol, f"[종가스캐너] ML차단 ({change_rate:+.2f}%)", "INFO")
+
+    async def _scan_jongga_candidates(self) -> list[tuple[str, dict]]:
+        """거래량 상위 종목 중 종가매매 조건 충족 종목 반환. [(symbol, price_data)]"""
+        volume_top = await kis.get_volume_rank(50)
+
+        results: list[tuple[str, dict]] = []
+        checked = 0
+        for symbol in volume_top:
+            if checked >= 30:
+                break
+            if symbol in _TICKER_BLACKLIST or symbol in _STOCK_QUALITY_BLACKLIST:
+                continue
+            async with self._lock:
+                if symbol in self._positions:
+                    continue  # 이미 보유 중
+            checked += 1
+            try:
+                price_data = await kis.get_price(symbol)
+            except Exception:
+                continue
+
+            current_price = float(price_data.get("current_price", 0))
+            open_price = float(price_data.get("open_price", current_price))
+            change_rate = float(price_data.get("change_rate", 0))
+
+            # 양봉 확인 (종가 > 시가)
+            if current_price <= open_price:
+                continue
+            # 등락률 1.5%~9% (과열/약세 제외)
+            if not (1.5 <= change_rate <= 9.0):
+                continue
+            # 윗꼬리 < 몸통의 50% (음봉 선반영 제외)
+            high_price = float(price_data.get("high_price", current_price))
+            body = current_price - open_price
+            upper_shadow = high_price - current_price
+            if body > 0 and upper_shadow > body * 0.5:
+                continue
+
+            results.append((symbol, price_data))
+            if len(results) >= 5:
+                break
+
+        logger.info("[종가스캐너] 후보 %d개: %s", len(results), [s for s, _ in results])
+        return results
+
+    async def _execute_kis_buy_jongga(
+        self,
+        symbol: str,
+        current_price: float,
+        signal,
+    ) -> None:
+        """종가매매 전용 매수 — strategy='jongga_scanner' 태깅."""
+        try:
+            async with self._lock:
+                if symbol in self._positions or symbol in self._pending_buys:
+                    return
+                self._pending_buys.add(symbol)
+            try:
+                balance = await kis.get_balance()
+                cash = float(balance["cash"])
+                qty = max(1, int(RiskManager.calculate_qty(cash, current_price) * 0.35))
+
+                if current_price * qty < 10_000:
+                    logger.warning("[종가스캐너][%s] 매수 금액 부족", symbol)
+                    return
+
+                ok, reason = RiskManager.validate_order(cash, current_price, float(qty))
+                if not ok:
+                    logger.warning("[종가스캐너][%s] 매수 불가: %s", symbol, reason)
+                    return
+
+                await kis.place_buy_order(symbol, qty)
+                position = RiskManager.open_position(
+                    symbol=symbol,
+                    entry_price=current_price,
+                    qty=float(qty),
+                    strategy="jongga_scanner",
+                    is_crypto=False,
+                    stop_loss_rate=-0.03,   # 3% 손절
+                    take_profit_rate=0.05,  # 5% 익절
+                )
+                async with self._lock:
+                    self._positions[symbol] = position
+                    # jongga 포지션은 DCA 없음 — dca_state 미등록으로 불필요 API 호출 방지
+                await upsert_position(symbol, "KIS", position)
+                await insert_trade(symbol, "KIS", "BUY", float(qty), current_price, "jongga_scanner", signal.reason)
+                sim_log.push(symbol, f"[종가스캐너] 매수 {qty}주 @ {current_price:,.0f}원", "BUY")
+                logger.info("[종가스캐너 매수] %s %d주 @ %,.0f원", symbol, qty, current_price)
+                await telegram.notify_buy(symbol, float(qty), current_price, "jongga_scanner", signal.reason)
+            finally:
+                self._pending_buys.discard(symbol)
+        except Exception:
+            logger.exception("[종가스캐너][%s] 매수 실행 중 예외", symbol)
 
     # ── Upbit 틱 ─────────────────────────────────────────────────
 
