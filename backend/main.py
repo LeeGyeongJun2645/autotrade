@@ -90,6 +90,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     await init_db()
+    from backend.core.market_analyst import init_analyst_db
+    await init_analyst_db()
     await scheduler.restore_positions()
     scheduler.start()
     logger.info("AutoTrade 서버 시작 (모드: %s)", settings.trade_mode)

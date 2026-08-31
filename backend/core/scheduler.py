@@ -18,6 +18,10 @@ from apscheduler.triggers.cron import CronTrigger
 from backend.api import kis, telegram, upbit
 from backend.config import settings
 from backend.core.daily_report import send_daily_report
+from backend.core.market_analyst import (
+    init_analyst_db, run_market_analysis,
+    log_trade_decision, log_post_trade, detect_market_regime,
+)
 from backend.core.risk_manager import Position, RiskManager
 from backend.core import sim_log
 from backend.models.trade import delete_position, insert_trade, load_all_positions, upsert_position
@@ -704,6 +708,15 @@ class TradingScheduler:
             coalesce=True,
             max_instances=1,
         )
+        # 시장 분석 에이전트: 30분마다
+        self._scheduler.add_job(
+            run_market_analysis,
+            CronTrigger(minute="*/30", timezone=KST),
+            id="market_analyst",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         # Upbit: 24/7 5분마다
         self._scheduler.add_job(
             self._upbit_tick,
@@ -1017,6 +1030,19 @@ class TradingScheduler:
                 symbol, n, signal, prob * 100,
                 "통과" if approved else "차단",
             )
+            # 결정 로깅 (비동기, 실패해도 무시)
+            try:
+                from backend.ml.agents import AGENTS, predict_ensemble as _pe
+                _candidates = [a for a in AGENTS.values() if a.market == market and a._model is not None]
+                _avg_thr = sum(a.buy_threshold for a in _candidates) / len(_candidates) if _candidates else 0.5
+                _buy_votes = sum(1 for a in _candidates if hasattr(a, '_last_signal') and a._last_signal == "buy")
+                asyncio.create_task(log_trade_decision(
+                    symbol=symbol, market=market, signal=signal,
+                    final_prob=prob, buy_votes=_buy_votes, avg_thr=_avg_thr,
+                    top_features=[], reason="통과" if approved else "차단",
+                ))
+            except Exception:
+                pass
             return approved
         except Exception:
             logger.warning("[ML Gate][%s] 앙상블 실패, 통과 처리", symbol)
@@ -1161,6 +1187,19 @@ class TradingScheduler:
             await insert_trade(symbol, "KIS", "SELL", float(qty), current_price, position.strategy, reason, profit_rate)
             sim_log.push(symbol, f"매도 체결 {qty}주 @ {current_price:,.0f}원 | 수익률 {profit_rate*100:+.2f}% | {reason}", "SELL")
             await telegram.notify_sell(symbol, float(qty), current_price, profit_rate, reason)
+            # 사후 분석 기록 (비동기, 실패 무시)
+            try:
+                from datetime import datetime as _dt
+                _held = int((
+                    _dt.now(KST) - _dt.fromisoformat(position.opened_at)
+                ).total_seconds() / 60)
+                asyncio.create_task(log_post_trade(
+                    symbol=symbol, market="stock",
+                    entry_price=position.entry_price, exit_price=current_price,
+                    hold_minutes=_held, top_features=[],
+                ))
+            except Exception:
+                pass
             try:
                 await delete_position(symbol)
             except Exception:

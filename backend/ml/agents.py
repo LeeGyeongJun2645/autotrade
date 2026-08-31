@@ -269,17 +269,17 @@ AGENT_CONFIGS: list[tuple] = [
     # ticker_group: 에이전트별 종목 풀 분리 — "top"(상위1/3) "mid"(중간1/3) "small"(하위1/3) "all"(전체)
     # label_threshold: 60분봉 기준 3~8시간 내 수익 기준 (5분봉 0.006~0.012 → 1h 0.008~0.015)
     # 코인 홀수 → LightGBM / 짝수 → XGBoost (앙상블 다양성 극대화)
-    # ── 코인 에이전트 (AI01~AI10) ──
-    ("AI01", 15, 0.006, 0.60, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 추세
-    ("AI02", 15, 0.009, 0.63, "momentum", "coin",  5, "xgb",  "top"),    # 메이저 코인 15분 모멘텀
-    ("AI03", 15, 0.010, 0.62, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 장기 추세
-    ("AI04", 15, 0.006, 0.62, "trend",    "coin",  5, "xgb",  "mid"),    # 중형 코인 15분 추세
-    ("AI05", 15, 0.012, 0.60, "all",      "coin",  5, "lgbm", "all"),    # 전체 코인 베이스라인
-    ("AI06", 15, 0.010, 0.65, "momentum", "coin",  8, "xgb",  "mid"),    # 중형 코인 15분 모멘텀
-    ("AI07", 15, 0.012, 0.62, "trend",    "coin",  3, "lgbm", "mid"),    # 중형 코인 15분 단기 추세
-    ("AI08", 15, 0.005, 0.60, "momentum", "coin",  5, "xgb",  "small"),  # 소형 코인 급등 포착
-    ("AI09", 15, 0.015, 0.65, "all",      "coin",  8, "lgbm", "small"),  # 소형 코인 15분 전체
-    ("AI10", 15, 0.006, 0.65, "volume",   "coin",  6, "xgb",  "all"),    # 전체 거래량 분석
+    # ── 코인 에이전트 (AI01~AI10) ──  label_threshold 횡보/약세장 대응 완화 (0.6%→0.3~0.5%)
+    ("AI01", 15, 0.004, 0.60, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 추세
+    ("AI02", 15, 0.005, 0.63, "momentum", "coin",  5, "xgb",  "top"),    # 메이저 코인 15분 모멘텀
+    ("AI03", 15, 0.005, 0.62, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 장기 추세
+    ("AI04", 15, 0.004, 0.62, "trend",    "coin",  5, "xgb",  "mid"),    # 중형 코인 15분 추세
+    ("AI05", 15, 0.006, 0.60, "all",      "coin",  5, "lgbm", "all"),    # 전체 코인 베이스라인
+    ("AI06", 15, 0.005, 0.65, "momentum", "coin",  8, "xgb",  "mid"),    # 중형 코인 15분 모멘텀
+    ("AI07", 15, 0.006, 0.62, "trend",    "coin",  3, "lgbm", "mid"),    # 중형 코인 15분 단기 추세
+    ("AI08", 15, 0.003, 0.60, "momentum", "coin",  5, "xgb",  "small"),  # 소형 코인 급등 포착
+    ("AI09", 15, 0.007, 0.65, "all",      "coin",  8, "lgbm", "small"),  # 소형 코인 15분 전체
+    ("AI10", 15, 0.004, 0.65, "volume",   "coin",  6, "xgb",  "all"),    # 전체 거래량 분석
     # ── 주식 에이전트 (AI11~AI20) ──
     ("AI11", 15, 0.007, 0.58, "all",      "stock", 3, "lgbm", "top"),    # 거래량 상위 전체
     ("AI12", 15, 0.006, 0.60, "trend",    "stock", 5, "lgbm", "top"),    # 거래량 상위 추세
@@ -292,18 +292,18 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI19", 15, 0.010, 0.65, "all",      "stock", 8, "lgbm", "mid"),    # 중위 전체
     ("AI20", 15, 0.008, 0.60, "trend",    "stock", 6, "lgbm", "small"),  # 하위 추세
     # ── 코인 확장 (AI21~AI24): 상위 전략 변형 ──
-    ("AI21", 15, 0.012, 0.67, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 15분 추세, 임계값↑
-    ("AI22", 15, 0.005, 0.70, "trend",    "coin",  5, "lgbm", "top"),    # 메이저 15분 추세, 높은 임계값
-    ("AI23", 15, 0.010, 0.66, "momentum", "coin",  5, "lgbm", "mid"),    # 중형 15분 모멘텀 lgbm
-    ("AI24", 15, 0.007, 0.68, "all",      "coin",  8, "lgbm", "small"),  # 소형 전체 15분
+    ("AI21", 15, 0.006, 0.67, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 15분 추세, 임계값↑
+    ("AI22", 15, 0.003, 0.70, "trend",    "coin",  5, "lgbm", "top"),    # 메이저 15분 추세, 높은 임계값
+    ("AI23", 15, 0.005, 0.66, "momentum", "coin",  5, "lgbm", "mid"),    # 중형 15분 모멘텀 lgbm
+    ("AI24", 15, 0.004, 0.68, "all",      "coin",  8, "lgbm", "small"),  # 소형 전체 15분
     # ── 주식 확장 (AI25~AI28): AI16 패턴 기반 ──
     ("AI25", 15, 0.007, 0.58, "volume",   "stock", 8, "lgbm", "mid"),    # 중위 거래량
     ("AI26", 15, 0.008, 0.65, "trend",    "stock", 5, "lgbm", "all"),    # 전체 추세 비교용
     ("AI27", 15, 0.005, 0.63, "volume",   "stock", 3, "lgbm", "small"),  # 하위 거래량 단기
     ("AI28", 15, 0.006, 0.60, "ha_trend", "stock", 5, "lgbm", "mid"),    # 중위 헤이킨아시
     # ── 신전략 에이전트 (AI29~AI32): 검증된 퀀트 전략 ──
-    ("AI29", 15, 0.007, 0.60, "ha_trend", "coin",  5, "lgbm", "mid"),    # 중형 코인 헤이킨아시
-    ("AI30", 15, 0.007, 0.62, "donchian", "coin",  8, "lgbm", "small"),  # 소형 코인 도치안 돌파
+    ("AI29", 15, 0.004, 0.60, "ha_trend", "coin",  5, "lgbm", "mid"),    # 중형 코인 헤이킨아시
+    ("AI30", 15, 0.004, 0.62, "donchian", "coin",  8, "lgbm", "small"),  # 소형 코인 도치안 돌파
     ("AI31", 15, 0.006, 0.58, "donchian", "stock", 5, "lgbm", "small"),  # 하위 주식 도치안 돌파
     ("AI32", 15, 0.008, 0.60, "momentum", "stock", 5, "xgb",  "top"),    # 상위 주식 모멘텀 xgb
 ]
@@ -951,7 +951,7 @@ class SimAgent:
                 _n_val_buy = int(_val_pred.sum())
                 # precision 기준 현실화 — 하락장에서 낮을 수밖에 없음
                 # 주식은 약세장에서 buy 레이블 희박 → precision 기준 완화
-                _min_prec = 0.06 if self.market == "stock" else (0.10 if self.feature_set == "reversal" else 0.12)
+                _min_prec = 0.06 if self.market == "stock" else 0.06  # 코인 약세장 대응 완화
                 _wf_fail = val_acc < 0.50 or (_val_prec < _min_prec and _n_val_buy > 10) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
@@ -972,14 +972,14 @@ class SimAgent:
                     # 최종: 최신 60% + 이전 40% 가중 평균
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.30 if self.market == "stock" else 0.10
+                        _thr_min = 0.30 if self.market == "stock" else 0.05
                         _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                     logger.debug("[%s] 2창WF %.1f%% | 창A %.2f + 창B %.2f → %.2f",
                                  self.agent_id, val_acc * 100, thr_a, thr_b, self.buy_threshold)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.30 if self.market == "stock" else 0.10
+                        _thr_min = 0.30 if self.market == "stock" else 0.05
                         _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
                     logger.info(
@@ -1241,7 +1241,7 @@ class SimAgent:
                 _val_pred    = (_val_prob >= _wf_thr_m).astype(int)
                 _val_prec    = _ps(y_val, _val_pred, zero_division=0)
                 _n_val_buy   = int(_val_pred.sum())
-                _min_prec_m  = 0.06 if self.market == "stock" else (0.10 if self.feature_set == "reversal" else 0.12)
+                _min_prec_m  = 0.06 if self.market == "stock" else 0.06  # 코인 약세장 대응 완화
                 _tm_wf_fail  = val_acc < 0.50 or (_val_prec < _min_prec_m and _n_val_buy > 10) or (
                     _n_val_buy < 1 and len(X_val) > 100
                 )
@@ -1257,12 +1257,12 @@ class SimAgent:
                     thr_a, _ = _find_best_thr(_va_prob, y_val_a)
                     if prec_b > 0:
                         _combined = 0.6 * thr_b + 0.4 * thr_a
-                        _thr_min = 0.30 if self.market == "stock" else 0.10
+                        _thr_min = 0.30 if self.market == "stock" else 0.05
                         _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(_combined, _thr_min), _thr_max), 2)
                 else:
                     if prec_b > 0:
-                        _thr_min = 0.30 if self.market == "stock" else 0.10
+                        _thr_min = 0.30 if self.market == "stock" else 0.05
                         _thr_max = 0.70 if self.market == "stock" else 0.52
                         self.buy_threshold = round(min(max(thr_b, _thr_min), _thr_max), 2)
 
