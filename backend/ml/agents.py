@@ -2661,10 +2661,22 @@ async def predict_ensemble(
     avg_thr = max(avg_thr_raw, 0.10)  # WF 검증된 threshold 반영 — 0.50 floor 제거
     vote_ratio = buy_votes / len(candidates) if candidates else 0.0
 
+    # ── 장세별 동적 기준 조정 ──────────────────────────────────────
+    _avg_thr_mult = 1.0
+    _min_buy_votes_single = 1  # 단독 강신호 최소 votes
+    try:
+        from backend.core.market_analyst import get_regime_adaptive_thresholds
+        _rp = get_regime_adaptive_thresholds(market)
+        _avg_thr_mult = _rp["avg_thr_mult"]
+        _min_buy_votes_single = _rp["min_buy_votes"]
+    except Exception:
+        pass
+    avg_thr_adj = avg_thr * _avg_thr_mult  # 장세 조정 threshold
+
     # 투표 로그 (앙상블 진단용)
     logger.warning(
-        "[앙상블-%s] ticker=%s final_prob=%.4f buy_avg=%.4f avg_thr=%.4f buy_votes=%d/%d",
-        market, ticker or "-", final_prob, buy_avg_prob, avg_thr, buy_votes, len(candidates),
+        "[앙상블-%s] ticker=%s final_prob=%.4f buy_avg=%.4f avg_thr=%.4f(adj=%.4f) buy_votes=%d/%d",
+        market, ticker or "-", final_prob, buy_avg_prob, avg_thr, avg_thr_adj, buy_votes, len(candidates),
     )
     # buy_votes=0 시 hold 원인 분석
     if buy_votes == 0 and _agent_results:
@@ -2673,20 +2685,20 @@ async def predict_ensemble(
         )
         logger.warning("[앙상블-%s][원인] ticker=%s 에이전트별 hold이유: %s", market, ticker or "-", _reason_summary)
 
-    # ── 매수 판단 (우선순위: 많은 합의 → 적은 에이전트 고확신 → avg_thr fallback)
-    if buy_votes >= 4 and buy_avg_prob >= 0.45:      # 압도적 다수: 4명 이상 + 45%
+    # ── 매수 판단 (우선순위: 많은 합의 → 고확신 단독 → 장세조정 avg_thr fallback)
+    if buy_votes >= 4 and buy_avg_prob >= 0.45:
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 3 and buy_avg_prob >= 0.48:      # 강한 합의: 3명 이상 + 48%
+    if buy_votes >= 3 and buy_avg_prob >= 0.48:
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 2 and buy_avg_prob >= 0.50:      # 소수 합의: 2명 + 50%
+    if buy_votes >= 2 and buy_avg_prob >= 0.50:
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 1 and buy_avg_prob >= 0.55:      # 단독 강신호: 1명 + 55%
+    if buy_votes >= _min_buy_votes_single and buy_avg_prob >= 0.55:
         return "buy", round(buy_avg_prob, 4)
-    # WF 검증된 avg_thr 활용: 에이전트가 1명 이상 동의하고 앙상블 확률이 threshold 이상
-    if buy_votes >= 1 and final_prob >= avg_thr:
+    # WF 검증된 avg_thr (장세 보정) — 에이전트 1명 이상 동의 + 앙상블 확률 >= 조정 threshold
+    if buy_votes >= 1 and final_prob >= avg_thr_adj:
         return "buy", round(final_prob, 4)
-    # sell 판단: avg_thr 미달 → sell (avg_thr=0.20이면 final_prob<0.20만 sell)
-    if final_prob < avg_thr:
+    # sell 판단: 조정 threshold 미달
+    if final_prob < avg_thr_adj:
         return "sell", round(final_prob, 4)
     return "hold", round(final_prob, 4)
 

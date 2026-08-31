@@ -26,12 +26,32 @@ from backend.config import settings
 logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
-# ── 마지막 텔레그램 발송 시각 (1시간 쿨다운) ──────────────────────
+# ── 마지막 텔레그램 발송 시각 (하루 1회) ─────────────────────────
 _last_report_at: float = 0.0
-_REPORT_COOLDOWN = 3600.0
+_REPORT_COOLDOWN = 86400.0  # 24h — 시장 분석 결과는 학습에 자동 반영, 리포트는 하루 1회만
 
 # ── 시장 레짐 캐시 ────────────────────────────────────────────────
 _market_regime_cache: dict = {}  # {"kospi": "bull"|"bear"|"sideways", "coin": ..., "ts": float}
+
+
+def get_regime_adaptive_thresholds(market: str) -> dict:
+    """현재 장세에 따른 ML 매수 기준 동적 조정값 반환.
+
+    반환:
+        label_threshold_mult: 재학습 시 label_threshold 배수 (0.7~1.1)
+        avg_thr_mult:         predict_ensemble avg_thr 조정 배수 (0.80~1.0)
+        min_buy_votes:        최소 매수 동의 에이전트 수
+    """
+    regime = _market_regime_cache.get(market, "unknown")
+    if regime == "bear":
+        # 약세장: 레이블 기준 낮춤(buy 샘플 확보) + avg_thr 완화(회복 신호 포착)
+        return {"label_threshold_mult": 0.70, "avg_thr_mult": 0.82, "min_buy_votes": 1}
+    elif regime == "bull":
+        # 강세장: 레이블 기준 높임(품질 유지) + avg_thr 정상(불필요한 추격매수 방지)
+        return {"label_threshold_mult": 1.05, "avg_thr_mult": 1.00, "min_buy_votes": 2}
+    else:  # sideways / unknown
+        # 횡보장: 적당히 완화
+        return {"label_threshold_mult": 0.85, "avg_thr_mult": 0.90, "min_buy_votes": 1}
 
 
 # ── DB 테이블 DDL ─────────────────────────────────────────────────

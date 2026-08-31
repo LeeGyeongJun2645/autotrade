@@ -53,10 +53,10 @@ class Settings(BaseSettings):
 
     # ── 전략 파라미터 ────────────────────────────────────────────
     volatility_k: float = 0.5
-    ma_short: int = 20
-    ma_long: int = 60
+    ma_short: int = 10
+    ma_long: int = 30
     rsi_period: int = 14
-    rsi_oversold: float = 30.0
+    rsi_oversold: float = 40.0
     rsi_overbought: float = 70.0
 
     # ── 포트폴리오 원금 (0 = 첫 스냅샷 기준 자동) ─────────────────────

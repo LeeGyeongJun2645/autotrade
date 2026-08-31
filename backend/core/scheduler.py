@@ -3217,6 +3217,22 @@ class TradingScheduler:
                         _old_fs, _ea.feature_set, _old_int, _ea.interval_min, _ea.buy_threshold,
                     )
 
+        # ── 장세 감지 → label_threshold 동적 조정 배수 결정 ─────────
+        from backend.core.market_analyst import detect_market_regime, get_regime_adaptive_thresholds
+        try:
+            _regime_now = await detect_market_regime()
+            _coin_rp  = get_regime_adaptive_thresholds("coin")
+            _stock_rp = get_regime_adaptive_thresholds("stock")
+            logger.info(
+                "[Retrain] 장세 적응형 학습 | 코인=%s(label×%.2f avg_thr×%.2f) 주식=%s(label×%.2f avg_thr×%.2f)",
+                _regime_now.get("coin"), _coin_rp["label_threshold_mult"], _coin_rp["avg_thr_mult"],
+                _regime_now.get("stock"), _stock_rp["label_threshold_mult"], _stock_rp["avg_thr_mult"],
+            )
+        except Exception:
+            _coin_rp  = {"label_threshold_mult": 1.0, "avg_thr_mult": 1.0}
+            _stock_rp = {"label_threshold_mult": 1.0, "avg_thr_mult": 1.0}
+            logger.warning("[Retrain] 장세 감지 실패, 기본 threshold 사용")
+
         # ── 에이전트별 재학습 (AI01-AI28 + ENSEMBLE_COIN/ENSEMBLE_STOCK) ───
         success = 0
         for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
@@ -3244,6 +3260,12 @@ class TradingScheduler:
                 if btc_ls_train:
                     agent._cached_ls_hist    = btc_ls_train
             _trade_res = agent_trade_results.get(agent.agent_id) or None
+
+            # 장세 기반 label_threshold 임시 조정 (학습 중에만 적용)
+            _orig_thr = agent.label_threshold
+            _rp = _coin_rp if agent.market == "coin" else _stock_rp
+            agent.label_threshold = round(_orig_thr * _rp["label_threshold_mult"], 5)
+
             try:
                 async with agent._train_lock:
                     if agent.market == "stock":
@@ -3252,6 +3274,7 @@ class TradingScheduler:
                         if not _iv_map:
                             logger.warning("[Retrain][%s] 주식 학습 데이터 없음(%dmin), 스킵",
                                            agent.agent_id, agent.interval_min)
+                            agent.label_threshold = _orig_thr
                             continue
                         trained = await asyncio.to_thread(
                             agent.train_multi, _iv_map, _kospi_ref
@@ -3264,6 +3287,7 @@ class TradingScheduler:
                                          else coin_ohlcv_ticker)
                         if not data:
                             logger.warning("[Retrain][%s] 코인 학습 데이터 없음, 스킵", agent.agent_id)
+                            agent.label_threshold = _orig_thr
                             continue
                         _ls_ref = btc_ls_train if btc_ls_train else None
                         trained = await asyncio.to_thread(
@@ -3272,11 +3296,14 @@ class TradingScheduler:
                         )
                 if trained:
                     success += 1
-                    logger.info("[Retrain][%s] 재학습 완료", agent.agent_id)
+                    logger.info("[Retrain][%s] 재학습 완료 (label_thr=%.5f→%.5f)",
+                                agent.agent_id, _orig_thr, agent.label_threshold)
                 else:
                     logger.warning("[Retrain][%s] 재학습 실패 (데이터 부족 또는 레이블 편향)", agent.agent_id)
             except Exception:
                 logger.exception("[Retrain][%s] 재학습 중 예외", agent.agent_id)
+            finally:
+                agent.label_threshold = _orig_thr  # 원래 값 복원
 
         _all = list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values())
         _total_agents = sum(
