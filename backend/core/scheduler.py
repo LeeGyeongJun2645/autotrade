@@ -388,6 +388,14 @@ class TradingScheduler:
 
         # ── 좀비 포지션 검증 (서버 재시작 사이 청산된 포지션 제거) ──
         await self._validate_positions()
+
+        # ── 종가매매 포지션 감시 복구: 재시작 후 _kis_symbols에 없어서 오전 청산 못하는 버그 방지 ──
+        async with self._lock:
+            for symbol, pos in self._positions.items():
+                if getattr(pos, "strategy", None) == "jongga_scanner" and symbol not in self._kis_symbols:
+                    self._kis_symbols.add(symbol)
+                    logger.info("[restore] 종가매매 포지션 감시 복구: %s", symbol)
+
         # ── 에이전트 stats 복구 (잔액·거래수·승률·is_active·buy_threshold) ──
         await self._restore_agent_stats()
 
@@ -1324,11 +1332,13 @@ class TradingScheduler:
             if ml_ok:
                 from backend.strategies import StrategyResult
                 fake_result = StrategyResult(signal="BUY", reason=f"종가스캐너 등락 {change_rate:+.2f}%")
-                # 감시 종목 등록: _process_kis_symbol 호출 대상이 되어야 오전 청산 로직 발동
-                self.add_kis_symbol(symbol)
                 sim_log.push(symbol, f"[종가스캐너] ML통과 → 매수 @ {current_price:,.0f}원 ({change_rate:+.2f}%)", "BUY")
                 await self._execute_kis_buy_jongga(symbol, current_price, fake_result)
-                bought += 1
+                # 매수 성공 여부는 포지션 생성으로 확인 후 감시 등록 (실패 시 일반전략 재매수 방지)
+                async with self._lock:
+                    if symbol in self._positions:
+                        self.add_kis_symbol(symbol)
+                        bought += 1
             else:
                 sim_log.push(symbol, f"[종가스캐너] ML차단 ({change_rate:+.2f}%)", "INFO")
 
@@ -3218,8 +3228,10 @@ class TradingScheduler:
                     )
 
         # ── 장세 감지 → label_threshold 동적 조정 배수 결정 ─────────
-        from backend.core.market_analyst import detect_market_regime, get_regime_adaptive_thresholds
+        _coin_rp  = {"label_threshold_mult": 1.0, "avg_thr_mult": 1.0}  # 안전 기본값
+        _stock_rp = {"label_threshold_mult": 1.0, "avg_thr_mult": 1.0}
         try:
+            from backend.core.market_analyst import detect_market_regime, get_regime_adaptive_thresholds
             _regime_now = await detect_market_regime()
             _coin_rp  = get_regime_adaptive_thresholds("coin")
             _stock_rp = get_regime_adaptive_thresholds("stock")
@@ -3229,8 +3241,6 @@ class TradingScheduler:
                 _regime_now.get("stock"), _stock_rp["label_threshold_mult"], _stock_rp["avg_thr_mult"],
             )
         except Exception:
-            _coin_rp  = {"label_threshold_mult": 1.0, "avg_thr_mult": 1.0}
-            _stock_rp = {"label_threshold_mult": 1.0, "avg_thr_mult": 1.0}
             logger.warning("[Retrain] 장세 감지 실패, 기본 threshold 사용")
 
         # ── 에이전트별 재학습 (AI01-AI28 + ENSEMBLE_COIN/ENSEMBLE_STOCK) ───
