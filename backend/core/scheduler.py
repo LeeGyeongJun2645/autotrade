@@ -1643,6 +1643,15 @@ class TradingScheduler:
         코인: 24/7 — 업비트 거래대금 상위 50개
         주식: 평일 장중(09:00~15:30)에 추가 — KIS 거래량 상위 50개
         """
+        try:
+            await asyncio.wait_for(self._agent_tick_inner(), timeout=1500)  # 25분 timeout — hang 방지
+        except asyncio.TimeoutError:
+            logger.error("[_agent_tick] 25분 timeout 초과 — KIS API hang 가능성, 강제 종료")
+        except Exception as _e:
+            logger.exception("[_agent_tick] 예외 발생: %s", _e)
+
+    async def _agent_tick_inner(self) -> None:
+        """_agent_tick 실제 구현 — _agent_tick에서 timeout으로 감싸서 호출."""
         from backend.api import upbit as _upbit
         from backend.api import kis as _kis
         from backend.ml.agents import AGENTS
