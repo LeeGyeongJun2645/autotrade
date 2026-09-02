@@ -1617,7 +1617,24 @@ class TradingScheduler:
             else:
                 sim_log.push(ticker, f"{strategy_name} 신호 있으나 ML 차단 @ {current_price:,.0f}원", "INFO")
         else:
-            sim_log.push(ticker, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
+            # MA/RSI 신호 없어도 ML 앙상블이 강한 buy 신호면 매수 (횡보장 대응)
+            try:
+                from backend.ml.agents import predict_ensemble
+                _ohlcv_60m = await upbit.get_ohlcv(ticker, interval="minutes/60", count=200)
+                _ohlcv_15m = await upbit.get_ohlcv(ticker, interval="minutes/15", count=200)
+                _ml_sig, _ml_prob = await predict_ensemble(
+                    _ohlcv_60m, ticker=ticker, market="coin",
+                    btc_ohlcv=self._btc_ohlcv_cache,
+                    ohlcv_by_interval={15: _ohlcv_15m, 60: _ohlcv_60m},
+                )
+                if _ml_sig == "buy" and _ml_prob >= 0.45:
+                    _fake_result = StrategyResult(signal="BUY", reason=f"ML앙상블단독({_ml_prob:.2f})")
+                    sim_log.push(ticker, f"ML단독 매수신호 {_ml_prob:.1%} @ {current_price:,.0f}원", "BUY")
+                    await self._execute_upbit_buy(ticker, current_price, _fake_result, "ml_ensemble")
+                else:
+                    sim_log.push(ticker, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
+            except Exception:
+                sim_log.push(ticker, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
 
     def _run_upbit_strategies(
         self,
