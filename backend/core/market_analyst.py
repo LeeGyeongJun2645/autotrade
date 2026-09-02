@@ -431,7 +431,7 @@ async def _send_market_report(regime: dict, decisions: dict, news_summary: str) 
             lines.append("\n✅ 코인 강세장 — 정상 매수 조건")
 
         msg = "\n".join(lines)
-        await telegram.send_message(msg)
+        await telegram.notify_message(msg)
         logger.info("[MarketAnalyst] 텔레그램 리포트 발송 완료")
     except Exception as e:
         logger.warning("[MarketAnalyst] 텔레그램 리포트 실패: %s", e)
