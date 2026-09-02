@@ -269,17 +269,17 @@ AGENT_CONFIGS: list[tuple] = [
     # ticker_group: 에이전트별 종목 풀 분리 — "top"(상위1/3) "mid"(중간1/3) "small"(하위1/3) "all"(전체)
     # label_threshold: 60분봉 기준 3~8시간 내 수익 기준 (5분봉 0.006~0.012 → 1h 0.008~0.015)
     # 코인 홀수 → LightGBM / 짝수 → XGBoost (앙상블 다양성 극대화)
-    # ── 코인 에이전트 (AI01~AI10) ──  label_threshold 횡보/약세장 대응 완화 (0.6%→0.3~0.5%)
-    ("AI01", 15, 0.004, 0.60, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 추세
-    ("AI02", 15, 0.005, 0.63, "momentum", "coin",  5, "xgb",  "top"),    # 메이저 코인 15분 모멘텀
-    ("AI03", 15, 0.005, 0.62, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 장기 추세
-    ("AI04", 15, 0.004, 0.62, "trend",    "coin",  5, "xgb",  "mid"),    # 중형 코인 15분 추세
-    ("AI05", 15, 0.006, 0.60, "all",      "coin",  5, "lgbm", "all"),    # 전체 코인 베이스라인
-    ("AI06", 15, 0.005, 0.65, "momentum", "coin",  8, "xgb",  "mid"),    # 중형 코인 15분 모멘텀
-    ("AI07", 15, 0.006, 0.62, "trend",    "coin",  3, "lgbm", "mid"),    # 중형 코인 15분 단기 추세
-    ("AI08", 15, 0.003, 0.60, "momentum", "coin",  5, "xgb",  "small"),  # 소형 코인 급등 포착
-    ("AI09", 15, 0.007, 0.65, "all",      "coin",  8, "lgbm", "small"),  # 소형 코인 15분 전체
-    ("AI10", 15, 0.004, 0.65, "volume",   "coin",  6, "xgb",  "all"),    # 전체 거래량 분석
+    # ── 코인 에이전트 (AI01~AI10) ──  label_threshold 횡보/약세장 대응 완화 (0.3%→0.15~0.25%)
+    ("AI01", 15, 0.002, 0.60, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 추세
+    ("AI02", 15, 0.002, 0.63, "momentum", "coin",  5, "xgb",  "top"),    # 메이저 코인 15분 모멘텀
+    ("AI03", 15, 0.002, 0.62, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 코인 15분 장기 추세
+    ("AI04", 15, 0.002, 0.62, "trend",    "coin",  5, "xgb",  "mid"),    # 중형 코인 15분 추세
+    ("AI05", 15, 0.003, 0.60, "all",      "coin",  5, "lgbm", "all"),    # 전체 코인 베이스라인
+    ("AI06", 15, 0.002, 0.65, "momentum", "coin",  8, "xgb",  "mid"),    # 중형 코인 15분 모멘텀
+    ("AI07", 15, 0.003, 0.62, "trend",    "coin",  3, "lgbm", "mid"),    # 중형 코인 15분 단기 추세
+    ("AI08", 15, 0.0015, 0.60, "momentum", "coin", 5, "xgb",  "small"),  # 소형 코인 급등 포착
+    ("AI09", 15, 0.003, 0.65, "all",      "coin",  8, "lgbm", "small"),  # 소형 코인 15분 전체
+    ("AI10", 15, 0.002, 0.65, "volume",   "coin",  6, "xgb",  "all"),    # 전체 거래량 분석
     # ── 주식 에이전트 (AI11~AI20) ──
     ("AI11", 15, 0.007, 0.58, "all",      "stock", 3, "lgbm", "top"),    # 거래량 상위 전체
     ("AI12", 15, 0.006, 0.60, "trend",    "stock", 5, "lgbm", "top"),    # 거래량 상위 추세
@@ -292,18 +292,18 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI19", 15, 0.010, 0.65, "all",      "stock", 8, "lgbm", "mid"),    # 중위 전체
     ("AI20", 15, 0.008, 0.60, "trend",    "stock", 6, "lgbm", "small"),  # 하위 추세
     # ── 코인 확장 (AI21~AI24): 상위 전략 변형 ──
-    ("AI21", 15, 0.006, 0.67, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 15분 추세, 임계값↑
-    ("AI22", 15, 0.003, 0.70, "trend",    "coin",  5, "lgbm", "top"),    # 메이저 15분 추세, 높은 임계값
-    ("AI23", 15, 0.005, 0.66, "momentum", "coin",  5, "lgbm", "mid"),    # 중형 15분 모멘텀 lgbm
-    ("AI24", 15, 0.004, 0.68, "all",      "coin",  8, "lgbm", "small"),  # 소형 전체 15분
+    ("AI21", 15, 0.003, 0.67, "trend",    "coin",  8, "lgbm", "top"),    # 메이저 15분 추세, 임계값↑
+    ("AI22", 15, 0.0015, 0.70, "trend",   "coin",  5, "lgbm", "top"),    # 메이저 15분 추세, 높은 임계값
+    ("AI23", 15, 0.002, 0.66, "momentum", "coin",  5, "lgbm", "mid"),    # 중형 15분 모멘텀 lgbm
+    ("AI24", 15, 0.002, 0.68, "all",      "coin",  8, "lgbm", "small"),  # 소형 전체 15분
     # ── 주식 확장 (AI25~AI28): AI16 패턴 기반 ──
     ("AI25", 15, 0.007, 0.58, "volume",   "stock", 8, "lgbm", "mid"),    # 중위 거래량
     ("AI26", 15, 0.008, 0.65, "trend",    "stock", 5, "lgbm", "all"),    # 전체 추세 비교용
     ("AI27", 15, 0.005, 0.63, "volume",   "stock", 3, "lgbm", "small"),  # 하위 거래량 단기
     ("AI28", 15, 0.006, 0.60, "ha_trend", "stock", 5, "lgbm", "mid"),    # 중위 헤이킨아시
     # ── 신전략 에이전트 (AI29~AI32): 검증된 퀀트 전략 ──
-    ("AI29", 15, 0.004, 0.60, "ha_trend", "coin",  5, "lgbm", "mid"),    # 중형 코인 헤이킨아시
-    ("AI30", 15, 0.004, 0.62, "donchian", "coin",  8, "lgbm", "small"),  # 소형 코인 도치안 돌파
+    ("AI29", 15, 0.002, 0.60, "ha_trend", "coin",  5, "lgbm", "mid"),    # 중형 코인 헤이킨아시
+    ("AI30", 15, 0.002, 0.62, "donchian", "coin",  8, "lgbm", "small"),  # 소형 코인 도치안 돌파
     ("AI31", 15, 0.006, 0.58, "donchian", "stock", 5, "lgbm", "small"),  # 하위 주식 도치안 돌파
     ("AI32", 15, 0.008, 0.60, "momentum", "stock", 5, "xgb",  "top"),    # 상위 주식 모멘텀 xgb
 ]
@@ -387,7 +387,7 @@ class SimAgent:
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
         self._trailing_mode: set[str] = set()
         # ── MFE/MAE 기반 동적 TP 배수 ─────────────────────────────────
-        self._dynamic_tp_mult: float = 2.0       # R비율 분석 후 재학습 시 자동 갱신 (하락장 양성샘플 확보)
+        self._dynamic_tp_mult: float = 1.2       # R비율 분석 후 재학습 시 자동 갱신 (하락장 양성샘플 확보)
         # ── 부분 청산 Scale-out (ATR×1.5 도달 시 40% 매도) ────────────
         self._partial_tp_price: dict[str, float] = {}  # 종목별 1차 TP 목표가
         self._partial_tp_done: set[str] = set()         # 1차 청산 완료 종목 추적
