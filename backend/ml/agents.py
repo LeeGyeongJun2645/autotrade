@@ -1528,13 +1528,11 @@ class SimAgent:
             _f_vwap_up  = float(full_df["vwap_cross"].iloc[-1])        if "vwap_cross"      in full_df.columns else 1.0
             _f_vol      = float(full_df["vol_ratio"].iloc[-1])         if "vol_ratio"       in full_df.columns else 1.0
             if self.market == "coin":
-                # RSI < 45 이하면 EMA/VWAP 조건 면제 — 거래 빈도 확보
-                _strong_oversold = _f_rsi < 45
-                _tech_ok = _f_rsi < 55 and (_strong_oversold or _f_ema_bull > 0 or _f_vwap_up > 0)
+                # RSI < 68 미만 + (RSI<55 이거나 EMA상 이거나 VWAP위) — 횡보장 신호 허용
+                _tech_ok = _f_rsi < 68 and (_f_rsi < 55 or _f_ema_bull > 0 or _f_vwap_up > 0)
             else:
-                # 주식: RSI < 50 이하면 EMA 조건 면제
-                _strong_oversold_s = _f_rsi < 50
-                _tech_ok = _f_rsi < 60 and (_strong_oversold_s or _f_ema_bull > 0)
+                # 주식: RSI < 72 미만 + (RSI<60 이거나 EMA상)
+                _tech_ok = _f_rsi < 72 and (_f_rsi < 60 or _f_ema_bull > 0)
             if not _tech_ok:
                 self._last_hold_reason = (
                     f"1차필터RSI={_f_rsi:.1f}"
