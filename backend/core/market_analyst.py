@@ -15,7 +15,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -139,44 +140,68 @@ async def detect_market_regime() -> dict:
               "kospi_ret1d": 0.0, "kospi_ret5d": 0.0,
               "coin_ret1d": 0.0, "top_rising": [], "top_falling": []}
 
-    # KOSPI 지수 분석
+    # KOSPI 지수 분석 — pykrx(1차) → KIS API(fallback)
     try:
-        from backend.api import kis
-        kospi_ohlcv = await kis.get_daily_ohlcv("0001", count=10)  # KOSPI 지수코드
-        if len(kospi_ohlcv) >= 6:
-            today  = float(kospi_ohlcv[-1]["close"])
-            prev1  = float(kospi_ohlcv[-2]["close"])
-            prev5  = float(kospi_ohlcv[-6]["close"])
-            ret1d = (today - prev1) / prev1
-            ret5d = (today - prev5) / prev5
-            result["kospi_ret1d"] = round(ret1d * 100, 2)
-            result["kospi_ret5d"] = round(ret5d * 100, 2)
-            if ret5d > 0.015:
-                result["stock"] = "bull"
-            elif ret5d < -0.015:
-                result["stock"] = "bear"
-            else:
-                result["stock"] = "sideways"
-    except Exception as e:
-        logger.debug("[MarketAnalyst] KOSPI 레짐 분석 실패: %s", e)
+        from pykrx import stock as _pykrx
+        _today_s = date.today().strftime("%Y%m%d")
+        _start_s = (date.today() - timedelta(days=25)).strftime("%Y%m%d")
+        _kdf = _pykrx.get_index_ohlcv(_start_s, _today_s, "1001")  # 1001 = KOSPI
+        if _kdf is not None and len(_kdf) >= 6:
+            _closes = _kdf["종가"].values.astype(float)
+            _ret1d = (_closes[-1] - _closes[-2]) / _closes[-2]
+            _ret5d = (_closes[-1] - _closes[-6]) / _closes[-6]
+            result["kospi_ret1d"] = round(_ret1d * 100, 2)
+            result["kospi_ret5d"] = round(_ret5d * 100, 2)
+            result["stock"] = "bull" if _ret5d > 0.015 else ("bear" if _ret5d < -0.015 else "sideways")
+            logger.debug("[MarketAnalyst] KOSPI pykrx ret1d=%.2f%% ret5d=%.2f%%", _ret1d * 100, _ret5d * 100)
+    except Exception as _e1:
+        logger.debug("[MarketAnalyst] KOSPI pykrx 실패(%s) → KIS fallback", _e1)
+        try:
+            from backend.api import kis
+            _kohlcv = await kis.get_daily_ohlcv("0001", count=10)
+            if len(_kohlcv) >= 6:
+                _c = [float(x["close"]) for x in _kohlcv]
+                _ret1d = (_c[-1] - _c[-2]) / _c[-2]
+                _ret5d = (_c[-1] - _c[-6]) / _c[-6]
+                result["kospi_ret1d"] = round(_ret1d * 100, 2)
+                result["kospi_ret5d"] = round(_ret5d * 100, 2)
+                result["stock"] = "bull" if _ret5d > 0.015 else ("bear" if _ret5d < -0.015 else "sideways")
+        except Exception as _e2:
+            logger.debug("[MarketAnalyst] KOSPI KIS도 실패: %s", _e2)
 
-    # 코인 시장 — BTC 기준
+    # 코인 시장 — BTC 일봉 60일 + HMM 레짐 감지
     try:
+        import numpy as _np
         from backend.api import upbit
-        btc_ohlcv = await upbit.get_ohlcv("KRW-BTC", interval="days", count=7)
-        if len(btc_ohlcv) >= 6:
-            today = float(btc_ohlcv[-1]["close"])
-            prev1 = float(btc_ohlcv[-2]["close"])
-            prev5 = float(btc_ohlcv[-6]["close"])
-            ret1d = (today - prev1) / prev1
-            ret5d = (today - prev5) / prev5
-            result["coin_ret1d"] = round(ret1d * 100, 2)
-            if ret5d > 0.05:
-                result["coin"] = "bull"
-            elif ret5d < -0.05:
-                result["coin"] = "bear"
-            else:
-                result["coin"] = "sideways"
+        btc_ohlcv = await upbit.get_ohlcv("KRW-BTC", interval="days", count=60)
+        if len(btc_ohlcv) >= 7:
+            _btc_closes = [float(x["close"]) for x in btc_ohlcv]
+            _ret1d = (_btc_closes[-1] - _btc_closes[-2]) / _btc_closes[-2]
+            _ret5d = (_btc_closes[-1] - _btc_closes[-6]) / _btc_closes[-6]
+            result["coin_ret1d"] = round(_ret1d * 100, 2)
+            # 기본: 수익률 기반
+            result["coin"] = "bull" if _ret5d > 0.05 else ("bear" if _ret5d < -0.05 else "sideways")
+            # HMM 보강: 60일 이상 데이터 있으면 더 정밀하게
+            if len(_btc_closes) >= 30:
+                try:
+                    from hmmlearn.hmm import GaussianHMM
+                    _log_r = _np.diff(_np.log(_btc_closes)).reshape(-1, 1)
+                    _roll_vol = _np.array([
+                        _log_r[max(0, i - 4):i + 1].std() for i in range(len(_log_r))
+                    ]).reshape(-1, 1)
+                    _feat = _np.hstack([_log_r, _roll_vol])
+                    _hmm = GaussianHMM(n_components=3, covariance_type="diag", n_iter=100, random_state=42)
+                    _hmm.fit(_feat)
+                    _states = _hmm.predict(_feat)
+                    _cur = int(_states[-1])
+                    # 상태별 평균 수익률 → bull/bear/sideways 자동 매핑
+                    _smeans = {s: float(_log_r[_states == s].mean()) for s in range(3) if (_states == s).sum() > 0}
+                    _sorted = sorted(_smeans.items(), key=lambda x: x[1])
+                    _bear_s, _bull_s = _sorted[0][0], _sorted[-1][0]
+                    result["coin"] = "bull" if _cur == _bull_s else ("bear" if _cur == _bear_s else "sideways")
+                    logger.debug("[MarketAnalyst] BTC HMM state=%d → %s", _cur, result["coin"])
+                except Exception as _he:
+                    logger.debug("[MarketAnalyst] HMM 실패(수익률 방식 유지): %s", _he)
     except Exception as e:
         logger.debug("[MarketAnalyst] BTC 레짐 분석 실패: %s", e)
 
@@ -373,8 +398,10 @@ async def run_market_analysis() -> None:
         _parts = [f"{k}:{v['count']}건(avg_prob {v['avg_prob']:.2f})" for k, v in decisions.items()]
         logger.info("[MarketAnalyst] 최근 1h 결정: %s", " | ".join(_parts))
 
-    # 6. 텔레그램 리포트 (1시간 쿨다운)
-    if time.time() - _last_report_at >= _REPORT_COOLDOWN:
+    # 6. 텔레그램 리포트 (하루 1회, 00:00~01:00 KST 사이에만)
+    _now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    _in_report_window = _now_kst.hour == 0
+    if _in_report_window and time.time() - _last_report_at >= _REPORT_COOLDOWN:
         await _send_market_report(regime, decisions, news_summary)
         _last_report_at = time.time()
 

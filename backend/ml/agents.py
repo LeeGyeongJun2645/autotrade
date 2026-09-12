@@ -11,7 +11,7 @@ import asyncio
 import logging
 import pickle
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -605,7 +605,7 @@ class SimAgent:
             X_s = scaler.fit_transform(X)
             clf = LGBMClassifier(
                 n_estimators=100, max_depth=3, learning_rate=0.1,
-                scale_pos_weight=max(1.0, (y == 0).sum() / max((y == 1).sum(), 1)),
+                is_unbalance=True,
                 random_state=42, verbose=-1,
             )
             clf.fit(X_s, y)
@@ -869,7 +869,7 @@ class SimAgent:
                     min_child_samples=_mcs,
                     reg_alpha=0.1,
                     reg_lambda=2.0,
-                    scale_pos_weight=scale_pos,
+                    is_unbalance=True,
                     random_state=42,
                     n_jobs=-1,
                     verbose=-1,
@@ -2391,8 +2391,7 @@ class SimAgent:
             self.needs_retrain = True
 
         # 재시작 시 최근 SL 거래 기준 쿨다운 복구 (30분 이내 -0.3% 이하 손절)
-        from datetime import datetime as _dt, timedelta as _td
-        now_kst = _dt.now(ZoneInfo("Asia/Seoul"))
+        now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
         for t in self.recent_trades:
             if (t.get("profit_rate") or 0) >= -0.003:
                 continue
@@ -2400,11 +2399,11 @@ class SimAgent:
             if not traded_at_str:
                 continue
             try:
-                traded_at = _dt.fromisoformat(traded_at_str).replace(tzinfo=ZoneInfo("Asia/Seoul"))
+                traded_at = datetime.fromisoformat(traded_at_str).replace(tzinfo=ZoneInfo("Asia/Seoul"))
                 if (now_kst - traded_at).total_seconds() < 1800:  # 30분 이내
                     ticker = t.get("ticker", "")
                     if ticker:
-                        self._cooldown_tickers[ticker] = (traded_at + _td(minutes=30)).isoformat()
+                        self._cooldown_tickers[ticker] = (traded_at + timedelta(minutes=30)).isoformat()
             except Exception:
                 pass
 
@@ -2502,6 +2501,7 @@ async def predict_ensemble(
     ls_hist: list[dict] | None = None,
     obi_snaps: list[float] | None = None,
     ohlcv_by_interval: dict | None = None,  # {interval_min: ohlcv_list} — 봉 타입별 OHLCV
+    extra: dict | None = None,              # ticker 수급 (ask_bid_ratio 등) — 실거래 경로 전달
 ) -> tuple[str, float]:
     """가중 앙상블 게이트 — 전 에이전트 동적 투표 + 실시간 보정.
 
@@ -2584,7 +2584,7 @@ async def predict_ensemble(
         # 에이전트 봉 타입에 맞는 OHLCV 선택 (15분봉 에이전트에 60분봉 줬을 때 hold 고착 방지)
         _agent_ohlcv = (ohlcv_by_interval or {}).get(agent.interval_min, ohlcv_list) or ohlcv_list
         agent._last_hold_reason = ""
-        sig, prob = agent.predict(_agent_ohlcv, ticker=ticker, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps)
+        sig, prob = agent.predict(_agent_ohlcv, ticker=ticker, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps, extra=extra)
         _agent_results.append((agent.agent_id, sig, round(prob, 3), agent._last_hold_reason))
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight

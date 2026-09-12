@@ -9,7 +9,7 @@ Upbit(코인): 24/7 5분마다 실행
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -119,8 +119,7 @@ _PENDING_BUYS: set[str] = set()             # 현재 BUY 진행 중인 (agent_id
 
 def _set_global_cooldown(symbol: str, minutes: int = 20) -> None:
     """손절 시 전체 에이전트에 쿨다운 적용 (기본 20분 — 60분은 거래 빈도 과다 억제)."""
-    from datetime import datetime as _dt, timedelta as _td
-    until = (_dt.now(KST) + _td(minutes=minutes)).isoformat()
+    until = (datetime.now(KST) + timedelta(minutes=minutes)).isoformat()
     _GLOBAL_COOLDOWN[symbol] = until
     _GLOBAL_LOSS_COUNT[symbol] = _GLOBAL_LOSS_COUNT.get(symbol, 0) + 1
     # 10회 이상 손절 → 정적 블랙리스트 추가 권고 로그
@@ -134,8 +133,7 @@ def _is_global_cooldown(symbol: str) -> bool:
     until = _GLOBAL_COOLDOWN.get(symbol)
     if not until:
         return False
-    from datetime import datetime as _dt
-    if _dt.now(KST).isoformat() < until:
+    if datetime.now(KST).isoformat() < until:
         return True
     _GLOBAL_COOLDOWN.pop(symbol, None)
     return False
@@ -218,8 +216,7 @@ def _is_cooldown(symbol: str, agent) -> bool:
     until = agent._cooldown_tickers.get(symbol)
     if not until:
         return False
-    from datetime import datetime as _dt
-    now_str = _dt.now(KST).isoformat()
+    now_str = datetime.now(KST).isoformat()
     if now_str < until:
         return True
     agent._cooldown_tickers.pop(symbol, None)
@@ -228,8 +225,7 @@ def _is_cooldown(symbol: str, agent) -> bool:
 
 def _set_cooldown(symbol: str, agent) -> None:
     """손절 확정 시 해당 에이전트 30분 쿨다운 등록."""
-    from datetime import datetime as _dt, timedelta as _td
-    until = (_dt.now(KST) + _td(minutes=30)).isoformat()
+    until = (datetime.now(KST) + timedelta(minutes=30)).isoformat()
     agent._cooldown_tickers[symbol] = until
 
 
@@ -246,8 +242,7 @@ _DAILY_LOSS_LIMIT = 0.03  # 일일 손실 한도 3% (에이전트별 독립 서�
 
 def _is_daily_loss_exceeded(agent) -> bool:
     """오늘 손실이 DAILY_LOSS_LIMIT(3%)를 넘으면 신규 매수 차단."""
-    from datetime import datetime as _dt
-    kst_today = _dt.now(KST).strftime("%Y-%m-%d")
+    kst_today = datetime.now(KST).strftime("%Y-%m-%d")
     today_pnl = sum(
         (t.get("profit_rate") or 0)
         for t in agent.recent_trades
@@ -442,8 +437,7 @@ class TradingScheduler:
                             trade_rows.setdefault(aid, []).append(dict(r))
 
                 # 오늘 BUY 건수 복원 (재시작 시 _today_buy_count 초기화 방지)
-                from datetime import datetime as _dt2
-                _today_kst_str = _dt2.now(KST).strftime("%Y-%m-%d")
+                _today_kst_str = datetime.now(KST).strftime("%Y-%m-%d")
                 async with db.execute("""
                     SELECT agent_id, COUNT(*) as cnt
                     FROM agent_trades
@@ -485,8 +479,7 @@ class TradingScheduler:
                             restored_bl.setdefault(r["agent_id"], set()).add(r["ticker"])
 
             from backend.ml.agents import ENSEMBLE_AGENTS
-            from datetime import datetime as _dt3
-            _today_kst_str2 = _dt3.now(KST).strftime("%Y-%m-%d")
+            _today_kst_str2 = datetime.now(KST).strftime("%Y-%m-%d")
             for agent in list(AGENTS.values()) + list(ENSEMBLE_AGENTS.values()):
                 stats = stats_rows.get(agent.agent_id)
                 if stats:
@@ -536,37 +529,15 @@ class TradingScheduler:
 
             logger.info("[복구] 에이전트 stats %d개 복구 완료 (오늘BUY: %s)", len(stats_rows), dict(list(today_buy_counts.items())[:5]))
 
-            # 글로벌 _TICKER_STATS 복원: 재시작 후 동적 블랙리스트 초기화 방지
-            # 최근 90일 전체 에이전트 합산 SELL 기준으로 집계
-            try:
-                async with connect_db() as _db_ts:
-                    _db_ts.row_factory = aiosqlite.Row
-                    async with _db_ts.execute("""
-                        SELECT ticker,
-                               COUNT(*) as total,
-                               SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) as wins
-                        FROM agent_trades
-                        WHERE action IN ('SELL', 'SELL_PARTIAL')
-                          AND profit_rate IS NOT NULL
-                          AND date(traded_at) >= date('now', '-90 days')
-                        GROUP BY ticker
-                    """) as _ts_cur:
-                        async for _ts_row in _ts_cur:
-                            _TICKER_STATS[_ts_row["ticker"]] = {
-                                "wins":  int(_ts_row["wins"]),
-                                "total": int(_ts_row["total"]),
-                            }
-                _blocked = [t for t, s in _TICKER_STATS.items() if s["total"] >= 5 and s["wins"] / s["total"] < 0.25]
-                logger.info("[복구] _TICKER_STATS %d개 복원 (차단대상 %d개: %s)", len(_TICKER_STATS), len(_blocked), _blocked[:10])
-            except Exception:
-                logger.exception("[복구] _TICKER_STATS 복원 실패 (무시)")
+            # _TICKER_STATS: 재시작 시 인메모리만 사용 (agent_trades는 가상 에이전트 전용)
+            # 실거래 매도(_execute_upbit_sell) 시 _update_ticker_stats로 실시간 누적
+            logger.info("[복구] _TICKER_STATS 인메모리 초기화 (실거래 매도 시 자동 누적)")
 
             # 글로벌 쿨다운 복원: 재시작 전 60분 이내 손절 내역 → cooldown 재등록
             # 재시작 시 _GLOBAL_COOLDOWN(인메모리) 초기화 → 손절 직후 같은 종목 재진입 가능
             try:
-                from datetime import datetime as _dt_gc, timedelta as _td_gc
-                _now_gc = _dt_gc.now(KST)
-                _cutoff_gc = (_now_gc - _td_gc(hours=1)).isoformat()
+                _now_gc = datetime.now(KST)
+                _cutoff_gc = (_now_gc - timedelta(hours=1)).isoformat()
                 async with connect_db() as _db_gc:
                     _db_gc.row_factory = aiosqlite.Row
                     async with _db_gc.execute("""
@@ -1024,12 +995,23 @@ class TradingScheduler:
             taker_hist = self._btc_taker_hist   if market == "coin" else None
             ls_hist    = self._btc_ls_hist      if market == "coin" else None
             obi_snaps  = self._obi_snaps        if market == "coin" else None
+            # 코인: 업비트 호가창에서 ask_bid_ratio 계산 → 실거래 경로에서도 수급 피처 활성화
+            # buy_pressure = 매수호가 총량 / (매수+매도 총량) → ask_bid_ratio와 동일 의미
+            _extra: dict | None = None
+            if market == "coin":
+                try:
+                    _ob = await upbit.get_orderbook(symbol)
+                    if _ob:
+                        _extra = {"ask_bid_ratio": float(_ob.get("buy_pressure", 0.5))}
+                except Exception:
+                    pass
             signal, prob = await predict_ensemble(
                 ohlcv_ml, ticker=symbol, market=market,
                 btc_ohlcv=btc_ohlcv,
                 oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist,
                 obi_snaps=obi_snaps,
                 ohlcv_by_interval=ohlcv_by_interval,
+                extra=_extra,
             )
             approved = signal == "buy"
             n = len(trained)
@@ -1197,9 +1179,8 @@ class TradingScheduler:
             await telegram.notify_sell(symbol, float(qty), current_price, profit_rate, reason)
             # 사후 분석 기록 (비동기, 실패 무시)
             try:
-                from datetime import datetime as _dt
                 _held = int((
-                    _dt.now(KST) - _dt.fromisoformat(position.opened_at)
+                    datetime.now(KST) - datetime.fromisoformat(position.opened_at)
                 ).total_seconds() / 60)
                 asyncio.create_task(log_post_trade(
                     symbol=symbol, market="stock",
@@ -1622,10 +1603,18 @@ class TradingScheduler:
                 from backend.ml.agents import predict_ensemble
                 _ohlcv_60m = await upbit.get_ohlcv(ticker, interval="minutes/60", count=200)
                 _ohlcv_15m = await upbit.get_ohlcv(ticker, interval="minutes/15", count=200)
+                _ml_extra: dict | None = None
+                try:
+                    _ob2 = await upbit.get_orderbook(ticker)
+                    if _ob2:
+                        _ml_extra = {"ask_bid_ratio": float(_ob2.get("buy_pressure", 0.5))}
+                except Exception:
+                    pass
                 _ml_sig, _ml_prob = await predict_ensemble(
                     _ohlcv_60m, ticker=ticker, market="coin",
                     btc_ohlcv=self._btc_ohlcv_cache,
                     ohlcv_by_interval={15: _ohlcv_15m, 60: _ohlcv_60m},
+                    extra=_ml_extra,
                 )
                 if _ml_sig == "buy" and _ml_prob >= 0.45:
                     _fake_result = StrategyResult(signal="BUY", reason=f"ML앙상블단독({_ml_prob:.2f})")
@@ -2881,9 +2870,8 @@ class TradingScheduler:
             _held_min = 0.0
             if _sell_pos and _sell_pos.entered_at:
                 try:
-                    from datetime import datetime as _dt_sell
-                    _now_kst  = _dt_sell.now(KST)
-                    _ent_dt   = _dt_sell.fromisoformat(_sell_pos.entered_at)
+                    _now_kst  = datetime.now(KST)
+                    _ent_dt   = datetime.fromisoformat(_sell_pos.entered_at)
                     if _ent_dt.tzinfo is None:
                         _ent_dt = _ent_dt.replace(tzinfo=KST)
                     _held_min = (_now_kst - _ent_dt).total_seconds() / 60
@@ -2921,8 +2909,7 @@ class TradingScheduler:
                         + (f" (패턴{_repeat}회 반복→패널티↑)" if _repeat >= 2 else ""),
                         "SELL",
                     )
-                # 매도 통계 업데이트 (글로벌 티커 승률 추적)
-                _update_ticker_stats(symbol, trade.profit_rate or 0)
+                # 가상 에이전트 매도는 실거래 차단 통계에 반영하지 않음
                 # 손절 시 쿨다운 등록: 에이전트 개별(30분) + 전체 공유(60분)
                 if (trade.profit_rate or 0) < -0.003:
                     _set_cooldown(symbol, agent)
@@ -2946,11 +2933,9 @@ class TradingScheduler:
     async def _emergency_retrain(self, agent) -> None:
         """5연속 손실 감지 시 해당 에이전트 즉시 재학습 (하루 3회 제한)."""
         from backend.api import upbit as _upbit, kis as _kis
-        from datetime import datetime as _dt
-        from zoneinfo import ZoneInfo as _ZI
         try:
             # 하루 횟수 확인 (날짜 바뀌면 리셋)
-            today = _dt.now(_ZI("Asia/Seoul")).strftime("%Y-%m-%d")
+            today = datetime.now(KST).strftime("%Y-%m-%d")
             if agent._last_retrain_date != today:
                 agent._daily_retrain_count = 0
                 agent._last_retrain_date = today
