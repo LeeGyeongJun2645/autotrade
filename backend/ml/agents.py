@@ -2535,8 +2535,9 @@ async def predict_ensemble(
     # ── 현재 시장 레짐 감지 (앙상블 가중치 조정용) ───────────────
     current_regime = 1  # 기본: 횡보장
     try:
-        _interval = candidates[0].interval_min if candidates else 5
-        _tmp = compute_features(ohlcv_list, interval_min=_interval)
+        _interval = candidates[0].interval_min if candidates else 15
+        _regime_ohlcv = (ohlcv_by_interval or {}).get(_interval, ohlcv_list) or ohlcv_list
+        _tmp = compute_features(_regime_ohlcv, interval_min=_interval)
         if not _tmp.empty and "regime_state" in _tmp.columns:
             current_regime = int(_tmp["regime_state"].iloc[-1])
     except Exception:
