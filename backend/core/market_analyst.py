@@ -17,7 +17,6 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
-from zoneinfo import ZoneInfo
 
 import aiosqlite
 
@@ -145,7 +144,7 @@ async def detect_market_regime() -> dict:
         from pykrx import stock as _pykrx
         _today_s = date.today().strftime("%Y%m%d")
         _start_s = (date.today() - timedelta(days=25)).strftime("%Y%m%d")
-        _kdf = _pykrx.get_index_ohlcv(_start_s, _today_s, "1001")  # 1001 = KOSPI
+        _kdf = await asyncio.to_thread(_pykrx.get_index_ohlcv, _start_s, _today_s, "1001")  # 1001 = KOSPI
         if _kdf is not None and len(_kdf) >= 6:
             _closes = _kdf["종가"].values.astype(float)
             _ret1d = (_closes[-1] - _closes[-2]) / _closes[-2]
@@ -197,6 +196,8 @@ async def detect_market_regime() -> dict:
                     # 상태별 평균 수익률 → bull/bear/sideways 자동 매핑
                     _smeans = {s: float(_log_r[_states == s].mean()) for s in range(3) if (_states == s).sum() > 0}
                     _sorted = sorted(_smeans.items(), key=lambda x: x[1])
+                    if len(_sorted) < 2:
+                        raise ValueError("HMM 상태 수렴 실패 (1개 상태)")
                     _bear_s, _bull_s = _sorted[0][0], _sorted[-1][0]
                     result["coin"] = "bull" if _cur == _bull_s else ("bear" if _cur == _bear_s else "sideways")
                     logger.debug("[MarketAnalyst] BTC HMM state=%d → %s", _cur, result["coin"])

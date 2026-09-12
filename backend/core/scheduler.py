@@ -552,10 +552,10 @@ class TradingScheduler:
                 _restored_gc = 0
                 for _gcr in _gc_rows:
                     try:
-                        _loss_time = _dt_gc.fromisoformat(_gcr["last_loss"])
+                        _loss_time = datetime.fromisoformat(_gcr["last_loss"])
                         if _loss_time.tzinfo is None:
                             _loss_time = _loss_time.replace(tzinfo=KST)
-                        _until_gc = _loss_time + _td_gc(minutes=60)
+                        _until_gc = _loss_time + timedelta(minutes=60)
                         if _until_gc > _now_gc:
                             _GLOBAL_COOLDOWN[_gcr["ticker"]] = _until_gc.isoformat()
                             _restored_gc += 1
@@ -569,7 +569,7 @@ class TradingScheduler:
             # _RECENT_LOSSES 복원: 재시작 직후 30분간 클러스터 스탑 감지 불가 방지
             try:
                 import time as _time_rc
-                _cutoff_rl = (_dt_gc.now(KST) - _td_gc(minutes=30)).isoformat()
+                _cutoff_rl = (datetime.now(KST) - timedelta(minutes=30)).isoformat()
                 async with connect_db() as _db_rl:
                     _db_rl.row_factory = aiosqlite.Row
                     async with _db_rl.execute("""
@@ -582,7 +582,7 @@ class TradingScheduler:
                         _rl_rows = [dict(r) async for r in cur]
                 for _rl in _rl_rows:
                     try:
-                        _rl_t = _dt_gc.fromisoformat(_rl["traded_at"])
+                        _rl_t = datetime.fromisoformat(_rl["traded_at"])
                         if _rl_t.tzinfo is None:
                             _rl_t = _rl_t.replace(tzinfo=KST)
                         _RECENT_LOSSES.append((_rl["ticker"], _rl_t.timestamp()))
@@ -1619,6 +1619,11 @@ class TradingScheduler:
                 if _ml_sig == "buy" and _ml_prob >= 0.45:
                     _fake_result = StrategyResult(signal="BUY", reason=f"ML앙상블단독({_ml_prob:.2f})")
                     sim_log.push(ticker, f"ML단독 매수신호 {_ml_prob:.1%} @ {current_price:,.0f}원", "BUY")
+                    asyncio.create_task(log_trade_decision(
+                        symbol=ticker, market="coin", signal="buy",
+                        final_prob=_ml_prob, buy_votes=0, avg_thr=0.45,
+                        reason=f"ML앙상블단독({_ml_prob:.2f})",
+                    ))
                     await self._execute_upbit_buy(ticker, current_price, _fake_result, "ml_ensemble")
                 else:
                     sim_log.push(ticker, f"분석 완료 — 신호없음 @ {current_price:,.0f}원", "INFO")
