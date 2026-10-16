@@ -3513,7 +3513,10 @@ class TradingScheduler:
     }
 
     def _build_agent_section(self, agents: list, initial_capital: float) -> str:
-        """에이전트 목록 → 텔레그램용 상세 문자열 생성."""
+        """에이전트 목록 → 텔레그램용 상세 문자열 생성. 비활성 에이전트는 별도 섹션으로 축약."""
+        active_agents   = [a for a in agents if a.is_active]
+        inactive_agents = [a for a in agents if not a.is_active]
+
         total_now  = sum(a._balance + a.position_value for a in agents)
         total_init = len(agents) * initial_capital
         pnl_amt    = total_now - total_init
@@ -3521,7 +3524,6 @@ class TradingScheduler:
         all_trades = sum(a.total_trades for a in agents)
         all_wins   = sum(a.win_trades for a in agents)
         wr = all_wins / all_trades * 100 if all_trades else 0
-        active = sum(1 for a in agents if a.is_active)
 
         # 전체 합산 요약
         pnl_emoji = "📈" if pnl_amt >= 0 else "📉"
@@ -3529,13 +3531,13 @@ class TradingScheduler:
             f"총 원금: {total_init:,.0f}원\n"
             f"총 현재: {total_now:,.0f}원\n"
             f"{pnl_emoji} 총 손익: <b>{pnl_amt:+,.0f}원 ({pnl_pct:+.2f}%)</b>\n"
-            f"전체 승률: {wr:.1f}%  거래: {all_trades}건  활성: {active}/{len(agents)}"
+            f"전체 승률: {wr:.1f}%  거래: {all_trades}건  활성: {len(active_agents)}/{len(agents)}"
         )
 
-        # 에이전트별 개별 원금 → 현재가 → 손익
+        # 활성 에이전트 상세 목록
         lines = []
-        for a in sorted(agents, key=lambda x: -x.total_return):
-            flag = "⛔" if not a.is_active else ("★" if a.is_champion else "·")
+        for a in sorted(active_agents, key=lambda x: -x.total_return):
+            flag = "★" if a.is_champion else "·"
             role = self._AGENT_ROLE.get((a.feature_set, a.lookahead), a.feature_set)
             cur_val   = a._balance + a.position_value
             agent_pnl = cur_val - initial_capital
@@ -3546,7 +3548,14 @@ class TradingScheduler:
                 f"| <b>{agent_pnl:+,.0f}원({agent_pct:+.1f}%)</b> "
                 f"| 승률 {a.win_rate*100:.0f}% | {a.total_trades}건"
             )
-        return summary + "\n\n" + "\n".join(lines)
+
+        # 비활성 에이전트 — 한 줄 요약으로 축약
+        inactive_lines = []
+        if inactive_agents:
+            inactive_ids = ", ".join(a.agent_id for a in sorted(inactive_agents, key=lambda x: x.agent_id))
+            inactive_lines.append(f"\n⛔ 비활성({len(inactive_agents)}개): {inactive_ids}")
+
+        return summary + "\n\n" + "\n".join(lines) + "".join(inactive_lines)
 
     async def _send_daily_coin_report(self) -> None:
         """매일 06:00 KST — 코인 AI 현황 + 실제 업비트 잔고 텔레그램 전송."""
@@ -3722,13 +3731,25 @@ class TradingScheduler:
         bl_total = sum(len(v) for v in new_bl.values())
         logger.info("[일일리셋] day_start_balance 저장 완료 / 블랙리스트 %d종목 차단", bl_total)
 
-    def get_agents_snapshot(self) -> list[dict]:
-        """에이전트 상태 스냅샷 반환 (챔피언 먼저, 이후 코인/주식 → 앙상블 → 펀딩차익 순)."""
+    def get_agents_snapshot(self, active_only: bool = False) -> list[dict]:
+        """에이전트 상태 스냅샷 반환 (활성 먼저, 비활성 뒤 → 앙상블 → 펀딩차익 순).
+
+        active_only=True이면 is_active=False 에이전트를 완전히 제외.
+        """
         from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
         from backend.core.funding_arb import funding_arb
         agents = list(AGENTS.values())
-        coins  = sorted([a for a in agents if a.market == "coin"],  key=lambda a: (not a.is_champion, -a.win_rate))
-        stocks = sorted([a for a in agents if a.market == "stock"], key=lambda a: (not a.is_champion, -a.win_rate))
+
+        def _sort_key(a):
+            return (not a.is_active, not a.is_champion, -a.win_rate)
+
+        coins  = sorted([a for a in agents if a.market == "coin"],  key=_sort_key)
+        stocks = sorted([a for a in agents if a.market == "stock"], key=_sort_key)
+
+        if active_only:
+            coins  = [a for a in coins  if a.is_active]
+            stocks = [a for a in stocks if a.is_active]
+
         ensembles = list(ENSEMBLE_AGENTS.values())
         result = [a.to_dict() for a in coins + stocks + ensembles]
         result.append(funding_arb.to_dict())
