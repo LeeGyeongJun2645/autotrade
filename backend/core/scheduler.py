@@ -3412,33 +3412,39 @@ class TradingScheduler:
 
         async with connect_db() as db:
             for agent in AGENTS.values():
-                if agent.total_trades < 20:
-                    continue  # 거래 수 부족 → 판단 보류
-
                 ret_pct = agent.total_return * 100
                 default_thr = default_thresholds.get(agent.agent_id, 0.55)
 
-                if ret_pct < -30 and agent.is_active:
+                # predict_ensemble 필터 조건과 동기화 — 실제 거래 참여 불가 에이전트 비활성화
+                ensemble_excluded = (
+                    (agent.total_trades >= 5  and agent.win_rate < 0.38) or
+                    (agent.total_trades >= 10 and agent.total_return < -0.01)
+                )
+
+                if ensemble_excluded and agent.is_active:
                     agent.is_active = False
-                    agent.buy_threshold = min(agent.buy_threshold + 0.05, 0.80)
-                    adjustments.append(
-                        f"⛔ {agent.agent_id}({agent.feature_set}): 비활성화 (수익률 {ret_pct:.1f}%)"
+                    reason = (
+                        f"승률 {agent.win_rate*100:.0f}%<38%" if agent.win_rate < 0.38
+                        else f"수익률 {ret_pct:.1f}%<-1%"
                     )
-                elif ret_pct < -15 and agent.is_active:
-                    new_thr = min(round(agent.buy_threshold + 0.05, 4), 0.75)
-                    if new_thr > agent.buy_threshold:
-                        agent.buy_threshold = new_thr
-                        adjustments.append(
-                            f"⚠️ {agent.agent_id}({agent.feature_set}): 임계값→{new_thr:.2f} (수익률 {ret_pct:.1f}%)"
-                        )
-                elif ret_pct > 5 and not agent.is_active:
+                    adjustments.append(
+                        f"⛔ {agent.agent_id}({agent.feature_set}): 비활성화 ({reason}, {agent.total_trades}건)"
+                    )
+                elif not ensemble_excluded and not agent.is_active:
                     agent.is_active = True
                     agent.buy_threshold = default_thr
                     adjustments.append(
-                        f"✅ {agent.agent_id}({agent.feature_set}): 재활성화 (수익률 {ret_pct:.1f}%)"
+                        f"✅ {agent.agent_id}({agent.feature_set}): 재활성화 (승률 {agent.win_rate*100:.0f}%, 수익 {ret_pct:.1f}%)"
                     )
-                # train()이 이미 재학습 후 최적 임계값을 설정했으므로 별도 복구 없음
-                # (이전 elif 블록: ret_pct > 5 → default_thr 복원 → 훈련 최적화값 덮어쓰기 제거)
+                elif agent.total_trades >= 20 and agent.is_active:
+                    # 활성 에이전트 임계값 조정
+                    if ret_pct < -15:
+                        new_thr = min(round(agent.buy_threshold + 0.05, 4), 0.75)
+                        if new_thr > agent.buy_threshold:
+                            agent.buy_threshold = new_thr
+                            adjustments.append(
+                                f"⚠️ {agent.agent_id}({agent.feature_set}): 임계값→{new_thr:.2f} (수익률 {ret_pct:.1f}%)"
+                            )
 
                 await db.execute(
                     "UPDATE agent_stats SET is_active=?, buy_threshold=? WHERE agent_id=?",
@@ -3514,8 +3520,8 @@ class TradingScheduler:
 
     def _build_agent_section(self, agents: list, initial_capital: float) -> str:
         """에이전트 목록 → 텔레그램용 상세 문자열 생성. 비활성 에이전트는 별도 섹션으로 축약."""
-        active_agents   = [a for a in agents if a.is_active]
-        inactive_agents = [a for a in agents if not a.is_active]
+        active_agents   = [a for a in agents if self._is_ensemble_active(a)]
+        inactive_agents = [a for a in agents if not self._is_ensemble_active(a)]
 
         total_now  = sum(a._balance + a.position_value for a in agents)
         total_init = len(agents) * initial_capital
@@ -3536,7 +3542,7 @@ class TradingScheduler:
 
         # 활성 에이전트 상세 목록
         lines = []
-        for a in sorted(active_agents, key=lambda x: -x.total_return):
+        for a in sorted(active_agents, key=lambda x: (-x.win_rate, -x.total_return)):
             flag = "★" if a.is_champion else "·"
             role = self._AGENT_ROLE.get((a.feature_set, a.lookahead), a.feature_set)
             cur_val   = a._balance + a.position_value
@@ -3731,27 +3737,43 @@ class TradingScheduler:
         bl_total = sum(len(v) for v in new_bl.values())
         logger.info("[일일리셋] day_start_balance 저장 완료 / 블랙리스트 %d종목 차단", bl_total)
 
+    @staticmethod
+    def _is_ensemble_active(a) -> bool:
+        """predict_ensemble 필터 조건과 동일한 기준으로 에이전트 활성 여부 판단."""
+        if a.total_trades >= 5  and a.win_rate < 0.38:
+            return False
+        if a.total_trades >= 10 and a.total_return < -0.01:
+            return False
+        return True
+
     def get_agents_snapshot(self, active_only: bool = False) -> list[dict]:
         """에이전트 상태 스냅샷 반환 (활성 먼저, 비활성 뒤 → 앙상블 → 펀딩차익 순).
 
-        active_only=True이면 is_active=False 에이전트를 완전히 제외.
+        is_active는 predict_ensemble 필터 조건으로 실시간 계산 (DB값 무관).
+        active_only=True이면 비활성 에이전트를 완전히 제외.
         """
         from backend.ml.agents import AGENTS, ENSEMBLE_AGENTS
         from backend.core.funding_arb import funding_arb
         agents = list(AGENTS.values())
 
         def _sort_key(a):
-            return (not a.is_active, not a.is_champion, -a.win_rate)
+            active = self._is_ensemble_active(a)
+            return (not active, not a.is_champion, -a.win_rate)
 
         coins  = sorted([a for a in agents if a.market == "coin"],  key=_sort_key)
         stocks = sorted([a for a in agents if a.market == "stock"], key=_sort_key)
 
         if active_only:
-            coins  = [a for a in coins  if a.is_active]
-            stocks = [a for a in stocks if a.is_active]
+            coins  = [a for a in coins  if self._is_ensemble_active(a)]
+            stocks = [a for a in stocks if self._is_ensemble_active(a)]
+
+        def _to_dict(a):
+            d = a.to_dict()
+            d["is_active"] = self._is_ensemble_active(a)
+            return d
 
         ensembles = list(ENSEMBLE_AGENTS.values())
-        result = [a.to_dict() for a in coins + stocks + ensembles]
+        result = [_to_dict(a) for a in coins + stocks + ensembles]
         result.append(funding_arb.to_dict())
         return result
 
