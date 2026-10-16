@@ -1025,7 +1025,7 @@ class TradingScheduler:
                 from backend.ml.agents import AGENTS, predict_ensemble as _pe
                 _candidates = [a for a in AGENTS.values() if a.market == market and a._model is not None]
                 _avg_thr = sum(a.buy_threshold for a in _candidates) / len(_candidates) if _candidates else 0.5
-                _buy_votes = sum(1 for a in _candidates if hasattr(a, '_last_signal') and a._last_signal == "buy")
+                _buy_votes = sum(1 for a in _candidates if getattr(a, '_last_predict_signal', None) == "buy")
                 asyncio.create_task(log_trade_decision(
                     symbol=symbol, market=market, signal=signal,
                     final_prob=prob, buy_votes=_buy_votes, avg_thr=_avg_thr,
