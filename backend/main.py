@@ -520,11 +520,11 @@ async def get_ml_status():
 # ── AI 에이전트 경쟁 ─────────────────────────────────────────────
 
 @app.get("/agents", tags=["Agents"])
-async def get_agents(active_only: bool = False):
+async def get_agents(active_only: bool = True):
     """AI 에이전트 현재 상태 조회 (승률, 수익률, 포지션 등).
 
-    active_only=true이면 비활성화(is_active=false) 에이전트를 제외하고 반환.
-    기본값(false)은 비활성 에이전트를 목록 맨 뒤에 포함.
+    기본값(active_only=true): 비활성 에이전트 제외 (승률<38% or 수익률<-1%).
+    active_only=false: 전체 에이전트 반환 (비활성은 목록 맨 뒤).
     """
     return scheduler.get_agents_snapshot(active_only=active_only)
 
