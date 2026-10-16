@@ -387,7 +387,7 @@ class SimAgent:
         self._peak_price: dict[str, float] = {}  # 트레일링 스탑용 최고가 추적
         self._trailing_mode: set[str] = set()
         # ── MFE/MAE 기반 동적 TP 배수 ─────────────────────────────────
-        self._dynamic_tp_mult: float = 1.2       # R비율 분석 후 재학습 시 자동 갱신 (하락장 양성샘플 확보)
+        self._dynamic_tp_mult: float = 2.5       # R비율 분석 후 재학습 시 자동 갱신 (기본 ATR×2.5 → RR≥2:1 확보)
         # ── 부분 청산 Scale-out (ATR×1.5 도달 시 40% 매도) ────────────
         self._partial_tp_price: dict[str, float] = {}  # 종목별 1차 TP 목표가
         self._partial_tp_done: set[str] = set()         # 1차 청산 완료 종목 추적
@@ -468,7 +468,18 @@ class SimAgent:
         if self.total_trades < 10:
             return POSITION_RATIO
         p = max(0.3, min(0.8, self.win_rate))
-        b = 1.5   # 평균 이익 / 평균 손실 추정 (보수적)
+        # 실제 손익비 계산 (b = avg_win / avg_loss)
+        sells = [t for t in self.recent_trades if t.get("action") == "SELL" and t.get("profit_rate") is not None]
+        if len(sells) >= 5:
+            wins  = [t["profit_rate"] for t in sells if t["profit_rate"] > 0]
+            losses = [abs(t["profit_rate"]) for t in sells if t["profit_rate"] <= 0]
+            if wins and losses:
+                b = (sum(wins) / len(wins)) / (sum(losses) / len(losses))
+                b = max(0.1, min(5.0, b))
+            else:
+                b = 1.0
+        else:
+            b = 1.0  # 데이터 부족 시 보수적 기본값
         kelly = (p * b - (1 - p)) / b
         return max(0.05, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 5~20% 범위
 
@@ -2522,10 +2533,10 @@ async def predict_ensemble(
     candidates = [
         a for a in AGENTS.values()
         if a.market == market and a._model is not None
-        # WR<40% 차단: 검증 기준 5거래(기존 10)로 낮춰서 나쁜 에이전트 빠르게 배제
-        and not (a.total_trades >= 5 and a.win_rate < 0.40)
-        # 수익률 -2% 이하 (10거래 이상 검증)
-        and not (a.total_trades >= 10 and a.total_return < -0.02)
+        # WR<38% 차단 (기존 40% → 더 보수적, 5거래 이상 검증)
+        and not (a.total_trades >= 5 and a.win_rate < 0.38)
+        # 수익률 -1% 이하 차단 (기존 -2% → 강화)
+        and not (a.total_trades >= 10 and a.total_return < -0.01)
     ]
     if not candidates:
         # 폴백: 수익률 기준만 유지, 모델 있는 에이전트 사용

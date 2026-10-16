@@ -44,14 +44,14 @@ def get_regime_adaptive_thresholds(market: str) -> dict:
     """
     regime = _market_regime_cache.get(market, "unknown")
     if regime == "bear":
-        # 약세장: 레이블 기준 낮춤(buy 샘플 확보) + avg_thr 완화(회복 신호 포착)
-        return {"label_threshold_mult": 0.70, "avg_thr_mult": 0.82, "min_buy_votes": 1}
+        # 약세장: 진입 기준 높임(손실 방지 우선) + avg_thr 유지
+        return {"label_threshold_mult": 0.90, "avg_thr_mult": 0.95, "min_buy_votes": 2}
     elif regime == "bull":
-        # 강세장: 레이블 기준 높임(품질 유지) + avg_thr 정상(불필요한 추격매수 방지)
-        return {"label_threshold_mult": 1.05, "avg_thr_mult": 1.00, "min_buy_votes": 2}
+        # 강세장: 진입 기준 완화(추세 추종) + min_buy_votes 낮춤(기회 포착)
+        return {"label_threshold_mult": 0.85, "avg_thr_mult": 0.88, "min_buy_votes": 1}
     else:  # sideways / unknown
-        # 횡보장: 적당히 완화
-        return {"label_threshold_mult": 0.85, "avg_thr_mult": 0.90, "min_buy_votes": 1}
+        # 횡보장: 중립
+        return {"label_threshold_mult": 0.90, "avg_thr_mult": 0.92, "min_buy_votes": 1}
 
 
 # ── DB 테이블 DDL ─────────────────────────────────────────────────
