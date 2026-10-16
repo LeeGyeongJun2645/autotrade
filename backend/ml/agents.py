@@ -717,7 +717,7 @@ class SimAgent:
             # 하락장 레이블 편향 폴백: 양성 < 3% → TP배수 완화하여 재레이블링
             _min_pos = max(5, len(raw_labels) // 30)
             if int(np.sum(raw_labels)) < _min_pos:
-                _tp_mult_r = max(1.8, self._dynamic_tp_mult * 0.75)
+                _tp_mult_r = max(0.8, self._dynamic_tp_mult * 0.75)
                 raw_labels2 = np.zeros(len(close), dtype=int)
                 for i in range(len(close) - LOOKAHEAD):
                     entry = close.iloc[i]
@@ -2208,7 +2208,7 @@ class SimAgent:
             self._dynamic_tp_mult = min(2.5, self._dynamic_tp_mult + 0.1)
         elif missed_gain < 0.002 and profit_rate < 0:
             # 팔고 나서 거의 안 올랐고 손절이었음 → TP 배수 하향 (더 빨리 팔아야)
-            self._dynamic_tp_mult = max(1.5, self._dynamic_tp_mult - 0.05)
+            self._dynamic_tp_mult = max(0.8, self._dynamic_tp_mult - 0.05)
 
         self._post_sell_tracker.pop(ticker, None)
 
@@ -2326,6 +2326,13 @@ class SimAgent:
             self._consecutive_losses = 0
         else:
             self._consecutive_losses += 1
+            if self._consecutive_losses >= 5:
+                today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+                if self._last_retrain_date != today:
+                    self._daily_retrain_count = 0
+                    self._last_retrain_date = today
+                if self._daily_retrain_count < 3:
+                    self.needs_retrain = True
         now   = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%dT%H:%M:%S")
         trade = AgentTrade(self.agent_id, ticker, "SELL_PARTIAL", price, sell_qty, pos.entry_price, round(profit_rate, 4), self._balance, now)
         self._push_recent(trade)
@@ -2586,6 +2593,7 @@ async def predict_ensemble(
         _agent_ohlcv = (ohlcv_by_interval or {}).get(agent.interval_min, ohlcv_list) or ohlcv_list
         agent._last_hold_reason = ""
         sig, prob = agent.predict(_agent_ohlcv, ticker=ticker, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps, extra=extra)
+        agent._last_predict_signal = sig  # scheduler buy_votes 로깅용
         _agent_results.append((agent.agent_id, sig, round(prob, 3), agent._last_hold_reason))
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight
@@ -2655,7 +2663,6 @@ async def predict_ensemble(
 
     # ── 임계값: adaptive 하락 영향 차단 — buy_threshold(고정값) 가중평균 사용
     # agent.buy_threshold (고정) 사용, adaptive_buy_threshold 사용 안 함 (연속손실 오염 방지)
-    _fixed_thr_sum = sum(a.label_threshold * 10 + a.buy_threshold for a in candidates)  # 더미 계산용
     avg_thr_raw = (weighted_thr / total_weight) if total_weight > 0 else 0.60
     avg_thr = max(avg_thr_raw, 0.10)  # WF 검증된 threshold 반영 — 0.50 floor 제거
     vote_ratio = buy_votes / len(candidates) if candidates else 0.0
