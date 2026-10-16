@@ -1025,7 +1025,7 @@ class TradingScheduler:
                 from backend.ml.agents import AGENTS, predict_ensemble as _pe
                 _candidates = [a for a in AGENTS.values() if a.market == market and a._model is not None]
                 _avg_thr = sum(a.buy_threshold for a in _candidates) / len(_candidates) if _candidates else 0.5
-                _buy_votes = sum(1 for a in _candidates if hasattr(a, '_last_signal') and a._last_signal == "buy")
+                _buy_votes = sum(1 for a in _candidates if getattr(a, '_last_predict_signal', None) == "buy")
                 asyncio.create_task(log_trade_decision(
                     symbol=symbol, market=market, signal=signal,
                     final_prob=prob, buy_votes=_buy_votes, avg_thr=_avg_thr,
@@ -2151,9 +2151,16 @@ class TradingScheduler:
                         _extra_pos = [t for t in fetch_coin_tickers if t in _pos_set and t not in _agent_coin_tickers]
                         if _extra_pos:
                             _agent_coin_tickers = list(_agent_coin_tickers) + _extra_pos
+                        # fetch_coin_tickers에 아예 없는 포지션 종목도 SL 체크 필요 (orphan)
+                        _orphan_c = [t for t in _pos_set if t not in set(fetch_coin_tickers)]
+                        if _orphan_c:
+                            _agent_coin_tickers = list(_agent_coin_tickers) + _orphan_c
                         for ticker in _agent_coin_tickers:
                             ohlcv = ohlcv_cache.get(f"{ticker}:{agent.interval_str}", [])
                             if not ohlcv:
+                                if ticker in agent._positions:
+                                    _p = coin_prices.get(ticker, 0.0)
+                                    await self._agent_execute(db, agent, ticker, "hold", 0.0, _p)
                                 continue
                             # BTC 자신은 BTC 상관관계 불필요
                             _btc_ref = btc_ohlcv_cache if ticker != "KRW-BTC" else None
@@ -2191,6 +2198,9 @@ class TradingScheduler:
                                         _oi_ref, _taker_ref, None, _ls_init,
                                     )
                                 if not trained:
+                                    if ticker in agent._positions:
+                                        _p = coin_prices.get(ticker, 0.0)
+                                        await self._agent_execute(db, agent, ticker, "hold", 0.0, _p)
                                     continue
                             price = coin_prices.get(ticker, 0.0)
                             if price <= 0:
@@ -2264,11 +2274,21 @@ class TradingScheduler:
                         _extra_pos_s = [s for s in stock_symbols if s in _pos_set_s and s not in _agent_stock_syms]
                         if _extra_pos_s:
                             _agent_stock_syms = list(_agent_stock_syms) + _extra_pos_s
+                        # stock_symbols에 아예 없는 포지션 종목도 SL 체크 필요 (orphan)
+                        _orphan_s = [s for s in _pos_set_s if s not in set(stock_symbols)]
+                        if _orphan_s:
+                            _agent_stock_syms = list(_agent_stock_syms) + _orphan_s
                         for symbol in _agent_stock_syms:
                             ohlcv = stock_ohlcv_cache.get(f"{symbol}:{agent.interval_min}", [])
                             if not ohlcv:
+                                if symbol in agent._positions:
+                                    _p = stock_prices.get(symbol, 0.0)
+                                    await self._agent_execute(db, agent, symbol, "hold", 0.0, _p)
                                 continue
                             if agent._model is None:
+                                if symbol in agent._positions:
+                                    _p = stock_prices.get(symbol, 0.0)
+                                    await self._agent_execute(db, agent, symbol, "hold", 0.0, _p)
                                 continue  # 즉석 학습도 실패 → 이번 틱 스킵
                             price = stock_prices.get(symbol, 0.0)
                             if price <= 0:

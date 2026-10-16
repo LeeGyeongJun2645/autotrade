@@ -315,7 +315,7 @@ class RLAgent(SimAgent):
                 if (pos_ret > self.lookahead * 0.002   # 목표 수익
                         or pos_ret < -0.015            # 손절
                         or held >= self.lookahead * 2): # 최대 보유
-                    a, r  = 2, pos_ret - COST
+                    a, r  = 2, pos_ret - COST * 2  # 매수+매도 왕복 수수료
                     in_pos = False
                 else:
                     a, r = 0, pos_ret * 0.05     # HOLD 중간 보상

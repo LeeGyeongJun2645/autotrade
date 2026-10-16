@@ -2593,6 +2593,7 @@ async def predict_ensemble(
         _agent_ohlcv = (ohlcv_by_interval or {}).get(agent.interval_min, ohlcv_list) or ohlcv_list
         agent._last_hold_reason = ""
         sig, prob = agent.predict(_agent_ohlcv, ticker=ticker, btc_ohlcv=btc_ohlcv, kospi_ohlcv=kospi_ohlcv, oi_hist=oi_hist, taker_hist=taker_hist, ls_hist=ls_hist, obi_snaps=obi_snaps, extra=extra)
+        agent._last_predict_signal = sig  # scheduler buy_votes 로깅용
         _agent_results.append((agent.agent_id, sig, round(prob, 3), agent._last_hold_reason))
         weighted_prob += prob * weight
         weighted_thr  += agent.buy_threshold * weight
