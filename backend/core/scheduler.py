@@ -388,7 +388,7 @@ class TradingScheduler:
         async with self._lock:
             for symbol, pos in self._positions.items():
                 if getattr(pos, "strategy", None) == "jongga_scanner" and symbol not in self._kis_symbols:
-                    self._kis_symbols.add(symbol)
+                    self._kis_symbols.append(symbol)
                     logger.info("[restore] 종가매매 포지션 감시 복구: %s", symbol)
 
         # ── 에이전트 stats 복구 (잔액·거래수·승률·is_active·buy_threshold) ──
@@ -3247,7 +3247,7 @@ class TradingScheduler:
                     _ea.feature_set  = _best.feature_set
                     _ea.interval_min = _best.interval_min
                     # threshold: 최고 에이전트 기준 + 0.03 (ENSEMBLE은 더 보수적)
-                    _ea.buy_threshold = min(round(_best.buy_threshold + 0.03, 3), 0.70)
+                    _ea.buy_threshold = max(0.65, min(round(_best.buy_threshold + 0.03, 3), 0.70))
                     logger.info(
                         "[ENSEMBLE전략채택] %s ← %s (WR=%.1f%% ret=%.2f%%) fs=%s→%s int=%d→%d thr=%.3f",
                         _eid, _best.agent_id, _best.win_rate * 100, _best.total_return * 100,

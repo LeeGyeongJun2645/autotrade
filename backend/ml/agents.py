@@ -472,7 +472,7 @@ class SimAgent:
         sells = [t for t in self.recent_trades if t.get("action") == "SELL" and t.get("profit_rate") is not None]
         if len(sells) >= 5:
             wins  = [t["profit_rate"] for t in sells if t["profit_rate"] > 0]
-            losses = [abs(t["profit_rate"]) for t in sells if t["profit_rate"] <= 0]
+            losses = [abs(t["profit_rate"]) for t in sells if t["profit_rate"] < 0]
             if wins and losses:
                 b = (sum(wins) / len(wins)) / (sum(losses) / len(losses))
                 b = max(0.1, min(5.0, b))
@@ -481,6 +481,8 @@ class SimAgent:
         else:
             b = 1.0  # 데이터 부족 시 보수적 기본값
         kelly = (p * b - (1 - p)) / b
+        if kelly <= 0:
+            return 0.0  # EV 음수: 베팅 없음
         return max(0.05, min(POSITION_RATIO, kelly * 0.5))  # Half-Kelly, 5~20% 범위
 
     def _sharpe_weight(self) -> float:
@@ -2380,7 +2382,7 @@ class SimAgent:
         thr = stats.get("buy_threshold")
         if thr is not None and float(thr) > 0:
             _default_thr = self.buy_threshold  # AGENT_CONFIGS 초기값
-            self.buy_threshold = min(float(thr), _default_thr + 0.05)
+            self.buy_threshold = max(0.70, min(float(thr), _default_thr + 0.05))
         for p in positions:
             pos = AgentPosition(
                 ticker=p["ticker"],
@@ -2540,14 +2542,19 @@ async def predict_ensemble(
         and not (a.total_trades >= 10 and a.total_return < -0.01)
     ]
     if not candidates:
-        # 폴백: 수익률 기준만 유지, 모델 있는 에이전트 사용
+        # 폴백: 수익률 기준만 유지, 모델 있는 에이전트 사용 (RL 제외 유지)
         candidates = [
             a for a in AGENTS.values()
             if a.market == market and a._model is not None
+            and not a.agent_id.startswith("RL")
             and not (a.total_trades >= 15 and a.total_return < -0.03)
         ]
     if not candidates:
-        candidates = [a for a in AGENTS.values() if a.market == market and a._model is not None]
+        candidates = [
+            a for a in AGENTS.values()
+            if a.market == market and a._model is not None
+            and not a.agent_id.startswith("RL")
+        ]
     if not candidates:
         return "hold", 0.5
 

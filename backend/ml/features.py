@@ -969,7 +969,7 @@ def compute_features(
             _corb_l = _corb_l.groupby(_date_utc).ffill()
             _corb_range = (_corb_h - _corb_l).replace(0, np.nan)
             df["coin_orb_pos"]  = ((close - _corb_l) / _corb_range).clip(0, 2).fillna(0.5)
-            df["coin_orb_bull"] = (close > _corb_h.fillna(0)).astype(float)
+            df["coin_orb_bull"] = (close > _corb_h).fillna(0.0)
         except Exception:
             df["coin_orb_pos"]  = 0.5
             df["coin_orb_bull"] = 0.0
