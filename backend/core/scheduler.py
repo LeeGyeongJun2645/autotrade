@@ -494,8 +494,8 @@ class TradingScheduler:
                     # day_start_balance 복원: DB에 저장된 값 사용, 0이면 현재 잔액으로 초기화
                     _dsb = float(stats.get("day_start_balance") or 0.0)
                     agent.day_start_balance = _dsb if _dsb > 0 else (agent._balance + agent.position_value)
-                    # _dynamic_tp_mult 복원 — 상한 4.0 (기존 2.5 클램핑이 수익 에이전트 TP 강제 하향하던 버그 수정)
-                    agent._dynamic_tp_mult = min(float(stats.get("dynamic_tp_mult") or 2.5), 4.0)
+                    # _dynamic_tp_mult 복원 — 하한 3.0 (실증: 3.5x+ 에이전트만 수익 양수), 상한 5.0
+                    agent._dynamic_tp_mult = max(3.0, min(float(stats.get("dynamic_tp_mult") or 3.5), 5.0))
                     # _partial_tp_done 복원: 당일 부분청산 완료 종목 마킹 (중복청산 방지)
                     agent._partial_tp_done = partial_done_rows.get(agent.agent_id, set())
                     # _peak_price 초기화: 재시작 시 보유 포지션의 entry_price로 보수적 초기화
@@ -3432,14 +3432,19 @@ class TradingScheduler:
                     )
                 elif not ensemble_excluded and not agent.is_active:
                     agent.is_active = True
-                    agent.buy_threshold = default_thr
+                    agent.buy_threshold = max(0.70, default_thr)
                     adjustments.append(
                         f"✅ {agent.agent_id}({agent.feature_set}): 재활성화 (승률 {agent.win_rate*100:.0f}%, 수익 {ret_pct:.1f}%)"
                     )
-                elif agent.total_trades >= 20 and agent.is_active:
-                    # 활성 에이전트 임계값 조정
-                    if ret_pct < -15:
-                        new_thr = min(round(agent.buy_threshold + 0.05, 4), 0.75)
+                elif agent.is_active:
+                    # 활성 에이전트 임계값 최솟값 0.70 보장 (실증: buy_prob 0.7~0.8 밴드가 유일하게 EV 양수)
+                    if agent.buy_threshold < 0.70:
+                        agent.buy_threshold = 0.70
+                        adjustments.append(
+                            f"⬆️ {agent.agent_id}({agent.feature_set}): 임계값→0.70 (하한 보정)"
+                        )
+                    elif agent.total_trades >= 20 and ret_pct < -15:
+                        new_thr = min(round(agent.buy_threshold + 0.05, 4), 0.80)
                         if new_thr > agent.buy_threshold:
                             agent.buy_threshold = new_thr
                             adjustments.append(
