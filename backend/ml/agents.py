@@ -285,7 +285,7 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI12", 15, 0.006, 0.70, "trend",    "stock", 5, "lgbm", "top"),    # 거래량 상위 추세
     ("AI13", 15, 0.009, 0.68, "momentum", "stock", 8, "lgbm", "mid"),    # 중위 모멘텀
     ("AI14", 15, 0.006, 0.70, "volume",   "stock", 3, "lgbm", "top"),    # 상위 거래량 분석
-    ("AI15", 15, 0.007, 0.70, "ha_trend", "stock", 5, "lgbm", "mid"),    # 중위 헤이킨아시
+    ("AI15", 15, 0.007, 0.70, "reversal", "stock", 5, "lgbm", "mid"),    # 중위 역추세
     ("AI16", 15, 0.006, 0.70, "trend",    "stock", 8, "lgbm", "all"),    # 전체 추세 (챔피언 기준선)
     ("AI17", 15, 0.011, 0.70, "momentum", "stock", 3, "lgbm", "top"),    # 상위 단기 모멘텀
     ("AI18", 15, 0.007, 0.70, "volume",   "stock", 5, "lgbm", "small"),  # 하위 거래량
@@ -300,9 +300,9 @@ AGENT_CONFIGS: list[tuple] = [
     ("AI25", 15, 0.007, 0.68, "volume",   "stock", 8, "lgbm", "mid"),    # 중위 거래량
     ("AI26", 15, 0.008, 0.70, "trend",    "stock", 5, "lgbm", "all"),    # 전체 추세 비교용
     ("AI27", 15, 0.005, 0.70, "volume",   "stock", 3, "lgbm", "small"),  # 하위 거래량 단기
-    ("AI28", 15, 0.006, 0.70, "ha_trend", "stock", 5, "lgbm", "mid"),    # 중위 헤이킨아시
+    ("AI28", 15, 0.006, 0.70, "volume",   "stock", 5, "lgbm", "mid"),    # 중위 거래량
     # ── 신전략 에이전트 (AI29~AI32): 검증된 퀀트 전략 ──
-    ("AI29", 15, 0.002, 0.70, "ha_trend", "coin",  5, "lgbm", "mid"),    # 중형 코인 헤이킨아시
+    ("AI29", 15, 0.002, 0.70, "momentum", "coin",  5, "lgbm", "mid"),    # 중형 코인 모멘텀
     ("AI30", 15, 0.002, 0.70, "donchian", "coin",  8, "lgbm", "small"),  # 소형 코인 도치안 돌파
     ("AI31", 15, 0.006, 0.68, "donchian", "stock", 5, "lgbm", "small"),  # 하위 주식 도치안 돌파
     ("AI32", 15, 0.008, 0.70, "momentum", "stock", 5, "xgb",  "top"),    # 상위 주식 모멘텀 xgb
@@ -2533,6 +2533,7 @@ async def predict_ensemble(
     candidates = [
         a for a in AGENTS.values()
         if a.market == market and a._model is not None
+        and not a.agent_id.startswith("RL")  # RL 에이전트 제외 (EV 음수)
         # WR<38% 차단 (기존 40% → 더 보수적, 5거래 이상 검증)
         and not (a.total_trades >= 5 and a.win_rate < 0.38)
         # 수익률 -1% 이하 차단 (기존 -2% → 강화)
@@ -2702,18 +2703,16 @@ async def predict_ensemble(
         )
         logger.warning("[앙상블-%s][원인] ticker=%s 에이전트별 hold이유: %s", market, ticker or "-", _reason_summary)
 
-    # ── 매수 판단 (우선순위: 많은 합의 → 고확신 단독 → 장세조정 avg_thr fallback)
-    if buy_votes >= 4 and buy_avg_prob >= 0.45:
+    # ── 매수 판단: 실증 기반 — buy_avg_prob >= 0.65 + 동적 합의 임계값
+    # buy_prob 0.7~0.8 구간만 EV 양수 → 하한 0.65로 보수적 설정
+    _votes_strong = max(3, round(len(candidates) * 0.40))   # 40% 합의
+    _votes_medium = max(2, round(len(candidates) * 0.30))   # 30% 합의
+    if buy_votes >= _votes_strong and buy_avg_prob >= 0.65:
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 3 and buy_avg_prob >= 0.48:
+    if buy_votes >= _votes_medium and buy_avg_prob >= 0.72:
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= 2 and buy_avg_prob >= 0.50:
+    if buy_votes >= 2 and buy_avg_prob >= 0.78:             # 초고확신 소수 강신호
         return "buy", round(buy_avg_prob, 4)
-    if buy_votes >= _min_buy_votes_single and buy_avg_prob >= 0.55:
-        return "buy", round(buy_avg_prob, 4)
-    # WF 검증된 avg_thr (장세 보정) — 에이전트 1명 이상 동의 + 앙상블 확률 >= 조정 threshold
-    if buy_votes >= 1 and final_prob >= avg_thr_adj:
-        return "buy", round(final_prob, 4)
     # sell 판단: 조정 threshold 미달
     if final_prob < avg_thr_adj:
         return "sell", round(final_prob, 4)
