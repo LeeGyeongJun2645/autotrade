@@ -1542,7 +1542,7 @@ class SimAgent:
             _f_vol      = float(full_df["vol_ratio"].iloc[-1])         if "vol_ratio"       in full_df.columns else 1.0
             if self.market == "coin":
                 # RSI < 68 미만 + (RSI<55 이거나 EMA상 이거나 VWAP위) — 횡보장 신호 허용
-                _tech_ok = _f_rsi < 68 and (_f_rsi < 55 or _f_ema_bull > 0 or _f_vwap_up > 0)
+                _tech_ok = _f_rsi < 72 and (_f_rsi < 55 or _f_ema_bull > 0 or _f_vwap_up > 0)
             else:
                 # 주식: RSI < 72 미만 + (RSI<60 이거나 EMA상)
                 _tech_ok = _f_rsi < 72 and (_f_rsi < 60 or _f_ema_bull > 0)
@@ -1601,8 +1601,17 @@ class SimAgent:
         try:
             if "regime_state" in full_df.columns:
                 _regime_val = float(full_df["regime_state"].iloc[-1])
-                if _regime_val == 0.0:   # 하락 추세 → 확률 대폭 억제
-                    prob = max(0.01, prob * 0.30)
+                if _regime_val == 0.0:   # 하락 추세 → 확률 억제 (단, 급락반등 신호 있으면 완화)
+                    try:
+                        _r_rsi = float(full_df["rsi_9"].iloc[-1])
+                        _r_vol = float(full_df["vol_ratio"].iloc[-1])
+                        _r_exh = bool(full_df["exhaustion_bounce"].iloc[-1]) if "exhaustion_bounce" in full_df.columns else False
+                        if _r_exh or (_r_rsi < 30 and _r_vol >= 2.5):
+                            prob = max(0.01, prob * 0.65)
+                        else:
+                            prob = max(0.01, prob * 0.30)
+                    except Exception:
+                        prob = max(0.01, prob * 0.30)
                 elif _regime_val == 2.0: # 상승 추세 → 약간 강화
                     prob = min(0.99, prob * 1.05)
         except Exception:
@@ -1616,8 +1625,20 @@ class SimAgent:
             if "mtf_align" in full_df.columns:
                 _align = float(full_df["mtf_align"].iloc[-1])
                 if _align == 0.0:
-                    # 3개 TF 전부 하락 → 하드차단 (소프트 억제는 regime_state=2 부스트 0.945*0.7=0.661로 임계값 통과 가능)
-                    return "hold", round(prob * 0.70, 4)
+                    # V자 반등 피처 동반 시 하드차단 예외: exhaustion_bounce 또는 double_bottom_signal
+                    try:
+                        _v_rsi = float(full_df["rsi_9"].iloc[-1])
+                        _v_vol = float(full_df["vol_ratio"].iloc[-1])
+                        _v_bb  = float(full_df["bb_pband"].iloc[-1]) if "bb_pband" in full_df.columns else 0.5
+                        _v_exh = bool(full_df["exhaustion_bounce"].iloc[-1]) if "exhaustion_bounce" in full_df.columns else False
+                        _v_db  = bool(full_df["double_bottom_signal"].iloc[-1]) if "double_bottom_signal" in full_df.columns else False
+                        _is_v  = (_v_exh or _v_db) and _v_rsi < 32 and _v_vol >= 2.0 and _v_bb < 0.15
+                    except Exception:
+                        _is_v = False
+                    if not _is_v:
+                        self._last_hold_reason = "mtf_all_down"
+                        return "hold", round(prob * 0.70, 4)
+                    prob = min(prob, 0.62)
                 elif _align == 3.0:  # 전부 상승 정렬 → 강화
                     prob = max(0.01, min(0.99, prob * 1.08))
         except Exception:
@@ -2378,11 +2399,12 @@ class SimAgent:
         self.win_trades    = int(stats.get("win_trades") or 0)
         self.is_champion   = bool(stats.get("is_champion", 0))
         self.is_active     = bool(stats.get("is_active", 1))
-        # 자동 조정된 임계값 복구 (AGENT_CONFIGS 기본값 기준 +0.05까지만 허용 → 자동상향 누적 방지)
+        # 자동 조정된 임계값 복구 (시장별 min/max 범위 내로 clamp)
         thr = stats.get("buy_threshold")
         if thr is not None and float(thr) > 0:
-            _default_thr = self.buy_threshold  # AGENT_CONFIGS 초기값
-            self.buy_threshold = max(0.70, min(float(thr), _default_thr + 0.05))
+            _thr_min = 0.30 if self.market == "stock" else 0.10
+            _thr_max = 0.70 if self.market == "stock" else 0.52
+            self.buy_threshold = min(max(float(thr), _thr_min), _thr_max)
         for p in positions:
             pos = AgentPosition(
                 ticker=p["ticker"],
@@ -2698,6 +2720,25 @@ async def predict_ensemble(
         pass
     avg_thr_adj = avg_thr * _avg_thr_mult  # 장세 조정 threshold
 
+    # ── 글로벌 지수 보정: S&P500·닛케이·VIX 기반 임계값 동적 조정 ──
+    # 재학습 없이 규칙 기반으로 적용. ML 모델 피처와 독립적.
+    try:
+        from backend.core.global_market import get_global_sentiment, global_thr_mult
+        _gm = get_global_sentiment()
+        _gm_mult = global_thr_mult(_gm['sp500_ret'], _gm['nikkei_ret'], _gm['vix_level'])
+        if _gm_mult != 1.0:
+            logger.info(
+                "[앙상블-%s][글로벌] sp500=%.2f%% nikkei=%.2f%% vix=%.1f → thr_mult=%.4f",
+                market,
+                _gm['sp500_ret'] * 100,
+                _gm['nikkei_ret'] * 100,
+                _gm['vix_level'],
+                _gm_mult,
+            )
+        avg_thr_adj = avg_thr_adj * _gm_mult
+    except Exception:
+        pass
+
     # 투표 로그 (앙상블 진단용)
     logger.warning(
         "[앙상블-%s] ticker=%s final_prob=%.4f buy_avg=%.4f avg_thr=%.4f(adj=%.4f) buy_votes=%d/%d",
@@ -2709,6 +2750,32 @@ async def predict_ensemble(
             f"{aid}:{rsn or 'raw_low'}" for aid, sig, prob, rsn in _agent_results[:8]
         )
         logger.warning("[앙상블-%s][원인] ticker=%s 에이전트별 hold이유: %s", market, ticker or "-", _reason_summary)
+
+    # ── V자 반등 바이패스: buy_votes==0이어도 극단 급락반등 신호 시 진입 허용 ──
+    # 근거: exhaustion_bounce(vol_reversal+RSI<35) + double_bottom_signal 동반 급락은
+    # 모든 에이전트가 하드게이트에서 차단되어 votes=0이 나오는 구조적 문제 보완
+    if buy_votes == 0 and ohlcv_list:
+        try:
+            from backend.ml.features import compute_features
+            _vb_df = compute_features(ohlcv_list, interval_min=15)
+            if not _vb_df.empty:
+                _vb_rsi = float(_vb_df["rsi_9"].iloc[-1])
+                _vb_vol = float(_vb_df["vol_ratio"].iloc[-1])
+                _vb_exh = bool(_vb_df["exhaustion_bounce"].iloc[-1]) if "exhaustion_bounce" in _vb_df.columns else False
+                _vb_db  = bool(_vb_df["double_bottom_signal"].iloc[-1]) if "double_bottom_signal" in _vb_df.columns else False
+                _v_bypass = (
+                    (_vb_exh or _vb_db) and
+                    _vb_rsi < 30 and
+                    _vb_vol >= 2.0
+                )
+                if _v_bypass:
+                    logger.warning(
+                        "[앙상블-%s][V자반등] ticker=%s rsi=%.1f vol=%.1fx → 바이패스 진입",
+                        market, ticker or "-", _vb_rsi, _vb_vol,
+                    )
+                    return "buy", 0.61
+        except Exception:
+            pass
 
     # ── 매수 판단: 실증 기반 — buy_avg_prob >= 0.65 + 동적 합의 임계값
     # buy_prob 0.7~0.8 구간만 EV 양수 → 하한 0.65로 보수적 설정

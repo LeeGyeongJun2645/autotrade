@@ -3432,19 +3432,28 @@ class TradingScheduler:
                     )
                 elif not ensemble_excluded and not agent.is_active:
                     agent.is_active = True
-                    agent.buy_threshold = max(0.70, default_thr)
+                    _thr_min = 0.70 if agent.market == "stock" else 0.10
+                    _thr_max = 0.70 if agent.market == "stock" else 0.52
+                    agent.buy_threshold = min(max(default_thr, _thr_min), _thr_max)
                     adjustments.append(
                         f"✅ {agent.agent_id}({agent.feature_set}): 재활성화 (승률 {agent.win_rate*100:.0f}%, 수익 {ret_pct:.1f}%)"
                     )
                 elif agent.is_active:
-                    # 활성 에이전트 임계값 최솟값 0.70 보장 (실증: buy_prob 0.7~0.8 밴드가 유일하게 EV 양수)
-                    if agent.buy_threshold < 0.70:
-                        agent.buy_threshold = 0.70
+                    # 주식: 0.70 최솟값 / 코인: 0.52 최댓값 보장
+                    _thr_min = 0.70 if agent.market == "stock" else 0.10
+                    _thr_max = 0.70 if agent.market == "stock" else 0.52
+                    if agent.buy_threshold < _thr_min:
+                        agent.buy_threshold = _thr_min
                         adjustments.append(
-                            f"⬆️ {agent.agent_id}({agent.feature_set}): 임계값→0.70 (하한 보정)"
+                            f"⬆️ {agent.agent_id}({agent.feature_set}): 임계값→{_thr_min:.2f} (하한 보정)"
+                        )
+                    elif agent.buy_threshold > _thr_max:
+                        agent.buy_threshold = _thr_max
+                        adjustments.append(
+                            f"⬇️ {agent.agent_id}({agent.feature_set}): 임계값→{_thr_max:.2f} (상한 보정)"
                         )
                     elif agent.total_trades >= 20 and ret_pct < -15:
-                        new_thr = min(round(agent.buy_threshold + 0.05, 4), 0.80)
+                        new_thr = min(round(agent.buy_threshold + 0.05, 4), _thr_max)
                         if new_thr > agent.buy_threshold:
                             agent.buy_threshold = new_thr
                             adjustments.append(
