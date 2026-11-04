@@ -238,7 +238,11 @@ def _compute_r_ratio(trades: list[dict]) -> float:
     return (sum(wins) / len(wins)) / (sum(losses) / len(losses))
 
 
-_DAILY_LOSS_LIMIT = 0.03  # 일일 손실 한도 3% (에이전트별 독립 서킷 브레이커)
+_DAILY_LOSS_LIMIT    = 0.03   # 일일 손실 한도 3% (에이전트별 독립 서킷 브레이커)
+_PORTFOLIO_KILL_LIMIT = 0.02  # market별 에이전트 평균 일일 손실 2% → BUY 전면 차단
+_FEE_COIN  = 0.003   # 업비트 왕복 테이커 0.1%×2 + 평균 슬리피지 0.1%
+_FEE_STOCK = 0.0023  # 한국 거래세 0.18% + 증권사 수수료 0.025%×2
+_ECE_THRESHOLD = 0.05  # ECE 드리프트 임계값 — 초과 시 재학습 플래그
 
 def _is_daily_loss_exceeded(agent) -> bool:
     """오늘 손실이 DAILY_LOSS_LIMIT(3%)를 넘으면 신규 매수 차단."""
@@ -249,6 +253,52 @@ def _is_daily_loss_exceeded(agent) -> bool:
         if t.get("traded_at", "")[:10] == kst_today and t.get("action") == "SELL"
     )
     return today_pnl < -_DAILY_LOSS_LIMIT
+
+
+def _is_portfolio_kill_switch(market: str) -> bool:
+    """같은 market 에이전트들의 오늘 실현 PnL 평균이 -PORTFOLIO_KILL_LIMIT 미만 → 신규 BUY 전면 차단.
+
+    코인/주식 market별로 분리해서 체크 — 코인 손실이 주식 거래를 차단하지 않는다.
+    에이전트가 2개 미만이면 체크하지 않는다 (통계 불충분).
+    """
+    from backend.ml.agents import AGENTS as _AGs, ENSEMBLE_AGENTS as _EAs
+    kst_today = datetime.now(KST).strftime("%Y-%m-%d")
+    pnls: list[float] = []
+    for a in list(_AGs.values()) + list(_EAs.values()):
+        if a.market != market:
+            continue
+        today_pnl = sum(
+            (t.get("profit_rate") or 0)
+            for t in a.recent_trades
+            if t.get("traded_at", "")[:10] == kst_today and t.get("action") == "SELL"
+        )
+        pnls.append(today_pnl)
+    if len(pnls) < 2:
+        return False
+    return (sum(pnls) / len(pnls)) < -_PORTFOLIO_KILL_LIMIT
+
+
+def _compute_ece(probs: list[float], actuals: list[int], n_bins: int = 10) -> float:
+    """Expected Calibration Error 계산.
+
+    probs: 예측 확률 목록, actuals: 실제 결과 (1=수익, 0=손실)
+    ECE = Σ(|avg_pred - avg_actual| × n_bin / n_total) across bins
+    """
+    import numpy as np
+    p = np.asarray(probs, dtype=float)
+    y = np.asarray(actuals, dtype=float)
+    n = len(p)
+    if n == 0:
+        return 0.0
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        mask = (p >= lo) & (p < hi)
+        cnt = mask.sum()
+        if cnt == 0:
+            continue
+        ece += (cnt / n) * abs(p[mask].mean() - y[mask].mean())
+    return float(ece)
 
 
 def _is_coin_night_risk() -> bool:
@@ -728,6 +778,15 @@ class TradingScheduler:
             self._send_daily_coin_report,
             CronTrigger(hour=6, minute=0, timezone=KST),
             id="daily_coin_report",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # ECE 드리프트 체크: 매일 05:55 KST (06:07 재학습 직전 — ECE 높은 에이전트 재학습 플래그)
+        self._scheduler.add_job(
+            self._check_ece_drift,
+            CronTrigger(hour=5, minute=55, timezone=KST),
+            id="ece_drift_check",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -2688,6 +2747,11 @@ class TradingScheduler:
             if _is_daily_loss_exceeded(agent):
                 sim_log.push(agent.agent_id, f"[서킷브레이커] {symbol} 오늘 손실 3% 초과 → 신규매수 차단", "WARN")
                 return
+            # 포트폴리오 kill switch: market별 에이전트 평균 일일 손실 2% 초과 시 BUY 전면 차단
+            if _is_portfolio_kill_switch(agent.market):
+                sim_log.push(agent.agent_id,
+                    f"[킬스위치] {symbol} {agent.market} 포트폴리오 일일 평균 손실 {_PORTFOLIO_KILL_LIMIT*100:.0f}% 초과 → BUY 차단", "WARN")
+                return
             # 코인: 매크로 이벤트 발표 ±2시간은 변동성 폭발 위험 → 신규 매수 차단
             if agent.market == "coin" and _is_high_risk_window():
                 sim_log.push(agent.agent_id, f"[이벤트회피] {symbol} 매수 차단 (매크로 발표 ±2시간)", "INFO")
@@ -2854,6 +2918,19 @@ class TradingScheduler:
                     return
             except Exception:
                 pass
+            # 거래비용 손익분기점: EV = prob×TP - (1-prob)×|SL| - 비용 > 0 보장
+            # 코인 비용: 왕복 테이커 0.2% + 슬리피지 0.1% = 0.3%
+            # 주식 비용: 거래세 0.18% + 수수료 왕복 0.05% = 0.23%
+            # break-even prob ≈ 0.38~0.39 (현재 BUY는 prob≥0.65 → 항상 EV 양수)
+            _fee_rate = _FEE_COIN if agent.market == "coin" else _FEE_STOCK
+            _sl_abs   = abs(settings.stop_loss_rate)   # 양수 (예: 0.02)
+            _tp_rate  = settings.take_profit_rate       # 양수 (예: 0.04)
+            _ev = prob * _tp_rate - (1 - prob) * _sl_abs - _fee_rate
+            if _ev < 0:
+                sim_log.push(agent.agent_id,
+                    f"[EV필터] {symbol} 기대EV={_ev*100:.3f}% < 0 (비용 미커버) → BUY 차단", "INFO")
+                _PENDING_BUYS.discard((agent.agent_id, symbol))
+                return
             # RVOL 필터: 거래량 1.5배 미만이면 포지션 50%로 줄임 (약한 신호 크기 축소)
             _vol_ratio = agent._last_vol_ratio
             _rvol_portion = 1.0 if _vol_ratio >= 1.5 else 0.5
@@ -3020,6 +3097,57 @@ class TradingScheduler:
             await funding_arb.update_collected_funding()
         except Exception:
             logger.exception("[FundingArb] 펀딩비 수취 업데이트 예외")
+
+    async def _check_ece_drift(self) -> None:
+        """60일 롤링 ECE(Expected Calibration Error) 드리프트 감지.
+
+        buy_prob 필드와 실제 수익(profit_rate>0=1)을 활용해 ECE 계산.
+        ECE > _ECE_THRESHOLD(0.05)인 에이전트 → needs_retrain=True 플래그.
+        매일 06:07 재학습 직전(05:55)에 실행 — 재학습 중에도 BUY는 계속됨.
+        샘플 30건 미만이면 체크 건너뜀 (통계 불충분).
+        """
+        from backend.ml.agents import AGENTS as _AGs, ENSEMBLE_AGENTS as _EAs
+        from backend.db.database import connect_db as _connect_db
+        import aiosqlite as _aiosqlite
+
+        cutoff = (datetime.now(KST) - timedelta(days=60)).isoformat()
+        all_agents = list(_AGs.values()) + list(_EAs.values())
+        flagged = 0
+
+        try:
+            async with _connect_db() as db:
+                db.row_factory = _aiosqlite.Row
+                async with db.execute(
+                    """SELECT agent_id, buy_prob, profit_rate FROM agent_trades
+                       WHERE action='SELL' AND traded_at>=? AND buy_prob>0
+                       ORDER BY traded_at DESC""",
+                    (cutoff,),
+                ) as cur:
+                    rows_all = await cur.fetchall()
+        except Exception as _e:
+            logger.warning("[ECE] DB 조회 실패: %s", _e)
+            return
+
+        from collections import defaultdict
+        agent_rows: dict[str, list] = defaultdict(list)
+        for r in rows_all:
+            agent_rows[r[0]].append(r)
+
+        for a in all_agents:
+            rows = agent_rows.get(a.agent_id, [])
+            if len(rows) < 30:
+                continue
+            probs   = [float(r[1]) for r in rows]
+            actuals = [1 if (r[2] or 0) > 0 else 0 for r in rows]
+            ece = _compute_ece(probs, actuals)
+            if ece > _ECE_THRESHOLD:
+                logger.warning("[ECE] %s ECE=%.3f > %.2f → 재학습 플래그", a.agent_id, ece, _ECE_THRESHOLD)
+                a.needs_retrain = True
+                flagged += 1
+            else:
+                logger.debug("[ECE] %s ECE=%.3f OK", a.agent_id, ece)
+
+        logger.info("[ECE] 드리프트 체크 완료 — 플래그 %d개 에이전트", flagged)
 
     async def _daily_retrain(self, market_filter: str = "all") -> None:
         """전 에이전트 재학습.
