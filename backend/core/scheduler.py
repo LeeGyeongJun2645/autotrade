@@ -3543,17 +3543,17 @@ class TradingScheduler:
                 ret_pct = agent.total_return * 100
                 default_thr = default_thresholds.get(agent.agent_id, 0.55)
 
-                # predict_ensemble 필터 조건과 동기화 — 실제 거래 참여 불가 에이전트 비활성화
+                # 자동 비활성화 조건 — 명백히 불량인 에이전트만 (임시 완화, 사용자 지시)
                 ensemble_excluded = (
-                    (agent.total_trades >= 5  and agent.win_rate < 0.38) or
-                    (agent.total_trades >= 10 and agent.total_return < -0.01)
+                    (agent.total_trades >= 30 and agent.win_rate < 0.25) or
+                    (agent.total_trades >= 30 and agent.total_return < -0.05)
                 )
 
                 if ensemble_excluded and agent.is_active:
                     agent.is_active = False
                     reason = (
-                        f"승률 {agent.win_rate*100:.0f}%<38%" if agent.win_rate < 0.38
-                        else f"수익률 {ret_pct:.1f}%<-1%"
+                        f"승률 {agent.win_rate*100:.0f}%<25%" if agent.win_rate < 0.25
+                        else f"수익률 {ret_pct:.1f}%<-5%"
                     )
                     adjustments.append(
                         f"⛔ {agent.agent_id}({agent.feature_set}): 비활성화 ({reason}, {agent.total_trades}건)"
@@ -3882,9 +3882,9 @@ class TradingScheduler:
     @staticmethod
     def _is_ensemble_active(a) -> bool:
         """predict_ensemble 필터 조건과 동일한 기준으로 에이전트 활성 여부 판단."""
-        if a.total_trades >= 5  and a.win_rate < 0.38:
+        if a.total_trades >= 30 and a.win_rate < 0.25:
             return False
-        if a.total_trades >= 10 and a.total_return < -0.01:
+        if a.total_trades >= 30 and a.total_return < -0.05:
             return False
         return True
 

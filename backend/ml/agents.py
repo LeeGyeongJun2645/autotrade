@@ -1948,6 +1948,9 @@ class SimAgent:
             if _bullish_candle and not _vol_ok and not _near_support and not _fib_support:
                 prob = round(prob * 0.85, 4)
 
+            # 패널티 하한: 복합 패널티가 중첩돼도 0.40 미만으로 하락 금지
+            prob = max(prob, 0.40)
+
         except Exception:
             pass
 
@@ -2558,10 +2561,9 @@ async def predict_ensemble(
         a for a in AGENTS.values()
         if a.market == market and a._model is not None
         and not a.agent_id.startswith("RL")  # RL 에이전트 제외 (EV 음수)
-        # WR<38% 차단 (기존 40% → 더 보수적, 5거래 이상 검증)
-        and not (a.total_trades >= 5 and a.win_rate < 0.38)
-        # 수익률 -1% 이하 차단 (기존 -2% → 강화)
-        and not (a.total_trades >= 10 and a.total_return < -0.01)
+        # 명백히 불량인 에이전트만 제외 — 임시 완화 (자동 비활성화 중단)
+        and not (a.total_trades >= 30 and a.win_rate < 0.25)
+        and not (a.total_trades >= 30 and a.total_return < -0.05)
     ]
     if not candidates:
         # 폴백: 수익률 기준만 유지, 모델 있는 에이전트 사용 (RL 제외 유지)
